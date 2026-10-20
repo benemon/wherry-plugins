@@ -3,14 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -176,7 +179,8 @@ func TestBuildJobFromRuntime(t *testing.T) {
 	if len(tasks) != 1 || tasks[0].Name != taskName || tasks[0].Driver != "raw_exec" || !reflect.DeepEqual(tasks[0].Config, runtime.Config) ||
 		*tasks[0].Resources.CPU != 100 || *tasks[0].Resources.MemoryMB != 64 ||
 		*tasks[0].LogConfig.MaxFiles != 3 || *tasks[0].LogConfig.MaxFileSizeMB != 10 ||
-		!reflect.DeepEqual(tasks[0].Env, map[string]string{"WHERRY_TEST_ENV": "from-runtime", "HOME": "${NOMAD_TASK_DIR}"}) {
+		!reflect.DeepEqual(tasks[0].Env, map[string]string{"WHERRY_TEST_ENV": "from-runtime", "HOME": "${NOMAD_TASK_DIR}",
+			"WHERRY_INPUT_DIR": "${NOMAD_TASK_DIR}/inputs", "WHERRY_OUTPUT_DIR": "${NOMAD_TASK_DIR}/outputs", "WHERRY_CREDENTIALS_DIR": "${NOMAD_SECRETS_DIR}/credentials"}) {
 		t.Fatalf("runtime not carried: %#v", tasks)
 	}
 	templates := tasks[0].Templates
@@ -748,6 +752,9 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	run := testRun("urls")
 	run.ID = "run-urls"
 	run.Git = &wherry.GitContext{URL: "https://git.example.test/org/private-repo.git", Ref: "main", Path: "repo"}
+	run.Inputs = []wherry.File{{Name: "data.csv", Data: []byte("input-content-never-in-urls")}}
+	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte("task-credential-never-in-urls")}}
+	const outputContent = "output-content-never-in-urls"
 	var mu sync.Mutex
 	var urls []string
 	registered := false
@@ -762,8 +769,13 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 		switch request.Method + " " + request.URL.Path {
 		case "PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1",
 			"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/agent", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/agent",
-			"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/git", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/git":
+			"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/git", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/git",
+			"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent":
 			_, _ = response.Write([]byte(`{}`))
+		case "GET /v1/client/fs/ls/alloc-urls":
+			fmt.Fprintf(response, `[{"Name":"report.md","IsDir":false,"Size":%d,"FileMode":"-rw-r--r--"}]`, len(outputContent))
+		case "GET /v1/client/fs/readat/alloc-urls":
+			_, _ = response.Write([]byte(outputContent))
 		case "DELETE /v1/job/agent-44575cf5b285-run-urls-t1":
 			_, _ = response.Write([]byte(`{"EvalID":""}`))
 		case "GET /v1/jobs":
@@ -781,7 +793,7 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 			}
 			_, _ = response.Write([]byte(`{"ID":"agent-44575cf5b285-run-urls-t1","Status":"dead","Stop":false,"TaskGroups":[{"Tasks":[{"Name":"agent","Driver":"raw_exec"},{"Name":"git","Driver":"raw_exec"}]}]}`))
 		case "GET /v1/vars":
-			_, _ = response.Write([]byte(`[{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/agent"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/git"}]`))
+			_, _ = response.Write([]byte(`[{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/agent"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/git"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1/agent"}]`))
 		case "PUT /v1/jobs":
 			registered = true
 			_, _ = response.Write([]byte(`{}`))
@@ -813,6 +825,10 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	if err := adapter.Stop(ctx, handle); err != nil {
 		t.Fatal(err)
 	}
+	outputs := make(chan wherry.Output, 1)
+	if err := adapter.Collect(ctx, handle, wherry.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || string((<-outputs).Data) != outputContent {
+		t.Fatalf("collect: %v", err)
+	}
 	if err := adapter.Release(ctx, run.ID, run.Turn); err != nil {
 		t.Fatal(err)
 	}
@@ -824,11 +840,11 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(urls) != 40 {
-		t.Fatalf("requests = %d %v, want dispatch and lookup with prompt delivery, stop, release, purge and sweep", len(urls), urls)
+	if len(urls) != 50 {
+		t.Fatalf("requests = %d %v, want dispatch and lookup with prompt delivery, stop, collect, release, purge and sweep", len(urls), urls)
 	}
 	for _, url := range urls {
-		for _, secret := range []string{token, string(run.Credential), string(run.Prompt), run.Git.URL, "private-repo"} {
+		for _, secret := range []string{token, string(run.Credential), string(run.Prompt), run.Git.URL, "private-repo", string(run.Inputs[0].Data), string(run.Credentials[0].Value), outputContent} {
 			if strings.Contains(url, secret) {
 				t.Fatalf("request URL %q contains %q", url, secret)
 			}
@@ -867,6 +883,8 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 	}
 	run := testRun("plaintext")
 	run.Git = &wherry.GitContext{URL: "https://git.example.test/org/private-repo.git", Ref: "main", Path: "repo"}
+	run.Inputs = []wherry.File{{Name: "data.csv", Data: []byte("input-content-never-in-the-job")}}
+	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte("task-credential-never-in-the-job")}}
 	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
 	if err != nil {
 		t.Fatal(err)
@@ -875,7 +893,8 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{string(run.Credential), string(run.Prompt), run.Git.URL} {
+	for _, secret := range []string{string(run.Credential), string(run.Prompt), run.Git.URL, string(run.Inputs[0].Data), string(run.Credentials[0].Value),
+		base64.StdEncoding.EncodeToString(run.Inputs[0].Data), base64.StdEncoding.EncodeToString(run.Credentials[0].Value)} {
 		if strings.Contains(string(encoded), secret) {
 			t.Fatalf("job JSON contains %q", secret)
 		}
@@ -1260,7 +1279,7 @@ func deletes(requests []string) []string {
 
 func TestDispatchFailureOutcomes(t *testing.T) {
 	const path = "/v1/var/nomad/jobs/agent-44575cf5b285-run-outcome-t1"
-	variables := []string{"DELETE " + path, "DELETE " + path + "/agent/agent", "DELETE " + path + "/agent/git"}
+	variables := []string{"DELETE " + path, "DELETE " + path + "/agent/agent", "DELETE " + path + "/agent/git", "DELETE " + path + "/agent"}
 	for _, test := range []struct {
 		name     string
 		routes   map[string]http.HandlerFunc
@@ -1324,7 +1343,7 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 
 func TestPurgeOfAbsentJobSucceeds(t *testing.T) {
 	const path = "/v1/var/nomad/jobs/agent-44575cf5b285-run-absent-t1"
-	variables := []string{"DELETE " + path, "DELETE " + path + "/agent/agent", "DELETE " + path + "/agent/git"}
+	variables := []string{"DELETE " + path, "DELETE " + path + "/agent/agent", "DELETE " + path + "/agent/git", "DELETE " + path + "/agent"}
 	for name, deregister := range map[string]http.HandlerFunc{
 		// Nomad 2.0.7 answers a purge of a job that does not exist with an empty evaluation.
 		"captured": serve([]byte(`{"EvalID":"","EvalCreateIndex":0,"JobModifyIndex":0,"VolumeEvalID":"","VolumeEvalIndex":0,"Index":0,"LastContact":0,"KnownLeader":false,"NextToken":""}`)),
@@ -1471,14 +1490,14 @@ func TestSweepPurgesJobsDeadPastTheGrace(t *testing.T) {
 		"DELETE /v1/job/" + mine:                              serve([]byte(`{"EvalID":""}`)),
 		"GET /v1/vars":                                        serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d}]`, otherPool, old)),
 	}
-	for _, suffix := range []string{"", "/agent/agent", "/agent/git"} {
+	for _, suffix := range []string{"", "/agent/agent", "/agent/git", "/agent"} {
 		routes["DELETE /v1/var/nomad/jobs/"+mine+suffix] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
 	}
 	adapter, requests := nomadServer(t, routes)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := deletes(requests()); len(got) != 4 || got[0] != "DELETE /v1/job/"+mine {
+	if got := deletes(requests()); len(got) != 5 || got[0] != "DELETE /v1/job/"+mine {
 		t.Fatalf("deletes %v, want only this pool's agent job dead past the grace purged with its variables", got)
 	}
 }
@@ -1573,5 +1592,382 @@ func TestSameRunInTwoPoolsRegistersTwoJobs(t *testing.T) {
 	defer mu.Unlock()
 	if len(registered) != 2 {
 		t.Fatalf("registered %v, want one job per pool", registered)
+	}
+}
+
+// collectServer is a Nomad whose allocation alloc-1 reports running to its first running reads, then ended, complete
+// unless ended says otherwise; it lists
+// its outputs as the captured listings, plus extra root entries, and reads each regular file as its content in files;
+// it records every path read.
+func collectServer(t *testing.T, running int, extra []map[string]any, files map[string]string, ended ...string) (*Adapter, func() []string, func() []string) {
+	t.Helper()
+	var listing []map[string]any
+	if err := json.Unmarshal(testdata(t, "outputs.ls.json"), &listing); err != nil {
+		t.Fatal(err)
+	}
+	root, err := json.Marshal(append(listing, extra...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var reads []string
+	adapter, requests := nomadServer(t, map[string]http.HandlerFunc{
+		"GET /v1/allocation/alloc-1": func(response http.ResponseWriter, _ *http.Request) {
+			mu.Lock()
+			status := "complete"
+			if len(ended) > 0 {
+				status = ended[0]
+			}
+			if running--; running >= 0 {
+				status = "running"
+			}
+			mu.Unlock()
+			fmt.Fprintf(response, `{"ID":"alloc-1","ClientStatus":%q}`, status)
+		},
+		"GET /v1/client/fs/ls/alloc-1": func(response http.ResponseWriter, request *http.Request) {
+			switch request.URL.Query().Get("path") {
+			case outputsDir:
+				_, _ = response.Write(root)
+			case outputsDir + "/sub":
+				_, _ = response.Write(testdata(t, "outputs-sub.ls.json"))
+			default:
+				http.Error(response, "no such file or directory", http.StatusNotFound)
+			}
+		},
+		"GET /v1/client/fs/readat/alloc-1": func(response http.ResponseWriter, request *http.Request) {
+			name := strings.TrimPrefix(request.URL.Query().Get("path"), outputsDir+"/")
+			mu.Lock()
+			reads = append(reads, name)
+			mu.Unlock()
+			_, _ = response.Write([]byte(files[name]))
+		},
+	})
+	return adapter, requests, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(reads)
+	}
+}
+
+var capturedFiles = map[string]string{"report.md": "hello\n", "sub/notes.txt": "nested\n"}
+
+func collectAll(adapter *Adapter, limits wherry.Limits) ([]wherry.Output, error) {
+	handle, _ := json.Marshal(handle{V: 1, Job: "job-1", Alloc: "alloc-1"})
+	outputs := make(chan wherry.Output, 64)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err := adapter.Collect(ctx, wherry.Handle{Data: handle}, limits, outputs)
+	close(outputs)
+	var all []wherry.Output
+	for output := range outputs {
+		all = append(all, output)
+	}
+	return all, err
+}
+
+var wide = wherry.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}
+
+// The listing is a capture of Nomad 2.0.7's allocation filesystem API; the device entry is Go's fs.FileMode.String,
+// which Nomad reports.
+func TestCollectReadsOnlyRegularFiles(t *testing.T) {
+	device := map[string]any{"Name": "tty", "IsDir": false, "Size": 0, "FileMode": (fs.ModeDevice | fs.ModeCharDevice | 0o620).String()}
+	adapter, _, reads := collectServer(t, 0, []map[string]any{device}, capturedFiles)
+	outputs, err := collectAll(adapter, wide)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type entry struct {
+		name string
+		mode fs.FileMode
+		data string
+		read bool
+	}
+	var got []entry
+	for _, output := range outputs {
+		got = append(got, entry{output.Name, output.Mode, string(output.Data), output.Data != nil})
+	}
+	want := []entry{
+		{"dirlink", fs.ModeSymlink, "", false}, {"empty", 0, "", true}, {"fifo", fs.ModeNamedPipe, "", false}, {"link", fs.ModeSymlink, "", false},
+		{"report.md", 0, "hello\n", true}, {"sub/notes.txt", 0, "nested\n", true}, {"tty", fs.ModeDevice | fs.ModeCharDevice, "", false},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("collected %+v, want %+v", got, want)
+	}
+	if got := reads(); !slices.Equal(got, []string{"report.md", "sub/notes.txt"}) {
+		t.Fatalf("read %v, want the non-empty regular files alone", got)
+	}
+}
+
+func TestCollectCountsTheTreeBeforeReading(t *testing.T) {
+	adapter, _, reads := collectServer(t, 0, nil, capturedFiles)
+	if _, err := collectAll(adapter, wherry.Limits{Files: 6, FileBytes: 1 << 20, TotalBytes: 1 << 20}); err == nil {
+		t.Fatal("collected a tree of 7 entries under a limit of 6")
+	}
+	if got := reads(); len(got) != 0 {
+		t.Fatalf("read %v before refusing the tree", got)
+	}
+	if _, err := collectAll(adapter, wherry.Limits{Files: 7, FileBytes: 1 << 20, TotalBytes: 1 << 20}); err != nil {
+		t.Fatalf("a tree of 7 entries under a limit of 7: %v", err)
+	}
+}
+
+func TestCollectLeavesFilesOverTheLimitsUnread(t *testing.T) {
+	for name, limits := range map[string]wherry.Limits{
+		"file":  {Files: 256, FileBytes: 6, TotalBytes: 1 << 20},
+		"total": {Files: 256, FileBytes: 1 << 20, TotalBytes: 6},
+	} {
+		t.Run(name, func(t *testing.T) {
+			adapter, _, reads := collectServer(t, 0, nil, capturedFiles)
+			outputs, err := collectAll(adapter, limits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			notes := outputs[slices.IndexFunc(outputs, func(output wherry.Output) bool { return output.Name == "sub/notes.txt" })]
+			if notes.Data != nil || notes.Size != 7 || !slices.Equal(reads(), []string{"report.md"}) {
+				t.Fatalf("notes %+v after reads %v; want it listed with its size and unread", notes, reads())
+			}
+		})
+	}
+}
+
+// Stop on Nomad returns before the allocation ends, so Collect waits for it within its context.
+func TestCollectWaitsForTheAllocationToEnd(t *testing.T) {
+	adapter, _, reads := collectServer(t, 2, nil, capturedFiles)
+	if outputs, err := collectAll(adapter, wide); err != nil || len(outputs) != 6 || !slices.Equal(reads(), []string{"report.md", "sub/notes.txt"}) {
+		t.Fatalf("collect = %d outputs, %v; want the outputs once the allocation ends", len(outputs), err)
+	}
+}
+
+func TestCollectRefusesARunningAllocation(t *testing.T) {
+	adapter, requests, _ := collectServer(t, 1000, nil, capturedFiles)
+	if _, err := collectAll(adapter, wide); err == nil || err.Error() != "the allocation is still running" {
+		t.Fatalf("collect from an allocation running past the context = %v; want still running", err)
+	}
+	if slices.ContainsFunc(requests(), func(request string) bool { return strings.Contains(request, "/fs/") }) {
+		t.Fatalf("requests %v touched the filesystem of a running allocation", requests())
+	}
+}
+
+func TestCollectRefusesALostAllocation(t *testing.T) {
+	adapter, requests, _ := collectServer(t, 0, nil, capturedFiles, "lost")
+	if _, err := collectAll(adapter, wide); err == nil || err.Error() != "the allocation was lost" {
+		t.Fatalf("collect from a lost allocation = %v", err)
+	}
+	if slices.ContainsFunc(requests(), func(request string) bool { return strings.Contains(request, "/fs/") }) {
+		t.Fatalf("requests %v touched the filesystem of a lost allocation", requests())
+	}
+}
+
+// Nomad 2.0.7 answers some failed reads with status 200 and the error as the body, as measured for a link that
+// escapes the allocation directory.
+func TestCollectRefusesABodyOfAnotherLength(t *testing.T) {
+	adapter, _, _ := collectServer(t, 0, nil, map[string]string{"report.md": "path escapes the alloc directory", "sub/notes.txt": "nested\n"})
+	if _, err := collectAll(adapter, wide); err == nil {
+		t.Fatal("collected a body whose length differs from the listing")
+	}
+}
+
+func TestCollectWithoutAnOutputsDirectory(t *testing.T) {
+	adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
+		"GET /v1/allocation/alloc-1": serve([]byte(`{"ID":"alloc-1","ClientStatus":"complete"}`)),
+		"GET /v1/client/fs/ls/alloc-1": func(response http.ResponseWriter, _ *http.Request) {
+			http.Error(response, "no such file or directory", http.StatusNotFound)
+		},
+	})
+	if outputs, err := collectAll(adapter, wide); err != nil || len(outputs) != 0 {
+		t.Fatalf("collect = %v, %v; want no outputs", outputs, err)
+	}
+}
+
+// fs.FileMode.String writes what Nomad's listing reports.
+func TestFileModeParsesWhatGoWrites(t *testing.T) {
+	for _, mode := range []fs.FileMode{0o644, fs.ModeDir | 0o755, fs.ModeSymlink | 0o777, fs.ModeNamedPipe | 0o600, fs.ModeSocket | 0o600,
+		fs.ModeDevice | 0o600, fs.ModeDevice | fs.ModeCharDevice | 0o620, fs.ModeSetuid | 0o755, fs.ModeDir | fs.ModeSticky | 0o777, fs.ModeIrregular} {
+		if got := fileMode(mode.String()); got.Type() != mode.Type() {
+			t.Errorf("fileMode(%q) type %v, want %v", mode.String(), got.Type(), mode.Type())
+		}
+	}
+	if fileMode("rw") != fs.ModeIrregular {
+		t.Error("a mode too short to parse is not irregular")
+	}
+}
+
+func TestDispatchRefusesInputsOverTheVariableLimit(t *testing.T) {
+	adapter, requests := nomadServer(t, nil)
+	run := testRun("too-large")
+	// 8 bytes of name and 65532 of base64: four over the limit.
+	run.Inputs = []wherry.File{{Name: "edge.bin", Data: make([]byte, 49149)}}
+	outcome, _, err := adapter.Dispatch(context.Background(), run)
+	var tooLarge *wherry.InputTooLargeError
+	if outcome != wherry.OutcomeNothingCreated || !errors.As(err, &tooLarge) || tooLarge.Name != "edge.bin" {
+		t.Fatalf("dispatch = %v, %v; want nothing created and edge.bin too large", outcome, err)
+	}
+	if got := requests(); len(got) != 0 {
+		t.Fatalf("requests %v before refusing the inputs", got)
+	}
+}
+
+func scriptAdapter(t *testing.T, script string) (*Adapter, context.Context) {
+	t.Helper()
+	adapter, ctx := devAdapter(t)
+	adapter.runtime = Runtime{Driver: "raw_exec", Config: map[string]any{"command": "/bin/sh", "args": []any{"-c", script}}}
+	return adapter, ctx
+}
+
+// runToOutputs dispatches run, follows it to its end, stops it and collects its outputs by name.
+func runToOutputs(t *testing.T, adapter *Adapter, ctx context.Context, run wherry.Run) map[string]wherry.Output {
+	t.Helper()
+	handle := dispatch(t, adapter, ctx, run)
+	output(t, ctx, adapter, handle)
+	if err := adapter.Stop(ctx, handle); err != nil {
+		t.Fatal(err)
+	}
+	outputs := make(chan wherry.Output, 64)
+	if err := adapter.Collect(ctx, handle, wide, outputs); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	close(outputs)
+	byName := map[string]wherry.Output{}
+	for output := range outputs {
+		byName[output.Name] = output
+	}
+	return byName
+}
+
+func TestInputsCredentialsAndOutputsOnNomad(t *testing.T) {
+	adapter, ctx := scriptAdapter(t, `set -e
+o="$WHERRY_OUTPUT_DIR"
+mkdir -p "$o/sub"
+cp "$WHERRY_INPUT_DIR/bin.dat" "$o/bin.dat"
+cp "$WHERRY_CREDENTIALS_DIR/id_token" "$o/token.copy"
+ls -a "$WHERRY_INPUT_DIR" > "$o/inputs.txt"
+env > "$o/env.txt"
+echo nested > "$o/sub/notes.txt"
+: > "$o/empty"
+ln -s ../../secrets/credentials/id_token "$o/link"
+mkfifo "$o/fifo"
+echo '{"type":"result","result":"done"}'`)
+	data := make([]byte, 0, 259)
+	for b := range 256 {
+		data = append(data, byte(b))
+	}
+	data = append(data, 0, 0xff, 0xfe)
+	const secret = "task-credential-value-on-nomad"
+	run := testRun("files")
+	run.Inputs = []wherry.File{{Name: "bin.dat", Data: data}, {Name: "empty.txt"}}
+	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_token", Value: []byte(secret)}}
+	outputs := runToOutputs(t, adapter, ctx, run)
+	if got := outputs["bin.dat"].Data; !bytes.Equal(got, data) {
+		t.Fatalf("binary input came back as %x, want %x", got, data)
+	}
+	if got := string(outputs["token.copy"].Data); got != secret {
+		t.Fatalf("credential file held %q", got)
+	}
+	if got := string(outputs["inputs.txt"].Data); got != ".\n..\nbin.dat\nempty.txt\n" {
+		t.Fatalf("input directory held %q, want the inputs alone", got)
+	}
+	if env := string(outputs["env.txt"].Data); strings.Contains(env, secret) || !strings.Contains(env, "WHERRY_CREDENTIALS_DIR=") || !strings.Contains(env, "/agent/secrets/credentials\n") {
+		t.Fatalf("environment %q carries the credential or lacks the credentials directory", env)
+	}
+	for name, want := range map[string]wherry.Output{
+		"sub/notes.txt": {Name: "sub/notes.txt", Size: 7, Data: []byte("nested\n")},
+		"empty":         {Name: "empty", Data: []byte{}},
+		"link":          {Name: "link", Size: int64(len("../../secrets/credentials/id_token")), Mode: fs.ModeSymlink},
+		"fifo":          {Name: "fifo", Mode: fs.ModeNamedPipe},
+	} {
+		if got := outputs[name]; !reflect.DeepEqual(got, want) {
+			t.Errorf("output %s = %+v, want %+v", name, got, want)
+		}
+	}
+}
+
+// The variable limit is measured: an input that fills it exactly arrives intact; one byte more is refused.
+func TestInputAtTheVariableLimitOnNomad(t *testing.T) {
+	adapter, ctx := scriptAdapter(t, `mkdir -p "$WHERRY_OUTPUT_DIR"; cp "$WHERRY_INPUT_DIR/edge.bin" "$WHERRY_OUTPUT_DIR/edge.bin"; echo '{"type":"result","result":"done"}'`)
+	run := testRun("edge")
+	// 8 bytes of name and 65528 of base64 fill the 64 KiB exactly.
+	data := bytes.Repeat([]byte{0xa5, 0x00, 0xff}, 49146/3)
+	run.Inputs = []wherry.File{{Name: "edge.bin", Data: data}}
+	if got := runToOutputs(t, adapter, ctx, run)["edge.bin"].Data; !bytes.Equal(got, data) {
+		t.Fatalf("an input filling the variable came back as %d bytes, want %d", len(got), len(data))
+	}
+	over := testRun("over")
+	over.Inputs = []wherry.File{{Name: "edge.bin", Data: append(data, 0)}}
+	cleanupRun(t, adapter, over)
+	var tooLarge *wherry.InputTooLargeError
+	if outcome, _, err := adapter.Dispatch(ctx, over); outcome != wherry.OutcomeNothingCreated || !errors.As(err, &tooLarge) {
+		t.Fatalf("dispatch of one byte more = %v, %v; want nothing created", outcome, err)
+	}
+	if job, err := adapter.Lookup(ctx, over.ID, over.Turn); err != nil || job.State != wherry.JobAbsent {
+		t.Fatalf("lookup after the refusal = %+v, %v; want absent", job, err)
+	}
+}
+
+func TestDirectoriesFollowTheDriver(t *testing.T) {
+	for driver, want := range map[string]wherry.Directories{
+		"exec":     {Input: "/local/inputs", Output: "/local/outputs", Credentials: "/secrets/credentials"},
+		"podman":   {Input: "/local/inputs", Output: "/local/outputs", Credentials: "/secrets/credentials"},
+		"raw_exec": {Input: "${NOMAD_TASK_DIR}/inputs", Output: "${NOMAD_TASK_DIR}/outputs", Credentials: "${NOMAD_SECRETS_DIR}/credentials"},
+	} {
+		config := testConfig("http://127.0.0.1:1")
+		config.Runtime.Driver = driver
+		adapter, err := build(config, testPool, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := adapter.Directories(); got != want {
+			t.Errorf("%s directories %+v, want %+v", driver, got, want)
+		}
+		run := testRun("directories")
+		job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolves := strings.Contains(*job.TaskGroups[0].Tasks[0].Templates[0].EmbeddedTmpl, `env "NOMAD_TASK_DIR"`); resolves == (driver != "raw_exec") {
+			t.Errorf("%s prompt template resolves the task's variables: %v", driver, resolves)
+		}
+	}
+}
+
+// Under raw_exec the task sees host paths, which the prompt template writes in place of the reported variables.
+func TestPromptCarriesTheTasksAbsolutePathsOnNomad(t *testing.T) {
+	adapter, ctx := scriptAdapter(t, `cat "$NOMAD_TASK_DIR/prompt.txt"; printf '\n%s %s\n' "$WHERRY_INPUT_DIR" "$WHERRY_CREDENTIALS_DIR"`)
+	run := testRun("paths")
+	directories := adapter.Directories()
+	run.Prompt = []byte("inputs " + directories.Input + "/data.csv credentials " + directories.Credentials + "/id_token")
+	lines := collect(t, ctx, adapter, dispatch(t, adapter, ctx, run))
+	if len(lines) != 2 {
+		t.Fatalf("task printed %d lines", len(lines))
+	}
+	input, credentials, _ := strings.Cut(string(lines[1].Data), " ")
+	if want := "inputs " + input + "/data.csv credentials " + credentials + "/id_token"; string(lines[0].Data) != want || !filepath.IsAbs(input) || !filepath.IsAbs(credentials) {
+		t.Fatalf("prompt %q, want %q with the task's absolute directories", lines[0].Data, want)
+	}
+}
+
+func TestBuildJobDeliversFilesThroughTemplates(t *testing.T) {
+	adapter, err := build(testConfig("http://127.0.0.1:1"), testPool, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := testRun("files")
+	run.Inputs = []wherry.File{{Name: "data.csv"}}
+	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519"}}
+	path := adapter.variablePath(run.ID, run.Turn)
+	job, err := adapter.buildJob(run, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	templates := map[string]string{}
+	for _, template := range job.TaskGroups[0].Tasks[0].Templates {
+		templates[*template.DestPath] = *template.EmbeddedTmpl
+	}
+	for destination, want := range map[string]string{
+		"local/inputs/data.csv":                       `{{ with nomadVar "` + path + `/agent" }}{{ (index . "data.csv").Value | base64Decode }}{{ end }}`,
+		"${NOMAD_SECRETS_DIR}/credentials/id_ed25519": `{{ with nomadVar "` + path + `" }}{{ (index . "credentials/id_ed25519").Value | base64Decode }}{{ end }}`,
+	} {
+		if got, ok := templates[destination]; !ok || got != want {
+			t.Errorf("template for %s = %q, %v; want %q", destination, got, ok, want)
+		}
 	}
 }

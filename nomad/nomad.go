@@ -5,14 +5,19 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"maps"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	wherry "github.com/benemon/wherry/adapter"
@@ -26,17 +31,27 @@ const (
 	gitTaskName       = "git"
 	formatCRI         = "cri"
 	maxPending        = 1 << 20
-	stopGrace         = 15 * time.Second
-	followPoll        = time.Second
-	cleanupWait       = 10 * time.Second
+	// maxVariable is the size Nomad allows a variable's item keys and values together, measured on Nomad 2.0.7.
+	maxVariable = 64 << 10
+	outputsDir  = taskName + "/local/outputs"
+	stopGrace   = 15 * time.Second
+	followPoll  = time.Second
+	// collectPoll separates the reads of an allocation that Collect waits on, since Stop returns before it ends.
+	collectPoll = 500 * time.Millisecond
+	cleanupWait = 10 * time.Second
 )
 
 // The suffixes turn a run variable path into a task's own variable path; among the job's tasks,
-// Nomad's implicit workload policy lets only that task read it.
+// Nomad's implicit workload policy lets only that task read it. The policy reaches no deeper path, so a turn's
+// inputs share the group's variable, which every task of the job can read.
 const (
 	promptSuffix = "/" + taskName + "/" + taskName
 	gitSuffix    = "/" + taskName + "/" + gitTaskName
+	inputsSuffix = "/" + taskName
 )
+
+// credentialItem is the run variable's item holding the value of the task credential delivered as file.
+func credentialItem(file string) string { return "credentials/" + file }
 
 // cloneScript reads the git context from a rendered file, so no task value becomes shell syntax or
 // meets Nomad interpolation; the receiver admits no ref or path starting with a dash. Its last
@@ -132,12 +147,26 @@ func New(config Config, pool string, client *api.Client) (*Adapter, error) {
 		client: client, namespace: config.Namespace, credentialEnv: config.CredentialEnv, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters,
 		prefix:      prefix,
 		agentJob:    regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+$`),
-		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+)(` + regexp.QuoteMeta(promptSuffix) + `|` + regexp.QuoteMeta(gitSuffix) + `)?$`),
+		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+)(` + regexp.QuoteMeta(promptSuffix) + `|` + regexp.QuoteMeta(gitSuffix) + `|` + regexp.QuoteMeta(inputsSuffix) + `)?$`),
 	}, nil
 }
 
 // Git reports that the adapter delivers a run's git context, through its prestart git task.
 func (adapter *Adapter) Git() bool { return true }
+
+// isolated are the drivers whose task sees its task directory at /local and its secrets at /secrets.
+var isolated = []string{"docker", "exec", "java", "podman"}
+
+// Directories reports /local and /secrets paths for a driver that isolates the task's filesystem. Any other driver's
+// task sees host paths that depend on its allocation, so the adapter reports Nomad's variables for them, which the
+// prompt's template resolves from the task's environment.
+func (adapter *Adapter) Directories() wherry.Directories {
+	task, secrets := "${NOMAD_TASK_DIR}", "${NOMAD_SECRETS_DIR}"
+	if slices.Contains(isolated, adapter.runtime.Driver) {
+		task, secrets = "/local", "/secrets"
+	}
+	return wherry.Directories{Input: task + "/inputs", Output: task + "/outputs", Credentials: secrets + "/credentials"}
+}
 
 // Ready reports whether some ready, eligible node in the adapter's node pool
 // and datacenters has the runtime's driver healthy.
@@ -165,21 +194,38 @@ func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 }
 
 // Dispatch starts one run idempotently and returns once its task has started or ended. It removes the
-// turn's material only when Info confirms that no job exists.
+// turn's material only when Info confirms that no job exists. Inputs and task credentials travel base64-encoded,
+// which the templates decode, so binary files arrive intact.
 func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Outcome, wherry.Handle, error) {
 	path := adapter.variablePath(run.ID, run.Turn)
 	job, err := adapter.buildJob(run, path)
 	if err != nil {
 		return wherry.OutcomeNothingCreated, wherry.Handle{}, err
 	}
+	inputs, size := map[string]string{}, 0
+	for _, input := range run.Inputs {
+		inputs[input.Name] = base64.StdEncoding.EncodeToString(input.Data)
+		if size += len(input.Name) + len(inputs[input.Name]); size > maxVariable {
+			return wherry.OutcomeNothingCreated, wherry.Handle{}, &wherry.InputTooLargeError{Name: input.Name}
+		}
+	}
 	jobID := *job.ID
 	items := map[string]string{"prompt": string(run.Prompt)}
 	if run.Credential != nil {
 		items["credential"] = string(run.Credential)
 	}
+	for _, secret := range run.Credentials {
+		items[credentialItem(secret.File)] = base64.StdEncoding.EncodeToString(secret.Value)
+	}
 	variable := &api.Variable{Namespace: adapter.namespace, Path: path, Items: items}
 	if _, _, err := adapter.client.Variables().Update(variable, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
 		return adapter.notStarted(ctx, run, redacted("write", path, err))
+	}
+	if len(inputs) > 0 {
+		inputsPath := path + inputsSuffix
+		if _, _, err := adapter.client.Variables().Update(&api.Variable{Namespace: adapter.namespace, Path: inputsPath, Items: inputs}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+			return adapter.notStarted(ctx, run, redacted("write", inputsPath, err))
+		}
 	}
 	if run.Git != nil {
 		gitItems := map[string]string{"git_url": run.Git.URL, "git_ref": run.Git.Ref, "git_path": run.Git.Path}
@@ -388,17 +434,37 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 		env = make(map[string]string)
 	}
 	env["HOME"] = "${NOMAD_TASK_DIR}"
+	env["WHERRY_INPUT_DIR"] = "${NOMAD_TASK_DIR}/inputs"
+	env["WHERRY_OUTPUT_DIR"] = "${NOMAD_TASK_DIR}/outputs"
+	env["WHERRY_CREDENTIALS_DIR"] = "${NOMAD_SECRETS_DIR}/credentials"
 	promptPath := path
 	if run.Git != nil {
 		promptPath = path + promptSuffix
 	}
+	prompt := `{{ .prompt }}`
+	if !slices.Contains(isolated, runtime.Driver) {
+		prompt = `{{ .prompt.Value | replaceAll "${NOMAD_TASK_DIR}" (env "NOMAD_TASK_DIR") | replaceAll "${NOMAD_SECRETS_DIR}" (env "NOMAD_SECRETS_DIR") }}`
+	}
 	templates := []*api.Template{
-		{EmbeddedTmpl: new(`{{ with nomadVar "` + promptPath + `" }}{{ .prompt }}{{ end }}`), DestPath: new("local/prompt.txt"), ChangeMode: new("noop")},
+		{EmbeddedTmpl: new(`{{ with nomadVar "` + promptPath + `" }}` + prompt + `{{ end }}`), DestPath: new("local/prompt.txt"), ChangeMode: new("noop")},
 	}
 	if run.Credential != nil {
 		templates = append(templates, &api.Template{
 			EmbeddedTmpl: new(`{{ with nomadVar "` + path + `" }}` + adapter.credentialEnv + `={{ .credential }}{{ end }}`),
 			DestPath:     new("${NOMAD_SECRETS_DIR}/wherry.env"), Envvars: new(true), ChangeMode: new("noop"),
+		})
+	}
+	// The core admits only names of letters, digits, '.', '_' and '-', so none ends a template string or path.
+	for _, input := range run.Inputs {
+		templates = append(templates, &api.Template{
+			EmbeddedTmpl: new(`{{ with nomadVar "` + path + inputsSuffix + `" }}{{ (index . "` + input.Name + `").Value | base64Decode }}{{ end }}`),
+			DestPath:     new("local/inputs/" + input.Name), ChangeMode: new("noop"),
+		})
+	}
+	for _, secret := range run.Credentials {
+		templates = append(templates, &api.Template{
+			EmbeddedTmpl: new(`{{ with nomadVar "` + path + `" }}{{ (index . "` + credentialItem(secret.File) + `").Value | base64Decode }}{{ end }}`),
+			DestPath:     new("${NOMAD_SECRETS_DIR}/credentials/" + secret.File), ChangeMode: new("noop"),
 		})
 	}
 	tasks := []*api.Task{{
@@ -741,14 +807,131 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 	return err
 }
 
-// Release deletes the per-turn variables holding the credential, the prompt and the git context.
+// Release deletes the per-turn variables holding the credentials, the prompt, the inputs and the git context.
 func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) error {
 	return adapter.release(ctx, adapter.jobID(runID, turn))
 }
 
 func (adapter *Adapter) release(ctx context.Context, jobID string) error {
 	path := jobVariablePrefix + jobID
-	return errors.Join(adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+promptSuffix), adapter.deleteVariable(ctx, path+gitSuffix))
+	return errors.Join(adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+promptSuffix), adapter.deleteVariable(ctx, path+gitSuffix),
+		adapter.deleteVariable(ctx, path+inputsSuffix))
+}
+
+// Collect waits until the allocation is terminal, for as long as ctx allows, then lists the outputs directory through
+// the allocation filesystem API. The listing's modes are lstat's, so a link is never followed; the API's stat and
+// read follow links and block on a FIFO, so only regular files within the limits are read, and only after the whole
+// tree is listed and counted.
+func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limits wherry.Limits, outputs chan<- wherry.Output) error {
+	handle, err := decodeHandle(encoded)
+	if err != nil {
+		return err
+	}
+	alloc, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
+	for err == nil && !alloc.ClientTerminalStatus() {
+		select {
+		case <-ctx.Done():
+			return errors.New("the allocation is still running")
+		case <-time.After(collectPoll):
+		}
+		alloc, _, err = adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
+	}
+	if err != nil {
+		return err
+	}
+	// A lost allocation's client is gone, and its filesystem with it.
+	if alloc.ClientStatus == api.AllocClientStatusLost {
+		return errors.New("the allocation was lost")
+	}
+	var found []wherry.Output
+	pending, listed := []string{""}, 0
+	for len(pending) > 0 {
+		dir := pending[0]
+		pending = pending[1:]
+		entries, _, err := adapter.client.AllocFS().List(alloc, path.Join(outputsDir, dir), (&api.QueryOptions{}).WithContext(ctx))
+		if notFound(err) && dir == "" {
+			return nil
+		}
+		if err != nil {
+			return redacted("list", outputsDir, err)
+		}
+		for _, entry := range entries {
+			name, mode := path.Join(dir, entry.Name), fileMode(entry.FileMode)
+			if listed++; listed > limits.Files {
+				return fmt.Errorf("the outputs directory holds more than %d entries", limits.Files)
+			}
+			if mode.IsDir() {
+				pending = append(pending, name)
+				continue
+			}
+			found = append(found, wherry.Output{Name: name, Size: entry.Size, Mode: mode.Type()})
+		}
+	}
+	slices.SortFunc(found, func(a, b wherry.Output) int { return strings.Compare(a.Name, b.Name) })
+	var total int64
+	for _, output := range found {
+		if output.Mode == 0 && output.Size <= limits.FileBytes && total+output.Size <= limits.TotalBytes {
+			total += output.Size
+			if output.Data, err = adapter.read(ctx, alloc, output.Name, output.Size); err != nil {
+				return err
+			}
+		}
+		select {
+		case outputs <- output:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// read reads a listed regular file of size bytes; the API answers some failures with an error text as the body, so a
+// body of any other length fails the read.
+func (adapter *Adapter) read(ctx context.Context, alloc *api.Allocation, name string, size int64) ([]byte, error) {
+	if size == 0 {
+		return []byte{}, nil
+	}
+	body, err := adapter.client.AllocFS().ReadAt(alloc, path.Join(outputsDir, name), 0, size, (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return nil, redacted("read", outputsDir, err)
+	}
+	defer body.Close()
+	data, err := io.ReadAll(io.LimitReader(body, size+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) != size {
+		return nil, errors.New("an output read back at another length than its listing")
+	}
+	return data, nil
+}
+
+// fileMode parses the type letters Go's fs.FileMode.String writes before the permission bits, as the allocation
+// filesystem API reports them; an unparsable mode is irregular.
+func fileMode(text string) fs.FileMode {
+	if len(text) < 9 {
+		return fs.ModeIrregular
+	}
+	var mode fs.FileMode
+	for _, letter := range text[:len(text)-9] {
+		switch letter {
+		case 'd':
+			mode |= fs.ModeDir
+		case 'L':
+			mode |= fs.ModeSymlink
+		case 'D':
+			mode |= fs.ModeDevice
+		case 'p':
+			mode |= fs.ModeNamedPipe
+		case 'S':
+			mode |= fs.ModeSocket
+		case 'c':
+			mode |= fs.ModeCharDevice
+		case '?':
+			mode |= fs.ModeIrregular
+		}
+	}
+	return mode
 }
 
 // Purge deregisters the turn's job with purge, then deletes its variables.

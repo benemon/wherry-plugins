@@ -124,9 +124,14 @@ task `agent`, built from the adapter's `runtime`, and the prestart task
 `run_id`, `turn`, `attempt`, `adapter` and `agent`, which the receiver
 reads to decide whether to adopt the job.
 
-The prompt, the credential and the git context travel in Nomad variables
+The prompt, the credentials and the git context travel in Nomad variables
 under `nomad/jobs/agent-<pool>-<run>-t<turn>`, which the job's own workload
-identity reads. The plugin deletes them when the turn ends. Every 30
+identity reads. The turn's input files travel in the job's group variable,
+`nomad/jobs/agent-<pool>-<run>-t<turn>/agent`, one item per file holding
+its base64 encoding, since Nomad's implicit workload policy reads no deeper
+path. Nomad caps a variable at 64 KiB of item names and values together,
+so a turn's inputs hold about 48 KiB; Dispatch refuses a turn over that,
+naming the input, and creates nothing. The plugin deletes them when the turn ends. Every 30
 seconds it also deletes the variables of jobs that have stopped, and of
 jobs never registered within 10 minutes, and purges agent jobs that have
 been dead for 10 minutes. `<pool>` is the first 12 hexadecimal digits of
@@ -150,8 +155,41 @@ The agent task receives:
 - the prompt in `$NOMAD_TASK_DIR/prompt.txt`;
 - the credential in the environment variable `credential_env` names, when
   the adapter delivers one;
+- each input file in `$NOMAD_TASK_DIR/inputs`, rendered by a template that
+  decodes its base64, so binary files arrive intact;
+- each task credential as a file in `$NOMAD_SECRETS_DIR/credentials`,
+  rendered the same way;
+- `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR` and `WHERRY_CREDENTIALS_DIR` set
+  to `$NOMAD_TASK_DIR/inputs`, `$NOMAD_TASK_DIR/outputs` and
+  `$NOMAD_SECRETS_DIR/credentials`, and the same paths written into the
+  prompt. For the `docker`, `exec`, `java` and `podman` drivers, whose task
+  sees its directories at `/local` and `/secrets`, those are
+  `/local/inputs`, `/local/outputs` and `/secrets/credentials`. For any other
+  driver the paths are on the host and depend on the allocation, so the
+  plugin reports `${NOMAD_TASK_DIR}` and `${NOMAD_SECRETS_DIR}` forms and the
+  prompt's template replaces them with the task's own values;
 - `HOME` set to the task directory;
 - the runtime's `env`, driver `config` and `resources`.
+
+The plugin collects outputs from `$NOMAD_TASK_DIR/outputs` through the
+allocation filesystem API, once the allocation is terminal. Stopping a job
+returns before its allocation ends, so the plugin reads the allocation
+every 500 ms until it is terminal, within the receiver's 2-minute
+collection bound, and reports the outputs not collected when it is still
+running at the bound. It lists the
+whole tree first, and refuses it, reading nothing, when it holds more
+entries than the receiver's limit. The listing's modes come from `lstat`,
+so a link shows as a link; the API's stat and read follow links, and both
+block on a FIFO, so the plugin reads only the regular files the listing
+shows within the limits, and refuses a read whose length differs from the
+listing, since the API answers some failed reads with status 200 and the
+error as the body. The agent creates the outputs directory; without one
+there are no outputs. The listing shows no link count, so a hard link to
+a credential file reads as a regular file; on the macOS dev agent such a
+link is created and read. Nomad's source mounts the secrets directory as a
+tmpfs on Linux clients that run as root, where the link would cross
+filesystems; that is not measured here. The receiver's redaction of
+delivered credential values covers both cases.
 
 The plugin reads the agent task's standard output. For the `podman` driver
 it reads the logs in CRI format, and the git task gets `entrypoint` and
