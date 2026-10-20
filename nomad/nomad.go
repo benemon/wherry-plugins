@@ -66,6 +66,7 @@ type Runtime struct {
 	Config    map[string]any    `json:"config"`
 	Env       map[string]string `json:"env"`
 	Resources Resources         `json:"resources"`
+	User      string            `json:"user"`
 }
 
 // Resources are the agent task's resources; unset values take Nomad's defaults.
@@ -82,6 +83,8 @@ type Adapter struct {
 	runtime       Runtime
 	nodePool      string
 	datacenters   []string
+	// uid and gid own the task's credential files when the runtime's user is numeric.
+	uid, gid *int
 	// prefix starts every job ID of the adapter's pool; agentJob matches those IDs and runVariable the variables of
 	// those jobs, including per-task variables one level below a group's.
 	prefix      string
@@ -90,7 +93,8 @@ type Adapter struct {
 }
 
 var (
-	envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	envName     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	runtimeUser = regexp.MustCompile(`^(?:[a-z_][a-z0-9_-]*|([1-9][0-9]*)(?::([1-9][0-9]*))?)$`)
 	// sweepGrace covers Dispatch's window between writing the variable and registering the job.
 	sweepGrace = 10 * time.Minute
 )
@@ -113,6 +117,23 @@ func New(config Config, pool string, client *api.Client) (*Adapter, error) {
 	if config.Runtime.Driver == "" {
 		return nil, errors.New("runtime requires a driver")
 	}
+	var uid, gid *int
+	if user := config.Runtime.User; user != "" {
+		match := runtimeUser.FindStringSubmatch(user)
+		if match == nil {
+			return nil, errors.New("runtime user must be a user name or UID[:GID] other than root")
+		}
+		// The client resolves a name, so the plugin can give credential files only a numeric owner.
+		if match[1] != "" {
+			id, err := strconv.ParseUint(match[1], 10, 32)
+			group, groupErr := strconv.ParseUint(cmp.Or(match[2], match[1]), 10, 32)
+			if err != nil || groupErr != nil {
+				return nil, errors.New("runtime user IDs must fit 32 bits")
+			}
+			u, g := int(id), int(group)
+			uid, gid = &u, &g
+		}
+	}
 	datacenters := config.Datacenters
 	if len(datacenters) == 0 {
 		datacenters = []string{"*"}
@@ -123,6 +144,7 @@ func New(config Config, pool string, client *api.Client) (*Adapter, error) {
 	prefix := jobPrefix + hex.EncodeToString(sum[:])[:12] + "-"
 	return &Adapter{
 		client: client, namespace: config.Namespace, credentialEnv: config.CredentialEnv, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters,
+		uid: uid, gid: gid,
 		prefix:      prefix,
 		agentJob:    regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+$`),
 		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+)(` + regexp.QuoteMeta(inputsSuffix) + `(/[a-z]+)?)?$`),
@@ -345,10 +367,14 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 		})
 	}
 	for _, secret := range run.Credentials {
-		templates = append(templates, &api.Template{
+		template := &api.Template{
 			EmbeddedTmpl: new(`{{ with nomadVar "` + path + `" }}{{ (index . "` + credentialItem(secret.File) + `").Value | base64Decode }}{{ end }}`),
 			DestPath:     new("${NOMAD_SECRETS_DIR}/credentials/" + secret.File), ChangeMode: new("noop"),
-		})
+		}
+		if adapter.uid != nil {
+			template.Uid, template.Gid, template.Perms = adapter.uid, adapter.gid, new("0600")
+		}
+		templates = append(templates, template)
 	}
 	// go-getter follows redirects and Nomad 2.0.7 has no option that stops it, so the checksum alone holds a
 	// redirected fetch to the object. archive=false keeps it from unpacking an object whose name ends like an archive.
@@ -360,7 +386,7 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 		})
 	}
 	tasks := []*api.Task{{
-		Name: taskName, Driver: runtime.Driver, Config: maps.Clone(runtime.Config), Env: env,
+		Name: taskName, Driver: runtime.Driver, User: runtime.User, Config: maps.Clone(runtime.Config), Env: env,
 		Resources: &api.Resources{CPU: runtime.Resources.CPU, MemoryMB: runtime.Resources.MemoryMB},
 		LogConfig: &api.LogConfig{MaxFiles: new(3), MaxFileSizeMB: new(10)},
 		Templates: templates, Artifacts: artifacts,

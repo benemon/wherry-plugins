@@ -229,8 +229,15 @@ func TestPerTurnJobIDs(t *testing.T) {
 
 func TestNewValidatesConfig(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
-		"driver":         func(config *Config) { config.Runtime = Runtime{} },
-		"credential env": func(config *Config) { config.CredentialEnv = `X={{ .prompt }}` },
+		"driver":           func(config *Config) { config.Runtime = Runtime{} },
+		"credential env":   func(config *Config) { config.CredentialEnv = `X={{ .prompt }}` },
+		"negative uid":     func(config *Config) { config.Runtime.User = "-1" },
+		"gid not a number": func(config *Config) { config.Runtime.User = "1001:x" },
+		"user name":        func(config *Config) { config.Runtime.User = "Bad Name" },
+		"root uid":         func(config *Config) { config.Runtime.User = "0" },
+		"leading zero":     func(config *Config) { config.Runtime.User = "0001" },
+		"uid over 32 bits": func(config *Config) { config.Runtime.User = "4294967296" },
+		"uid over an int":  func(config *Config) { config.Runtime.User = "99999999999999999999" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := testConfig("http://127.0.0.1:1")
@@ -239,6 +246,66 @@ func TestNewValidatesConfig(t *testing.T) {
 				t.Fatal("invalid config accepted")
 			}
 		})
+	}
+}
+
+func TestBuildJobRunsAsTheRuntimeUser(t *testing.T) {
+	for user, owner := range map[string]*[2]int{"": nil, "agent": nil, "1001": {1001, 1001}, "1001:2002": {1001, 2002}} {
+		t.Run(user, func(t *testing.T) {
+			config := testConfig("http://127.0.0.1:1")
+			config.Runtime.User = user
+			adapter, err := build(config, testPool, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := testRun("user")
+			run.Inputs = []wherry.File{{Name: "data.csv"}}
+			run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519"}, {Name: "token", File: "token"}}
+			job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+			if err != nil {
+				t.Fatal(err)
+			}
+			task := job.TaskGroups[0].Tasks[0]
+			if task.User != user {
+				t.Fatalf("task user %q, want %q", task.User, user)
+			}
+			credentials := 0
+			for _, template := range task.Templates {
+				if !strings.HasPrefix(*template.DestPath, "${NOMAD_SECRETS_DIR}/credentials/") || owner == nil {
+					if template.Uid != nil || template.Gid != nil || template.Perms != nil {
+						t.Errorf("template for %s sets an owner or mode", *template.DestPath)
+					}
+					continue
+				}
+				credentials++
+				if template.Uid == nil || template.Gid == nil || template.Perms == nil || *template.Uid != owner[0] || *template.Gid != owner[1] || *template.Perms != "0600" {
+					t.Errorf("template for %s = uid %s gid %s perms %s, want %d:%d 0600", *template.DestPath, show(template.Uid), show(template.Gid), show(template.Perms), owner[0], owner[1])
+				}
+			}
+			if owner != nil && credentials != len(run.Credentials) {
+				t.Fatalf("%d credential templates, want %d", credentials, len(run.Credentials))
+			}
+		})
+	}
+}
+
+// The alloc fs API refuses the secrets directory, so the task lists its credential, with ls's trailing attribute mark.
+// raw_exec resolves the task user by name, so the task runs as the client's user.
+func TestCredentialFileOwnerAndModeOnNomad(t *testing.T) {
+	_, ctx := devAdapter(t)
+	config := testConfig(os.Getenv("WHERRY_NOMAD_DEV_ADDR"))
+	config.Runtime.Config = map[string]any{"command": "/bin/sh", "args": []any{"-c", `ls -ln "$WHERRY_CREDENTIALS_DIR/id_key"`}}
+	config.Runtime.User = fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	adapter, err := build(config, testPool, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.runtime.User = ""
+	run := testRun("owner")
+	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_key", Value: []byte("key")}}
+	listed := strings.Fields(output(t, ctx, adapter, dispatch(t, adapter, ctx, run)))
+	if want := []string{"-rw-------", strconv.Itoa(os.Getuid()), strconv.Itoa(os.Getgid())}; len(listed) < 4 || !strings.HasPrefix(listed[0], want[0]) || listed[2] != want[1] || listed[3] != want[2] {
+		t.Fatalf("credential file listed as %q, want mode and owner %q", listed, want)
 	}
 }
 
@@ -1964,4 +2031,12 @@ echo '{"type":"result","result":"ok"}'`
 	if n := strings.Count(string(patch.Data), "\nSubject: [PATCH "); n != 2 {
 		t.Fatalf("changes.patch holds %d patches, want 2:\n%s", n, patch.Data)
 	}
+}
+
+// show prints a template field's value, or nil.
+func show[T any](value *T) string {
+	if value == nil {
+		return "nil"
+	}
+	return fmt.Sprint(*value)
 }
