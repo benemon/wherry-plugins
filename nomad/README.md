@@ -159,6 +159,23 @@ The agent task receives:
   the adapter delivers one;
 - each input file in `$NOMAD_TASK_DIR/inputs`, rendered by a template that
   decodes its base64, so binary files arrive intact;
+- each S3 input in `$NOMAD_TASK_DIR/inputs`, fetched by an `artifact` of
+  the agent task from the presigned URL the receiver passes, with
+  `options.checksum` `sha256:<hex>`, `options.archive` `false` and mode
+  `file`. Nomad fetches it before the task starts and verifies its SHA-256
+  once the download ends. The checksum does not bound the transfer: the
+  Nomad client's `artifact.http_max_size` is the only limit on how much a
+  fetch reads. `archive=false` keeps it from unpacking an
+  input whose name ends like an archive. A fetch that fails or does not
+  verify fails the task before it starts, and the plugin reports the job
+  never started with class `fetch`, which the receiver ends
+  `TASK_STATE_FAILED`. Measured on Nomad 2.0.7: the fetcher follows
+  redirects and no artifact option stops it, so the checksum alone holds a
+  redirected fetch to the object. The URL is the artifact's source for the
+  job's lifetime and appears in the task event of a failed fetch, so anyone
+  who can read the job can read it until it expires; purging the job
+  removes it. Each Nomad client reaches the endpoint and trusts its
+  certificate through its system roots;
 - each task credential as a file in `$NOMAD_SECRETS_DIR/credentials`,
   rendered the same way, with Nomad's default template mode, 0644. `ssh`
   refuses a private key that others can read when the agent's user owns
@@ -201,7 +218,9 @@ so a link shows as a link; the API's stat and read follow links, and both
 block on a FIFO, so the plugin reads only the regular files the listing
 shows within the limits, and refuses a read whose length differs from the
 listing, since the API answers some failed reads with status 200 and the
-error as the body. The agent creates the outputs directory; without one
+error as the body. An output the receiver streams, an S3 output, it
+streams as the receiver reads it, at most the size the listing shows; the
+receiver's upload fails when the length differs. The agent creates the outputs directory; without one
 there are no outputs. The listing shows no link count, so a hard link to
 a credential file reads as a regular file; on the macOS dev agent such a
 link is created and read. Nomad's source mounts the secrets directory as a

@@ -350,11 +350,21 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 			DestPath:     new("${NOMAD_SECRETS_DIR}/credentials/" + secret.File), ChangeMode: new("noop"),
 		})
 	}
+	// Nomad's go-getter verifies each fetch's SHA-256, which fixes its size too. It follows redirects, and Nomad 2.0.7
+	// has no setting that stops it, so a redirect is held to the content's hash alone. archive=false keeps it from
+	// unpacking an object whose name ends like an archive.
+	var artifacts []*api.TaskArtifact
+	for _, fetch := range run.Fetches {
+		artifacts = append(artifacts, &api.TaskArtifact{
+			GetterSource: new(fetch.URL), GetterOptions: map[string]string{"checksum": "sha256:" + fetch.SHA256, "archive": "false"},
+			GetterMode: new("file"), RelativeDest: new("local/inputs/" + fetch.Name),
+		})
+	}
 	tasks := []*api.Task{{
 		Name: taskName, Driver: runtime.Driver, Config: maps.Clone(runtime.Config), Env: env,
 		Resources: &api.Resources{CPU: runtime.Resources.CPU, MemoryMB: runtime.Resources.MemoryMB},
 		LogConfig: &api.LogConfig{MaxFiles: new(3), MaxFileSizeMB: new(10)},
-		Templates: templates,
+		Templates: templates, Artifacts: artifacts,
 	}}
 	return &api.Job{
 		ID: new(jobID), Name: new(jobID), Namespace: new(adapter.namespace), Type: new(api.JobTypeBatch),
@@ -431,9 +441,10 @@ func started(state *api.TaskState) bool {
 
 // failureClasses maps the task events that end a task before it starts to Terminal.Class.
 var failureClasses = map[string]string{
-	api.TaskDriverFailure:    "driver",
-	api.TaskSetupFailure:     "setup",
-	api.TaskFailedValidation: "validation",
+	api.TaskDriverFailure:          "driver",
+	api.TaskSetupFailure:           "setup",
+	api.TaskFailedValidation:       "validation",
+	api.TaskArtifactDownloadFailed: wherry.ClassFetch,
 }
 
 // terminalOf reads the agent task's final state; the class is that of its last failure event.
@@ -668,7 +679,7 @@ func (adapter *Adapter) release(ctx context.Context, jobID string) error {
 // Collect waits until the allocation is terminal, for as long as ctx allows, then lists the outputs directory through
 // the allocation filesystem API. The listing's modes are lstat's, so a link is never followed; the API's stat and
 // read follow links and block on a FIFO, so only regular files within the limits are read, and only after the whole
-// tree is listed and counted.
+// tree is listed and counted. A regular file the limits stream is read as the receiver of its Body reads it.
 func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limits wherry.Limits, outputs chan<- wherry.Output) error {
 	handle, err := decodeHandle(encoded)
 	if err != nil {
@@ -717,7 +728,14 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 	slices.SortFunc(found, func(a, b wherry.Output) int { return strings.Compare(a.Name, b.Name) })
 	var total int64
 	for _, output := range found {
-		if output.Mode == 0 && output.Size <= limits.FileBytes && total+output.Size <= limits.TotalBytes {
+		switch {
+		case output.Mode == 0 && slices.Contains(limits.Stream, output.Name):
+			if output.Size <= limits.StreamBytes {
+				if output.Body, err = adapter.open(ctx, alloc, output.Name, output.Size); err != nil {
+					return err
+				}
+			}
+		case output.Mode == 0 && output.Size <= limits.FileBytes && total+output.Size <= limits.TotalBytes:
 			total += output.Size
 			if output.Data, err = adapter.read(ctx, alloc, output.Name, output.Size); err != nil {
 				return err
@@ -726,6 +744,9 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 		select {
 		case outputs <- output:
 		case <-ctx.Done():
+			if output.Body != nil {
+				output.Body.Close()
+			}
 			return ctx.Err()
 		}
 	}
@@ -751,6 +772,18 @@ func (adapter *Adapter) read(ctx context.Context, alloc *api.Allocation, name st
 		return nil, errors.New("an output read back at another length than its listing")
 	}
 	return data, nil
+}
+
+// open streams the first size bytes of a listed regular file; the receiver of the Output checks the length it reads.
+func (adapter *Adapter) open(ctx context.Context, alloc *api.Allocation, name string, size int64) (io.ReadCloser, error) {
+	if size == 0 {
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	body, err := adapter.client.AllocFS().ReadAt(alloc, path.Join(outputsDir, name), 0, size, (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return nil, redacted("read", outputsDir, err)
+	}
+	return body, nil
 }
 
 // fileMode parses the type letters Go's fs.FileMode.String writes before the permission bits, as the allocation
