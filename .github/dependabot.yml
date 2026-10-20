@@ -15,3 +15,7 @@ updates:
     groups:
       go-nomad:
         patterns: ["*"]
+    ignore:
+      # nomad/api publishes no module tags, so it is pinned at a
+      # pseudo-version dependabot cannot resolve; bump it by hand.
+      - dependency-name: github.com/hashicorp/nomad/api
