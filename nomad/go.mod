@@ -2,7 +2,10 @@ module github.com/benemon/wherry-plugins/nomad
 
 go 1.27
 
-require github.com/hashicorp/nomad/api v0.0.0-20261016150620-df630b26e78a
+require (
+	github.com/benemon/wherry/adapter v0.1.0-rc.1
+	github.com/hashicorp/nomad/api v0.0.0-20261016150620-df630b26e78a
+)
 
 require (
 	github.com/fatih/color v1.13.0 // indirect
@@ -19,9 +22,9 @@ require (
 	github.com/mattn/go-isatty v0.0.17 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/oklog/run v1.1.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect

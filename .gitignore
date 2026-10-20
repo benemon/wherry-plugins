@@ -1,0 +1,4 @@
+/dist/
+/wherry-plugin-nomad
+go.work
+go.work.sum
