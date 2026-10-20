@@ -309,6 +309,30 @@ proxy variables pass through as the operator sets them. This protects an
 agent that follows its prompt. An agent that runs commands of its own can
 undo this.
 
+## Metrics
+
+The plugin speaks adapter protocol version 4, and a receiver of another
+protocol version refuses it, so upgrade it with the receiver. For each
+adapter it reports these families, which the receiver serves on its
+`/metrics` with the adapter's name as `adapter`:
+
+| Family | Type | Labels | Counts |
+| --- | --- | --- | --- |
+| `wherry_adapter_platform_errors_total` | counter | `class` | failed Nomad API calls |
+| `wherry_adapter_cleanup_pending` | gauge | none | dead agent jobs the latest sweep left |
+| `wherry_adapter_sweep_deletions_total` | counter | `kind` | jobs a sweep purged (`job`) and variables it deleted (`variable`) |
+| `wherry_adapter_placement_seconds` | histogram | none | time from a Dispatch that registers the job to the plugin seeing its agent task started |
+
+An API call's class comes from its status code: 401 and 403 are `denied`,
+409 `conflict`, 408 and 504 `timeout`, and other 5xx codes `unavailable`. A
+call that cannot connect is `unavailable`, one that runs past its deadline
+`timeout`, and any other failure `other`. A 404, which the plugin reads as
+absence, and a call the receiver cancels count nothing.
+
+A dead job counts as pending while it is inside the 10-minute
+[sweep](#sweep) grace or its purge fails. Dispatch polls the allocation
+every 2 seconds, which bounds the precision of placement times.
+
 ## Agent network reach
 
 The operator guide's

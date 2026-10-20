@@ -2040,3 +2040,102 @@ func show[T any](value *T) string {
 	}
 	return fmt.Sprint(*value)
 }
+
+// samples returns the adapter's samples by family and label value.
+func samples(t *testing.T, adapter *Adapter) map[string]wherry.Sample {
+	t.Helper()
+	reported, err := adapter.Metrics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]wherry.Sample{}
+	for _, sample := range reported {
+		byName[sample.Family+"/"+sample.Labels["class"]+sample.Labels["kind"]] = sample
+	}
+	return byName
+}
+
+func TestAPIErrorsAreClassifiedByStatus(t *testing.T) {
+	for code, class := range map[int]string{
+		http.StatusUnauthorized: "denied", http.StatusForbidden: "denied", http.StatusConflict: "conflict",
+		http.StatusInternalServerError: "unavailable", http.StatusServiceUnavailable: "unavailable",
+		http.StatusGatewayTimeout: "timeout", http.StatusBadRequest: "other", http.StatusNotFound: "",
+	} {
+		adapter, _ := nomadServer(t, map[string]http.HandlerFunc{"GET /v1/nodes": func(response http.ResponseWriter, _ *http.Request) {
+			http.Error(response, "no", code)
+		}})
+		if _, err := adapter.Ready(context.Background()); err == nil {
+			t.Fatalf("ready answered %d without an error", code)
+		}
+		var counted []string
+		for name, sample := range samples(t, adapter) {
+			if sample.Family == "wherry_adapter_platform_errors_total" {
+				counted = append(counted, fmt.Sprintf("%s=%v", name, sample.Value))
+			}
+		}
+		want := []string(nil)
+		if class != "" {
+			want = []string{"wherry_adapter_platform_errors_total/" + class + "=1"}
+		}
+		if !slices.Equal(counted, want) {
+			t.Fatalf("status %d counted %v; want %v", code, counted, want)
+		}
+	}
+}
+
+func TestUnreachableNomadIsUnavailable(t *testing.T) {
+	adapter, err := build(testConfig("http://127.0.0.1:1"), testPool, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Ready(context.Background()); err == nil {
+		t.Fatal("ready reached a closed port")
+	}
+	if sample := samples(t, adapter)["wherry_adapter_platform_errors_total/unavailable"]; sample.Value != 1 {
+		t.Fatalf("unavailable errors %v; want 1", sample.Value)
+	}
+}
+
+func TestSweepReportsDeletionsAndPendingJobs(t *testing.T) {
+	old, recent := time.Now().Add(-2*sweepGrace).UnixNano(), time.Now().UnixNano()
+	const dead, gone = poolPrefix + "old-t1", poolPrefix + "gone-t1"
+	routes := map[string]http.HandlerFunc{
+		"GET /v1/jobs":                                        serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d},{"ID":%q,"Status":"dead","SubmitTime":%d}]`, dead, old, poolPrefix+"recent-t1", recent)),
+		"GET /v1/job/" + dead + "/allocations":                serve([]byte(`[]`)),
+		"GET /v1/job/" + poolPrefix + "recent-t1/allocations": serve([]byte(`[]`)),
+		"DELETE /v1/job/" + dead:                              serve([]byte(`{"EvalID":""}`)),
+		"GET /v1/vars":                                        serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d}]`, gone, old)),
+		"GET /v1/job/" + gone:                                 jobNotFound,
+	}
+	for _, path := range []string{dead, dead + "/agent", gone} {
+		routes["DELETE /v1/var/nomad/jobs/"+path] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
+	}
+	adapter, _ := nomadServer(t, routes)
+	if err := adapter.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := samples(t, adapter)
+	if got["wherry_adapter_cleanup_pending/"].Value != 1 || got["wherry_adapter_sweep_deletions_total/job"].Value != 1 || got["wherry_adapter_sweep_deletions_total/variable"].Value != 1 {
+		t.Fatalf("samples %+v; want one pending job, one job and one variable deleted", got)
+	}
+}
+
+func TestDispatchReportsPlacement(t *testing.T) {
+	const job = poolPrefix + "run-placed-t1"
+	routes := map[string]http.HandlerFunc{
+		"PUT /v1/var/nomad/jobs/" + job:       serve([]byte(`{}`)),
+		"GET /v1/job/" + job:                  jobNotFound,
+		"PUT /v1/jobs":                        serve([]byte(`{"EvalID":"eval-1","EvalCreateIndex":10,"JobModifyIndex":10}`)),
+		"GET /v1/job/" + job + "/allocations": serve([]byte(`[{"ID":"alloc-1","ClientStatus":"running","TaskStates":{"agent":{"State":"running","StartedAt":"2026-10-20T00:00:00Z"}}}]`)),
+	}
+	adapter, _ := nomadServer(t, routes)
+	run := testRun("placed")
+	run.ID = "run-placed"
+	if outcome, _, err := adapter.Dispatch(context.Background(), run); err != nil || outcome != wherry.OutcomeCreated {
+		t.Fatalf("dispatch = %v, %v", outcome, err)
+	}
+	placement := samples(t, adapter)["wherry_adapter_placement_seconds/"].Histogram
+	if placement.Count != 1 || len(placement.Buckets) != len(wherry.PlacementBuckets) || placement.Buckets[len(placement.Buckets)-1] != 1 {
+		t.Fatalf("placement %+v; want one observation over the placement buckets", placement)
+	}
+}
