@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -175,12 +176,14 @@ func TestBuildJobFromRuntime(t *testing.T) {
 		t.Fatalf("retries not forced off: groups=%#v", job.TaskGroups)
 	}
 	runtime := testConfig("").Runtime
+	wantEnv := maps.Clone(wherry.AgentEnvironment)
+	maps.Copy(wantEnv, map[string]string{"WHERRY_TEST_ENV": "from-runtime", "HOME": "${NOMAD_TASK_DIR}",
+		"WHERRY_INPUT_DIR": "${NOMAD_TASK_DIR}/inputs", "WHERRY_OUTPUT_DIR": "${NOMAD_TASK_DIR}/outputs", "WHERRY_CREDENTIALS_DIR": "${NOMAD_SECRETS_DIR}/credentials"})
 	tasks := job.TaskGroups[0].Tasks
 	if len(tasks) != 1 || tasks[0].Name != taskName || tasks[0].Driver != "raw_exec" || !reflect.DeepEqual(tasks[0].Config, runtime.Config) ||
 		*tasks[0].Resources.CPU != 100 || *tasks[0].Resources.MemoryMB != 64 ||
 		*tasks[0].LogConfig.MaxFiles != 3 || *tasks[0].LogConfig.MaxFileSizeMB != 10 ||
-		!reflect.DeepEqual(tasks[0].Env, map[string]string{"WHERRY_TEST_ENV": "from-runtime", "HOME": "${NOMAD_TASK_DIR}",
-			"WHERRY_INPUT_DIR": "${NOMAD_TASK_DIR}/inputs", "WHERRY_OUTPUT_DIR": "${NOMAD_TASK_DIR}/outputs", "WHERRY_CREDENTIALS_DIR": "${NOMAD_SECRETS_DIR}/credentials"}) {
+		!reflect.DeepEqual(tasks[0].Env, wantEnv) {
 		t.Fatalf("runtime not carried: %#v", tasks)
 	}
 	templates := tasks[0].Templates
@@ -748,10 +751,8 @@ func closeAndRead(lines chan wherry.Line) []wherry.Line {
 
 func TestSecretsNeverInRequestURLs(t *testing.T) {
 	const token = "nomad-token-secret"
-	const commit = "0123456789abcdef0123456789abcdef01234567"
 	run := testRun("urls")
 	run.ID = "run-urls"
-	run.Git = &wherry.GitContext{URL: "https://git.example.test/org/private-repo.git", Ref: "main", Path: "repo"}
 	run.Inputs = []wherry.File{{Name: "data.csv", Data: []byte("input-content-never-in-urls")}}
 	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte("task-credential-never-in-urls")}}
 	const outputContent = "output-content-never-in-urls"
@@ -768,8 +769,6 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 		}
 		switch request.Method + " " + request.URL.Path {
 		case "PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1",
-			"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/agent", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/agent",
-			"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/git", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/git",
 			"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent":
 			_, _ = response.Write([]byte(`{}`))
 		case "GET /v1/client/fs/ls/alloc-urls":
@@ -780,31 +779,23 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 			_, _ = response.Write([]byte(`{"EvalID":""}`))
 		case "GET /v1/jobs":
 			_, _ = response.Write([]byte(`[{"ID":"agent-44575cf5b285-run-urls-t1","Status":"dead","SubmitTime":0}]`))
-		case "GET /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1":
-			_ = json.NewEncoder(response).Encode(&api.Variable{Path: "nomad/jobs/agent-44575cf5b285-run-urls-t1", Items: map[string]string{"prompt": string(run.Prompt)}})
-		case "GET /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/git":
-			_ = json.NewEncoder(response).Encode(&api.Variable{Path: "nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/git", Items: map[string]string{
-				"git_url": run.Git.URL, "git_ref": run.Git.Ref, "git_path": run.Git.Path,
-			}})
 		case "GET /v1/job/agent-44575cf5b285-run-urls-t1":
 			if !registered {
 				http.Error(response, "job not found", http.StatusNotFound)
 				return
 			}
-			_, _ = response.Write([]byte(`{"ID":"agent-44575cf5b285-run-urls-t1","Status":"dead","Stop":false,"TaskGroups":[{"Tasks":[{"Name":"agent","Driver":"raw_exec"},{"Name":"git","Driver":"raw_exec"}]}]}`))
+			_, _ = response.Write([]byte(`{"ID":"agent-44575cf5b285-run-urls-t1","Status":"dead","Stop":false,"TaskGroups":[{"Tasks":[{"Name":"agent","Driver":"raw_exec"}]}]}`))
 		case "GET /v1/vars":
-			_, _ = response.Write([]byte(`[{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/agent"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1/agent/git"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1/agent"}]`))
+			_, _ = response.Write([]byte(`[{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1/agent"}]`))
 		case "PUT /v1/jobs":
 			registered = true
 			_, _ = response.Write([]byte(`{}`))
 		case "GET /v1/job/agent-44575cf5b285-run-urls-t1/allocations":
-			_, _ = response.Write([]byte(`[{"ID":"alloc-urls","ClientStatus":"complete","TaskStates":{"git":{"State":"dead"}}}]`))
+			_, _ = response.Write([]byte(`[{"ID":"alloc-urls","ClientStatus":"complete"}]`))
 		case "GET /v1/allocation/alloc-urls":
 			_, _ = response.Write([]byte(`{"ID":"alloc-urls","ClientStatus":"complete"}`))
 		case "GET /v1/node/":
 			http.Error(response, "node not found", http.StatusNotFound)
-		case "GET /v1/client/fs/logs/alloc-urls":
-			_ = json.NewEncoder(response).Encode(&api.StreamFrame{Data: []byte("/alloc/repo\n" + commit + "\n")})
 		default:
 			http.Error(response, "unexpected request", http.StatusInternalServerError)
 		}
@@ -816,10 +807,10 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	}
 	ctx := context.Background()
 	_, handle, err := adapter.Dispatch(ctx, run)
-	if err != nil || handle.Commit != commit {
+	if err != nil {
 		t.Fatalf("dispatch = %#v, %v", handle, err)
 	}
-	if found, err := adapter.Lookup(ctx, run.ID, run.Turn); err != nil || found.Handle.Commit != commit {
+	if found, err := adapter.Lookup(ctx, run.ID, run.Turn); err != nil || found.State != wherry.JobNeverStarted {
 		t.Fatalf("lookup = %#v, %v", found, err)
 	}
 	if err := adapter.Stop(ctx, handle); err != nil {
@@ -840,11 +831,11 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(urls) != 50 {
-		t.Fatalf("requests = %d %v, want dispatch and lookup with prompt delivery, stop, collect, release, purge and sweep", len(urls), urls)
+	if len(urls) != 27 {
+		t.Fatalf("requests = %d %v, want dispatch, lookup, stop, collect, release, purge and sweep", len(urls), urls)
 	}
 	for _, url := range urls {
-		for _, secret := range []string{token, string(run.Credential), string(run.Prompt), run.Git.URL, "private-repo", string(run.Inputs[0].Data), string(run.Credentials[0].Value), outputContent} {
+		for _, secret := range []string{token, string(run.Credential), string(run.Prompt), string(run.Inputs[0].Data), string(run.Credentials[0].Value), outputContent} {
 			if strings.Contains(url, secret) {
 				t.Fatalf("request URL %q contains %q", url, secret)
 			}
@@ -882,7 +873,6 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("plaintext")
-	run.Git = &wherry.GitContext{URL: "https://git.example.test/org/private-repo.git", Ref: "main", Path: "repo"}
 	run.Inputs = []wherry.File{{Name: "data.csv", Data: []byte("input-content-never-in-the-job")}}
 	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte("task-credential-never-in-the-job")}}
 	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
@@ -893,7 +883,7 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{string(run.Credential), string(run.Prompt), run.Git.URL, string(run.Inputs[0].Data), string(run.Credentials[0].Value),
+	for _, secret := range []string{string(run.Credential), string(run.Prompt), string(run.Inputs[0].Data), string(run.Credentials[0].Value),
 		base64.StdEncoding.EncodeToString(run.Inputs[0].Data), base64.StdEncoding.EncodeToString(run.Credentials[0].Value)} {
 		if strings.Contains(string(encoded), secret) {
 			t.Fatalf("job JSON contains %q", secret)
@@ -1001,155 +991,39 @@ func TestSweepIgnoresNonRunVariables(t *testing.T) {
 	}
 }
 
-// bareRepository creates a bare repository with two commits and returns its file URL and the
-// commits, oldest first. The URL is a test-only stand-in for the https and ssh URLs that
-// the receiver admits.
-func bareRepository(t *testing.T) (string, []string) {
-	t.Helper()
-	dir := t.TempDir()
-	work := dir + "/work"
-	git := func(args ...string) string {
-		t.Helper()
-		command := exec.Command("git", append([]string{"-c", "user.name=wherry", "-c", "user.email=wherry@example.test", "-c", "init.defaultBranch=main"}, args...)...)
-		output, err := command.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, output)
-		}
-		return strings.TrimSpace(string(output))
-	}
-	git("init", "-q", work)
-	var commits []string
-	for _, content := range []string{"first-readme", "second-readme"} {
-		if err := os.WriteFile(work+"/README", []byte(content+"\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		git("-C", work, "add", "README")
-		git("-C", work, "commit", "-q", "-m", content)
-		commits = append(commits, git("-C", work, "rev-parse", "HEAD"))
-	}
-	git("clone", "-q", "--bare", work, dir+"/repo.git")
-	return "file://" + dir + "/repo.git", commits
-}
-
-func gitRun(adapter *Adapter, name, script, url, ref string) wherry.Run {
-	run := scriptRun(adapter, name, script)
-	run.Git = &wherry.GitContext{URL: url, Ref: ref, Path: "src/repo"}
-	return run
-}
-
-func TestDispatchClonesGitContext(t *testing.T) {
-	adapter, ctx := devAdapter(t)
-	url, commits := bareRepository(t)
-	script := `cat "$NOMAD_TASK_DIR/prompt.txt"; echo; echo "readme=$(cat "$NOMAD_ALLOC_DIR/src/repo/README")"; echo "head=$(git -C "$NOMAD_ALLOC_DIR/src/repo" rev-parse HEAD)"; echo '{"type":"result","result":"ok"}'`
-	for ref, want := range map[string]struct{ commit, readme string }{
-		"main":     {commits[1], "second-readme"},
-		commits[0]: {commits[0], "first-readme"},
-	} {
-		t.Run(ref, func(t *testing.T) {
-			run := gitRun(adapter, "git-clone", script, url, ref)
-			handle := dispatch(t, adapter, ctx, run)
-			if handle.Commit != want.commit {
-				t.Fatalf("handle commit %q, want %q", handle.Commit, want.commit)
-			}
-			var got []string
-			for _, line := range collect(t, ctx, adapter, handle) {
-				got = append(got, string(line.Data))
-			}
-			alloc, _, err := adapter.client.Allocations().Info(decoded(t, handle).Alloc, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			line := fmt.Sprintf("The git repository %s at %s is checked out in ", url, ref)
-			if len(got) != 5 || got[0] != "hello-prompt" || !strings.HasPrefix(got[1], line) || !strings.HasSuffix(got[1], alloc.ID+"/alloc/src/repo at commit "+want.commit+".") {
-				t.Fatalf("prompt is not the run's prompt and one repository line: %q", got)
-			}
-			if got[2] != "readme="+want.readme || got[3] != "head="+want.commit {
-				t.Fatalf("agent task did not see the checkout: %q", got)
-			}
-			job, _, err := adapter.client.Jobs().Info(decoded(t, handle).Job, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tasks := job.TaskGroups[0].Tasks; len(tasks) != 2 || tasks[1].Name != gitTaskName || tasks[1].Lifecycle == nil ||
-				tasks[1].Lifecycle.Hook != api.TaskLifecycleHookPrestart || tasks[1].Lifecycle.Sidecar || tasks[1].Driver != "raw_exec" {
-				t.Fatalf("job tasks %#v, want the agent and a prestart git task", tasks)
-			}
-		})
-	}
-}
-
-func TestCloneUsesStrictHostKeyChecking(t *testing.T) {
+func TestJobHoldsOnlyTheAgentTask(t *testing.T) {
 	adapter, err := build(testConfig("http://127.0.0.1:1"), testPool, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := testRun("strict")
-	adapter.runtime.Env = map[string]string{"GIT_SSH_COMMAND": "ssh -o StrictHostKeyChecking=accept-new"}
-	run.Git = &wherry.GitContext{URL: "ssh://git@git.example.test/org/repo.git", Ref: "main", Path: "repo"}
+	run := testRun("one-task")
 	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tasks := job.TaskGroups[0].Tasks
-	if len(tasks) != 2 || tasks[1].Name != gitTaskName {
-		t.Fatalf("job tasks %#v, want the agent and the git task", tasks)
+	if groups := job.TaskGroups; len(groups) != 1 || len(groups[0].Tasks) != 1 || groups[0].Tasks[0].Name != taskName || groups[0].Tasks[0].Lifecycle != nil {
+		t.Fatalf("job task groups %#v, want the agent task alone", groups)
 	}
-	if got := tasks[1].Env["GIT_SSH_COMMAND"]; got != "ssh -o StrictHostKeyChecking=yes -o BatchMode=yes" {
-		t.Fatalf("git task GIT_SSH_COMMAND = %q, want strict host key checking", got)
-	}
-	encoded, err := json.Marshal(tasks[1])
+}
+
+// The agent clones a git input itself, so the plugin's code names no git.
+func TestPluginCodeNamesNoGit(t *testing.T) {
+	sources, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, unwanted := range []string{"accept-new", "IdentityFile", "UserKnownHostsFile", "-i "} {
-		if strings.Contains(string(encoded), unwanted) {
-			t.Fatalf("git task carries %q", unwanted)
+	word := regexp.MustCompile(`(?i)\bgit\b`)
+	for _, source := range sources {
+		if strings.HasSuffix(source, "_test.go") {
+			continue
 		}
-	}
-}
-
-func TestGitCloneFailureEndsRun(t *testing.T) {
-	adapter, ctx := devAdapter(t)
-	missing := "file://" + t.TempDir() + "/missing.git"
-	run := gitRun(adapter, "git-failure", `echo '{"type":"result","result":"agent ran"}'`, missing, "main")
-	cleanupRun(t, adapter, run)
-	outcome, _, err := adapter.Dispatch(ctx, run)
-	if !errors.Is(err, wherry.ErrGitContext) || err.Error() != "git context unavailable" || outcome != wherry.OutcomeUnknown {
-		t.Fatalf("dispatch = %v, %v; want the fixed git context error", outcome, err)
-	}
-	allocs, _, err := adapter.client.Jobs().Allocations(adapter.jobID(run.ID, run.Turn), true, nil)
-	if err != nil || len(allocs) != 1 {
-		t.Fatalf("allocations = %d, %v", len(allocs), err)
-	}
-	if state := allocs[0].TaskStates[taskName]; state != nil && !state.StartedAt.IsZero() {
-		t.Fatalf("agent task started after a failed clone: %#v", state)
-	}
-}
-
-func TestRunVariableHoldsNoGitMaterial(t *testing.T) {
-	adapter, ctx := devAdapter(t)
-	url, _ := bareRepository(t)
-	run := gitRun(adapter, "git-variables", `echo '{"type":"result","result":"ok"}'`, url, "main")
-	dispatch(t, adapter, ctx, run)
-	path := adapter.variablePath(run.ID, run.Turn)
-	variable, _, err := adapter.client.Variables().Peek(path, nil)
-	if err != nil || variable == nil {
-		t.Fatalf("run variable = %#v, %v", variable, err)
-	}
-	for key, value := range variable.Items {
-		if strings.HasPrefix(key, "git_") || strings.Contains(value, url) {
-			t.Fatalf("job-level run variable carries git material in item %q", key)
+		code, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	git, _, err := adapter.client.Variables().Peek(path+gitSuffix, nil)
-	if err != nil || git == nil || git.Items["git_url"] != url {
-		t.Fatal("git task variable does not hold the git context")
-	}
-	if err := adapter.Release(ctx, run.ID, run.Turn); err != nil {
-		t.Fatal(err)
-	}
-	if git, _, err := adapter.client.Variables().Peek(path+gitSuffix, nil); err != nil || git != nil {
-		t.Fatalf("git task variable after release = %v, %v", git != nil, err)
+		if match := word.Find(code); match != nil {
+			t.Fatalf("%s names %q", source, match)
+		}
 	}
 }
 
@@ -1279,7 +1153,7 @@ func deletes(requests []string) []string {
 
 func TestDispatchFailureOutcomes(t *testing.T) {
 	const path = "/v1/var/nomad/jobs/agent-44575cf5b285-run-outcome-t1"
-	variables := []string{"DELETE " + path, "DELETE " + path + "/agent/agent", "DELETE " + path + "/agent/git", "DELETE " + path + "/agent"}
+	variables := []string{"DELETE " + path, "DELETE " + path + "/agent"}
 	for _, test := range []struct {
 		name     string
 		routes   map[string]http.HandlerFunc
@@ -1343,7 +1217,7 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 
 func TestPurgeOfAbsentJobSucceeds(t *testing.T) {
 	const path = "/v1/var/nomad/jobs/agent-44575cf5b285-run-absent-t1"
-	variables := []string{"DELETE " + path, "DELETE " + path + "/agent/agent", "DELETE " + path + "/agent/git", "DELETE " + path + "/agent"}
+	variables := []string{"DELETE " + path, "DELETE " + path + "/agent"}
 	for name, deregister := range map[string]http.HandlerFunc{
 		// Nomad 2.0.7 answers a purge of a job that does not exist with an empty evaluation.
 		"captured": serve([]byte(`{"EvalID":"","EvalCreateIndex":0,"JobModifyIndex":0,"VolumeEvalID":"","VolumeEvalIndex":0,"Index":0,"LastContact":0,"KnownLeader":false,"NextToken":""}`)),
@@ -1490,14 +1364,14 @@ func TestSweepPurgesJobsDeadPastTheGrace(t *testing.T) {
 		"DELETE /v1/job/" + mine:                              serve([]byte(`{"EvalID":""}`)),
 		"GET /v1/vars":                                        serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d}]`, otherPool, old)),
 	}
-	for _, suffix := range []string{"", "/agent/agent", "/agent/git", "/agent"} {
+	for _, suffix := range []string{"", "/agent"} {
 		routes["DELETE /v1/var/nomad/jobs/"+mine+suffix] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
 	}
 	adapter, requests := nomadServer(t, routes)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := deletes(requests()); len(got) != 5 || got[0] != "DELETE /v1/job/"+mine {
+	if got := deletes(requests()); len(got) != 3 || got[0] != "DELETE /v1/job/"+mine {
 		t.Fatalf("deletes %v, want only this pool's agent job dead past the grace purged with its variables", got)
 	}
 }
@@ -1969,5 +1843,91 @@ func TestBuildJobDeliversFilesThroughTemplates(t *testing.T) {
 		if got, ok := templates[destination]; !ok || got != want {
 			t.Errorf("template for %s = %q, %v; want %q", destination, got, ok, want)
 		}
+	}
+}
+
+// Variables of task paths that releases before this one wrote, under a job's group path, are swept like the rest.
+func TestSweepDeletesStaleLegacyTaskVariables(t *testing.T) {
+	adapter, ctx := devAdapter(t)
+	shortGrace(t)
+	run := testRun("sweep-legacy")
+	for _, suffix := range []string{"/agent/agent", "/agent/git"} {
+		path := adapter.variablePath(run.ID, run.Turn) + suffix
+		putVariable(t, adapter, ctx, path)
+		sweepLeaves(t, adapter, ctx, path, false)
+	}
+}
+
+func TestBuildJobIsolatesTheAgentsGit(t *testing.T) {
+	adapter, err := build(testConfig("http://127.0.0.1:1"), testPool, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.runtime.Env = map[string]string{"GIT_SSH_COMMAND": "ssh -o StrictHostKeyChecking=no", "GIT_SSH": "ssh", "GIT_CURL_VERBOSE": "1",
+		"GIT_CONFIG_GLOBAL": "/etc/agent-gitconfig", "GIT_TRACE": "/tmp/trace", "KEPT": "yes"}
+	run := testRun("isolated")
+	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := job.TaskGroups[0].Tasks[0].Env
+	for _, name := range wherry.AgentUnset {
+		if _, set := env[name]; set {
+			t.Errorf("task environment sets %s", name)
+		}
+	}
+	for name, value := range wherry.AgentEnvironment {
+		if env[name] != value {
+			t.Errorf("task environment %s = %q, want %q", name, env[name], value)
+		}
+	}
+	if env["KEPT"] != "yes" {
+		t.Errorf("task environment lost the runtime's own variable")
+	}
+}
+
+// The agent task runs with the adapter's environment over the runtime's.
+func TestAgentEnvironmentReachesTheTask(t *testing.T) {
+	adapter, ctx := scriptAdapter(t, `env; echo '{"type":"result","result":"ok"}'`)
+	adapter.runtime.Env = map[string]string{"GIT_SSH_COMMAND": "ssh -o StrictHostKeyChecking=no", "GIT_CONFIG_GLOBAL": "/etc/agent-gitconfig"}
+	run := testRun("agent-env")
+	var got []string
+	for _, line := range collect(t, ctx, adapter, dispatch(t, adapter, ctx, run)) {
+		got = append(got, string(line.Data))
+	}
+	for name, value := range wherry.AgentEnvironment {
+		if !slices.Contains(got, name+"="+value) {
+			t.Errorf("task environment lacks %s=%s", name, value)
+		}
+	}
+	if slices.ContainsFunc(got, func(line string) bool { return strings.HasPrefix(line, "GIT_SSH_COMMAND=") }) {
+		t.Errorf("task environment sets GIT_SSH_COMMAND")
+	}
+}
+
+// A patch series written as the receiver's preamble writes one (wherry internal/receiver gitPreamble: format-patch
+// --output into the outputs directory) is collected as one regular file holding every commit, with this host's git.
+func TestCollectReturnsAPatchSeries(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	script := `set -e
+export GIT_AUTHOR_NAME=agent GIT_AUTHOR_EMAIL=agent@example.test GIT_COMMITTER_NAME=agent GIT_COMMITTER_EMAIL=agent@example.test
+repo="$NOMAD_TASK_DIR/repo"
+git init -q "$repo"
+echo one > "$repo/README"; git -C "$repo" add README; git -C "$repo" commit -q -m one
+git -C "$repo" update-ref refs/wherry/start HEAD
+for change in two three; do echo $change > "$repo/README"; git -C "$repo" commit -q -am $change; done
+mkdir -p "$NOMAD_TASK_DIR/outputs"
+git -C "$repo" format-patch --output="$NOMAD_TASK_DIR/outputs/changes.patch" refs/wherry/start..HEAD
+echo '{"type":"result","result":"ok"}'`
+	adapter, ctx := scriptAdapter(t, script)
+	outputs := runToOutputs(t, adapter, ctx, testRun("patch-series"))
+	patch, ok := outputs["changes.patch"]
+	if len(outputs) != 1 || !ok || !patch.Mode.IsRegular() || patch.Data == nil {
+		t.Fatalf("outputs %v, want changes.patch alone as a regular file", slices.Collect(maps.Keys(outputs)))
+	}
+	if n := strings.Count(string(patch.Data), "\nSubject: [PATCH "); n != 2 {
+		t.Fatalf("changes.patch holds %d patches, want 2:\n%s", n, patch.Data)
 	}
 }

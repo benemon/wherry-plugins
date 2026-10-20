@@ -28,7 +28,6 @@ const (
 	jobPrefix         = "agent-"
 	jobVariablePrefix = "nomad/jobs/"
 	taskName          = "agent"
-	gitTaskName       = "git"
 	formatCRI         = "cri"
 	maxPending        = 1 << 20
 	// maxVariable is the size Nomad allows a variable's item keys and values together, measured on Nomad 2.0.7.
@@ -41,32 +40,12 @@ const (
 	cleanupWait = 10 * time.Second
 )
 
-// The suffixes turn a run variable path into a task's own variable path; among the job's tasks,
-// Nomad's implicit workload policy lets only that task read it. The policy reaches no deeper path, so a turn's
-// inputs share the group's variable, which every task of the job can read.
-const (
-	promptSuffix = "/" + taskName + "/" + taskName
-	gitSuffix    = "/" + taskName + "/" + gitTaskName
-	inputsSuffix = "/" + taskName
-)
+// inputsSuffix turns a run variable path into its group's variable path, which holds a turn's inputs: Nomad's
+// implicit workload policy reads the group's variable, and no deeper path, beside the job's own.
+const inputsSuffix = "/" + taskName
 
 // credentialItem is the run variable's item holding the value of the task credential delivered as file.
 func credentialItem(file string) string { return "credentials/" + file }
-
-// cloneScript reads the git context from a rendered file, so no task value becomes shell syntax or
-// meets Nomad interpolation; the receiver admits no ref or path starting with a dash. Its last
-// two stdout lines are the checkout directory and the commit.
-const cloneScript = `set -eu
-{ read -r url; read -r ref; read -r dir; } < "$NOMAD_TASK_DIR/git"
-dest="$NOMAD_ALLOC_DIR/$dir"
-git init -q "$dest"
-cd "$dest"
-git remote add origin "$url"
-git fetch -q --depth 1 origin "$ref"
-git checkout -q --detach FETCH_HEAD
-printf '%s\n' "$dest"
-git rev-parse HEAD
-`
 
 // Config is the adapter's section of the receiver configuration.
 type Config struct {
@@ -104,7 +83,7 @@ type Adapter struct {
 	nodePool      string
 	datacenters   []string
 	// prefix starts every job ID of the adapter's pool; agentJob matches those IDs, runVariable a run
-	// variable, or a task variable of a run with a git context, of one of those jobs.
+	// variable, its group's variable, or a task's variable that releases before this one wrote, of one of those jobs.
 	prefix      string
 	agentJob    *regexp.Regexp
 	runVariable *regexp.Regexp
@@ -112,7 +91,6 @@ type Adapter struct {
 
 var (
 	envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	commit  = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 	// sweepGrace covers Dispatch's window between writing the variable and registering the job.
 	sweepGrace = 10 * time.Minute
 )
@@ -147,12 +125,9 @@ func New(config Config, pool string, client *api.Client) (*Adapter, error) {
 		client: client, namespace: config.Namespace, credentialEnv: config.CredentialEnv, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters,
 		prefix:      prefix,
 		agentJob:    regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+$`),
-		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+)(` + regexp.QuoteMeta(promptSuffix) + `|` + regexp.QuoteMeta(gitSuffix) + `|` + regexp.QuoteMeta(inputsSuffix) + `)?$`),
+		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+)(` + regexp.QuoteMeta(inputsSuffix) + `(/[a-z]+)?)?$`),
 	}, nil
 }
-
-// Git reports that the adapter delivers a run's git context, through its prestart git task.
-func (adapter *Adapter) Git() bool { return true }
 
 // isolated are the drivers whose task sees its task directory at /local and its secrets at /secrets.
 var isolated = []string{"docker", "exec", "java", "podman"}
@@ -227,13 +202,6 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 			return adapter.notStarted(ctx, run, redacted("write", inputsPath, err))
 		}
 	}
-	if run.Git != nil {
-		gitItems := map[string]string{"git_url": run.Git.URL, "git_ref": run.Git.Ref, "git_path": run.Git.Path}
-		gitPath := path + gitSuffix
-		if _, _, err := adapter.client.Variables().Update(&api.Variable{Namespace: adapter.namespace, Path: gitPath, Items: gitItems}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-			return adapter.notStarted(ctx, run, redacted("write", gitPath, err))
-		}
-	}
 	if _, _, err := adapter.client.Jobs().Info(jobID, (&api.QueryOptions{}).WithContext(ctx)); err != nil {
 		if !notFound(err) {
 			return wherry.OutcomeUnknown, wherry.Handle{}, err
@@ -242,7 +210,7 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 			return adapter.notStarted(ctx, run, fmt.Errorf("register: %w", err))
 		}
 	}
-	handle, _, err := adapter.wait(ctx, jobID, job.TaskGroups[0].Tasks[0].Driver, run.Git != nil, path)
+	handle, _, err := adapter.wait(ctx, jobID, job.TaskGroups[0].Tasks[0].Driver)
 	if err != nil {
 		return wherry.OutcomeUnknown, wherry.Handle{}, err
 	}
@@ -270,24 +238,10 @@ func (adapter *Adapter) Lookup(ctx context.Context, runID string, turn int64) (w
 	if err != nil {
 		return wherry.Job{}, err
 	}
-	if len(job.TaskGroups) != 1 {
+	if len(job.TaskGroups) != 1 || len(job.TaskGroups[0].Tasks) != 1 || job.TaskGroups[0].Tasks[0].Name != taskName {
 		return wherry.Job{}, errors.New("existing job is not an agent job")
 	}
-	driver, git := "", false
-	for _, task := range job.TaskGroups[0].Tasks {
-		switch task.Name {
-		case taskName:
-			driver = task.Driver
-		case gitTaskName:
-			git = true
-		default:
-			return wherry.Job{}, errors.New("existing job is not an agent job")
-		}
-	}
-	if driver == "" {
-		return wherry.Job{}, errors.New("existing job is not an agent job")
-	}
-	handle, state, err := adapter.wait(ctx, *job.ID, driver, git, adapter.variablePath(runID, turn))
+	handle, state, err := adapter.wait(ctx, *job.ID, job.TaskGroups[0].Tasks[0].Driver)
 	if err != nil {
 		return wherry.Job{}, err
 	}
@@ -316,13 +270,11 @@ func decodeHandle(encoded wherry.Handle) (handle, error) {
 }
 
 // wait returns once the job's agent task has started or ended; a wait cut short deregisters the job.
-// With a git context, it delivers the agent's prompt once the clone task has finished.
-func (adapter *Adapter) wait(ctx context.Context, jobID, driver string, git bool, path string) (wherry.Handle, wherry.JobState, error) {
+func (adapter *Adapter) wait(ctx context.Context, jobID, driver string) (wherry.Handle, wherry.JobState, error) {
 	format := ""
 	if driver == "podman" {
 		format = formatCRI
 	}
-	checkedOut := ""
 	for {
 		allocs, _, err := adapter.client.Jobs().Allocations(jobID, false, (&api.QueryOptions{}).WithContext(ctx))
 		if err != nil {
@@ -332,20 +284,10 @@ func (adapter *Adapter) wait(ctx context.Context, jobID, driver string, git bool
 			return wherry.Handle{}, 0, err
 		}
 		alloc := current(allocs)
-		if alloc != nil && git && checkedOut == "" {
-			switch state := alloc.TaskStates[gitTaskName]; {
-			case state != nil && state.Failed:
-				return wherry.Handle{}, 0, wherry.ErrGitContext
-			case state != nil && state.State == "dead":
-				if checkedOut, err = adapter.deliverPrompt(ctx, alloc.ID, format == formatCRI, path); err != nil {
-					return wherry.Handle{}, 0, err
-				}
-			}
-		}
 		// The logs API answers 404 until the task has started.
 		if alloc != nil && (terminal(alloc.ClientStatus) || started(alloc.TaskStates[taskName])) {
 			data, _ := json.Marshal(handle{V: 1, Job: jobID, Alloc: alloc.ID, Format: format}) // strings always encode
-			return wherry.Handle{Data: data, Name: jobID, Commit: checkedOut}, jobState(alloc), nil
+			return wherry.Handle{Data: data, Name: jobID}, jobState(alloc), nil
 		}
 		select {
 		case <-ctx.Done():
@@ -366,65 +308,6 @@ func jobState(alloc *api.AllocationListStub) wherry.JobState {
 	return wherry.JobNeverStarted
 }
 
-// deliverPrompt reads the clone task's checkout and commit and writes the agent's prompt with a
-// line naming them; the agent task's prompt template waits for that variable. It returns the commit.
-func (adapter *Adapter) deliverPrompt(ctx context.Context, allocID string, cri bool, path string) (string, error) {
-	alloc, _, err := adapter.client.Allocations().Info(allocID, (&api.QueryOptions{}).WithContext(ctx))
-	if err != nil {
-		return "", err
-	}
-	var output []byte
-	frames, errs := adapter.logs(ctx, alloc, gitTaskName, false, 0)
-	for done := false; !done; {
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case err := <-errs:
-			if err != nil {
-				return "", err
-			}
-		case frame, ok := <-frames:
-			if !ok {
-				done = true
-				break
-			}
-			output = append(output, frame.Data...)
-		}
-	}
-	lines := make(chan wherry.Line, bytes.Count(output, []byte("\n"))+1)
-	reader := lineReader{lines: lines, cri: cri}
-	if err := reader.take(ctx, output); err != nil {
-		return "", err
-	}
-	if err := reader.flush(ctx); err != nil {
-		return "", err
-	}
-	close(lines)
-	var printed []string
-	for line := range lines {
-		printed = append(printed, string(line.Data))
-	}
-	if len(printed) < 2 || !commit.MatchString(printed[len(printed)-1]) {
-		return "", wherry.ErrGitContext
-	}
-	location, checkedOut := printed[len(printed)-2], printed[len(printed)-1]
-	variable, _, err := adapter.client.Variables().Read(path, (&api.QueryOptions{}).WithContext(ctx))
-	if err != nil {
-		return "", redacted("read", path, err)
-	}
-	gitPath := path + gitSuffix
-	git, _, err := adapter.client.Variables().Read(gitPath, (&api.QueryOptions{}).WithContext(ctx))
-	if err != nil {
-		return "", redacted("read", gitPath, err)
-	}
-	prompt := fmt.Sprintf("%s\nThe git repository %s at %s is checked out in %s at commit %s.", variable.Items["prompt"], git.Items["git_url"], git.Items["git_ref"], location, checkedOut)
-	agentPath := path + promptSuffix
-	if _, _, err := adapter.client.Variables().Update(&api.Variable{Namespace: adapter.namespace, Path: agentPath, Items: map[string]string{"prompt": prompt}}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-		return "", redacted("write", agentPath, err)
-	}
-	return checkedOut, nil
-}
-
 // buildJob takes nothing from the task except the run ID and the matched offer.
 func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) {
 	runtime := adapter.runtime
@@ -433,20 +316,20 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 	if env == nil {
 		env = make(map[string]string)
 	}
+	for _, name := range wherry.AgentUnset {
+		delete(env, name)
+	}
+	maps.Copy(env, wherry.AgentEnvironment)
 	env["HOME"] = "${NOMAD_TASK_DIR}"
 	env["WHERRY_INPUT_DIR"] = "${NOMAD_TASK_DIR}/inputs"
 	env["WHERRY_OUTPUT_DIR"] = "${NOMAD_TASK_DIR}/outputs"
 	env["WHERRY_CREDENTIALS_DIR"] = "${NOMAD_SECRETS_DIR}/credentials"
-	promptPath := path
-	if run.Git != nil {
-		promptPath = path + promptSuffix
-	}
 	prompt := `{{ .prompt }}`
 	if !slices.Contains(isolated, runtime.Driver) {
 		prompt = `{{ .prompt.Value | replaceAll "${NOMAD_TASK_DIR}" (env "NOMAD_TASK_DIR") | replaceAll "${NOMAD_SECRETS_DIR}" (env "NOMAD_SECRETS_DIR") }}`
 	}
 	templates := []*api.Template{
-		{EmbeddedTmpl: new(`{{ with nomadVar "` + promptPath + `" }}` + prompt + `{{ end }}`), DestPath: new("local/prompt.txt"), ChangeMode: new("noop")},
+		{EmbeddedTmpl: new(`{{ with nomadVar "` + path + `" }}` + prompt + `{{ end }}`), DestPath: new("local/prompt.txt"), ChangeMode: new("noop")},
 	}
 	if run.Credential != nil {
 		templates = append(templates, &api.Template{
@@ -473,9 +356,6 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 		LogConfig: &api.LogConfig{MaxFiles: new(3), MaxFileSizeMB: new(10)},
 		Templates: templates,
 	}}
-	if run.Git != nil {
-		tasks = append(tasks, gitTask(runtime, path+gitSuffix))
-	}
 	return &api.Job{
 		ID: new(jobID), Name: new(jobID), Namespace: new(adapter.namespace), Type: new(api.JobTypeBatch),
 		NodePool: nodePool(adapter.nodePool), Datacenters: adapter.datacenters,
@@ -497,38 +377,6 @@ func nodePool(name string) *string {
 		return nil
 	}
 	return &name
-}
-
-// gitTask is the prestart task that clones the run's git context into the shared alloc directory;
-// repository access and host trust come from the platform.
-func gitTask(runtime Runtime, gitPath string) *api.Task {
-	config := maps.Clone(runtime.Config)
-	if runtime.Driver == "podman" {
-		delete(config, "command")
-		config["entrypoint"] = []any{"/bin/sh", "-c"}
-		config["args"] = []any{cloneScript}
-	} else {
-		config["command"] = "/bin/sh"
-		config["args"] = []any{"-c", cloneScript}
-	}
-	env := maps.Clone(runtime.Env)
-	if env == nil {
-		env = make(map[string]string)
-	}
-	env["HOME"] = "${NOMAD_TASK_DIR}"
-	env["GIT_TERMINAL_PROMPT"] = "0"
-	env["GIT_SSH_COMMAND"] = "ssh -o StrictHostKeyChecking=yes -o BatchMode=yes"
-	templates := []*api.Template{{
-		EmbeddedTmpl: new(`{{ with nomadVar "` + gitPath + `" }}{{ .git_url }}` + "\n" + `{{ .git_ref }}` + "\n" + `{{ .git_path }}` + "\n" + `{{ end }}`),
-		DestPath:     new("local/git"), ChangeMode: new("noop"),
-	}}
-	return &api.Task{
-		Name: gitTaskName, Driver: runtime.Driver, Config: config, Env: env,
-		Lifecycle: &api.TaskLifecycle{Hook: api.TaskLifecycleHookPrestart},
-		Resources: &api.Resources{CPU: runtime.Resources.CPU, MemoryMB: runtime.Resources.MemoryMB},
-		LogConfig: &api.LogConfig{MaxFiles: new(3), MaxFileSizeMB: new(10)},
-		Templates: templates,
-	}
 }
 
 func (adapter *Adapter) jobID(runID string, turn int64) string {
@@ -807,15 +655,14 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 	return err
 }
 
-// Release deletes the per-turn variables holding the credentials, the prompt, the inputs and the git context.
+// Release deletes the per-turn variables holding the credentials, the prompt and the inputs.
 func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) error {
 	return adapter.release(ctx, adapter.jobID(runID, turn))
 }
 
 func (adapter *Adapter) release(ctx context.Context, jobID string) error {
 	path := jobVariablePrefix + jobID
-	return errors.Join(adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+promptSuffix), adapter.deleteVariable(ctx, path+gitSuffix),
-		adapter.deleteVariable(ctx, path+inputsSuffix))
+	return errors.Join(adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+inputsSuffix))
 }
 
 // Collect waits until the allocation is terminal, for as long as ctx allows, then lists the outputs directory through

@@ -64,9 +64,6 @@ func TestFactorySharesClients(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.Git() {
-		t.Fatal("the Nomad adapter reports no git context")
-	}
 	if first.(*Adapter).client != same.(*Adapter).client {
 		t.Fatal("adapters with the same address, CA, namespace and token got separate clients")
 	}

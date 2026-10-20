@@ -119,12 +119,11 @@ adapters:
 The plugin registers one batch job per turn,
 `agent-<pool>-<run>-t<turn>`, in its namespace, node pool and datacenters,
 with restarts and rescheduling disabled. Its task group `agent` holds the
-task `agent`, built from the adapter's `runtime`, and the prestart task
-`git` when the run carries a git context. The job's metadata holds
+task `agent`, built from the adapter's `runtime`, alone. The job's metadata holds
 `run_id`, `turn`, `attempt`, `adapter` and `agent`, which the receiver
 reads to decide whether to adopt the job.
 
-The prompt, the credentials and the git context travel in Nomad variables
+The prompt and the credentials travel in Nomad variables
 under `nomad/jobs/agent-<pool>-<run>-t<turn>`, which the job's own workload
 identity reads. The turn's input files travel in the job's group variable,
 `nomad/jobs/agent-<pool>-<run>-t<turn>/agent`, one item per file holding
@@ -139,7 +138,10 @@ the SHA-256 of the pool name, since Nomad limits a variable path to 128
 characters. A receiver sweeps only its own pool's jobs and variables. The
 10 minutes run from a job's last allocation change, so a turn whose job
 ended while no pool member could hold it for longer than that runs again
-from the start on its next delivery.
+from the start on its next delivery. The sweep also deletes the per-task
+variables of earlier releases, `nomad/jobs/agent-<pool>-<run>-t<turn>/agent/<task>`.
+Lookup does not adopt a job of an earlier release that holds a task beside
+`agent`, so drain such jobs before upgrading.
 
 An agent task with no `Started` event in a terminal allocation never
 started, and the plugin reports the job as never started.
@@ -158,7 +160,10 @@ The agent task receives:
 - each input file in `$NOMAD_TASK_DIR/inputs`, rendered by a template that
   decodes its base64, so binary files arrive intact;
 - each task credential as a file in `$NOMAD_SECRETS_DIR/credentials`,
-  rendered the same way;
+  rendered the same way, with Nomad's default template mode, 0644. `ssh`
+  refuses a private key that others can read when the agent's user owns
+  the file, so a deploy key works only where it does not; that is not
+  measured here;
 - `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR` and `WHERRY_CREDENTIALS_DIR` set
   to `$NOMAD_TASK_DIR/inputs`, `$NOMAD_TASK_DIR/outputs` and
   `$NOMAD_SECRETS_DIR/credentials`, and the same paths written into the
@@ -169,6 +174,19 @@ The agent task receives:
   plugin reports `${NOMAD_TASK_DIR}` and `${NOMAD_SECRETS_DIR}` forms and the
   prompt's template replaces them with the task's own values;
 - `HOME` set to the task directory;
+- the variables of the adapter protocol's `AgentEnvironment` over the
+  runtime's `env`, with those of `AgentUnset` removed from the runtime's
+  `env`, so no system, global or environment `git` configuration reaches
+  the agent's clones. The plugin removes them from the runtime's `env`
+  only: a `raw_exec` task also inherits the Nomad client's environment,
+  and a container keeps its image's `ENV`, and Nomad offers no way to unset
+  either. Add `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_SSH_VARIANT`, `GIT_DIR`,
+  `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+  `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_EXEC_PATH`, `GIT_SSL_NO_VERIFY` and
+  `GIT_CURL_VERBOSE` to the client's `env.denylist`, and keep them out of
+  agent images. CA and proxy variables pass through as the operator sets
+  them. This protects an agent that follows its prompt; it does not
+  constrain one that runs commands of its own, which can undo it;
 - the runtime's `env`, driver `config` and `resources`.
 
 The plugin collects outputs from `$NOMAD_TASK_DIR/outputs` through the
@@ -192,9 +210,7 @@ filesystems; that is not measured here. The receiver's redaction of
 delivered credential values covers both cases.
 
 The plugin reads the agent task's standard output. For the `podman` driver
-it reads the logs in CRI format, and the git task gets `entrypoint` and
-`args` in place of `command`. For other drivers the git task's `command`
-and `args` are replaced.
+it reads the logs in CRI format.
 
 ## Tests
 
