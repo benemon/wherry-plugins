@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"net/http"
@@ -100,7 +101,6 @@ func dispatch(t *testing.T, adapter *Adapter, ctx context.Context, run wherry.Ru
 	return handle
 }
 
-// decoded is the handle's adapter encoding.
 func decoded(t *testing.T, encoded wherry.Handle) handle {
 	t.Helper()
 	h, err := decodeHandle(encoded)
@@ -425,7 +425,7 @@ func TestLineReaderFlushesFinalLine(t *testing.T) {
 	}
 }
 
-// scriptRun returns a run whose task is the given shell script.
+// scriptRun sets the adapter's runtime to run script under sh and returns a new run.
 func scriptRun(adapter *Adapter, name, script string) wherry.Run {
 	adapter.runtime = Runtime{Driver: "raw_exec", Config: map[string]any{"command": "/bin/sh", "args": []any{"-c", script}}}
 	return testRun(name)
@@ -647,7 +647,7 @@ func TestFollowAcrossLogRotation(t *testing.T) {
 	}
 }
 
-// The fixture is real Podman-driver stdout captured from the lab cluster.
+// The fixture is real Podman-driver stdout.
 func TestLineReaderDecodesPodmanCRI(t *testing.T) {
 	raw, err := os.ReadFile("testdata/podman-cri-stdout.log")
 	if err != nil {
@@ -755,6 +755,7 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	run.ID = "run-urls"
 	run.Inputs = []wherry.File{{Name: "data.csv", Data: []byte("input-content-never-in-urls")}}
 	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte("task-credential-never-in-urls")}}
+	run.Fetches = []wherry.Fetch{{Name: "dataset.bin", URL: "https://store.example.test/b/dataset.bin?X-Amz-Signature=secretsig-never-in-urls", Size: 8, SHA256: strings.Repeat("a", 64)}}
 	const outputContent = "output-content-never-in-urls"
 	var mu sync.Mutex
 	var urls []string
@@ -793,7 +794,11 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 		case "GET /v1/job/agent-44575cf5b285-run-urls-t1/allocations":
 			_, _ = response.Write([]byte(`[{"ID":"alloc-urls","ClientStatus":"complete"}]`))
 		case "GET /v1/allocation/alloc-urls":
-			_, _ = response.Write([]byte(`{"ID":"alloc-urls","ClientStatus":"complete"}`))
+			_, _ = response.Write([]byte(`{"ID":"alloc-urls","ClientStatus":"complete","TaskStates":{"agent":{"State":"dead","StartedAt":"2026-01-01T00:00:00Z"}}}`))
+		case "GET /v1/nodes":
+			_, _ = response.Write([]byte(`[]`))
+		case "GET /v1/client/fs/logs/alloc-urls":
+			_, _ = response.Write([]byte(`{}`))
 		case "GET /v1/node/":
 			http.Error(response, "node not found", http.StatusNotFound)
 		default:
@@ -806,12 +811,18 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
+	if _, err := adapter.Ready(ctx); err != nil {
+		t.Fatalf("ready: %v", err)
+	}
 	_, handle, err := adapter.Dispatch(ctx, run)
 	if err != nil {
 		t.Fatalf("dispatch = %#v, %v", handle, err)
 	}
 	if found, err := adapter.Lookup(ctx, run.ID, run.Turn); err != nil || found.State != wherry.JobNeverStarted {
 		t.Fatalf("lookup = %#v, %v", found, err)
+	}
+	if _, err := adapter.Follow(ctx, handle, 0, make(chan wherry.Line, 1)); err != nil {
+		t.Fatalf("follow: %v", err)
 	}
 	if err := adapter.Stop(ctx, handle); err != nil {
 		t.Fatal(err)
@@ -831,11 +842,11 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(urls) != 27 {
-		t.Fatalf("requests = %d %v, want dispatch, lookup, stop, collect, release, purge and sweep", len(urls), urls)
+	if len(urls) != 34 {
+		t.Fatalf("requests = %d %v, want ready, dispatch, lookup, follow, stop, collect, release, purge and sweep", len(urls), urls)
 	}
 	for _, url := range urls {
-		for _, secret := range []string{token, string(run.Credential), string(run.Prompt), string(run.Inputs[0].Data), string(run.Credentials[0].Value), outputContent} {
+		for _, secret := range []string{token, string(run.Credential), string(run.Prompt), string(run.Inputs[0].Data), string(run.Credentials[0].Value), run.Fetches[0].URL, "secretsig-never-in-urls", outputContent} {
 			if strings.Contains(url, secret) {
 				t.Fatalf("request URL %q contains %q", url, secret)
 			}
@@ -864,6 +875,31 @@ func TestRedactedDropsResponseBody(t *testing.T) {
 	}
 	if err := adapter.Sweep(context.Background()); err == nil || strings.Contains(err.Error(), "test-credential") {
 		t.Fatalf("sweep error %v, want a redacted failure", err)
+	}
+}
+
+func TestRegisterFailureDropsResponseBody(t *testing.T) {
+	const signature = "X-Amz-Signature=secretsig-register"
+	infos := 0
+	adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
+		"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-register-t1": serve([]byte(`{}`)),
+		"GET /v1/job/agent-44575cf5b285-run-register-t1": func(response http.ResponseWriter, request *http.Request) {
+			if infos++; infos == 1 {
+				jobNotFound(response, request)
+				return
+			}
+			_, _ = response.Write(captured(t, "clean.job.json"))
+		},
+		"PUT /v1/jobs": func(response http.ResponseWriter, request *http.Request) {
+			body, _ := io.ReadAll(request.Body)
+			http.Error(response, string(body), http.StatusBadRequest)
+		},
+	})
+	run := testRun("register")
+	run.ID = "run-register"
+	run.Fetches = []wherry.Fetch{{Name: "dataset.bin", URL: "https://store.example.test/b/dataset.bin?" + signature, Size: 8, SHA256: strings.Repeat("a", 64)}}
+	if _, _, err := adapter.Dispatch(context.Background(), run); err == nil || strings.Contains(err.Error(), "secretsig-register") {
+		t.Fatalf("dispatch error %v, want a register failure without the fetch URL", err)
 	}
 }
 
@@ -1056,9 +1092,9 @@ func TestReadyFiltersNodesByPoolDatacenterAndDriver(t *testing.T) {
 		nodes []map[string]any
 		want  bool
 	}{
-		{"default pool when unset", "", nil, []map[string]any{node("OCPv", "dc1", "raw_exec", true)}, false},
+		{"default pool when unset", "", nil, []map[string]any{node("gpu", "dc1", "raw_exec", true)}, false},
 		{"unset pool finds default", "", nil, []map[string]any{node("default", "dc1", "raw_exec", true)}, true},
-		{"configured pool", "OCPv", nil, []map[string]any{node("OCPv", "dc1", "raw_exec", true)}, true},
+		{"configured pool", "gpu", nil, []map[string]any{node("gpu", "dc1", "raw_exec", true)}, true},
 		{"datacenter outside the list", "", []string{"dc2"}, []map[string]any{node("default", "dc1", "raw_exec", true)}, false},
 		{"unhealthy driver", "", nil, []map[string]any{node("default", "dc1", "raw_exec", false)}, false},
 		{"other driver", "", nil, []map[string]any{node("default", "dc1", "podman", true)}, false},
@@ -1376,7 +1412,7 @@ func TestSweepPurgesJobsDeadPastTheGrace(t *testing.T) {
 	}
 }
 
-// edited decodes a captured allocation list, applies edit to each allocation, and re-encodes it.
+// edited is a captured allocation list with edit applied to each allocation.
 func edited(t *testing.T, capture string, edit func(*api.AllocationListStub)) []byte {
 	t.Helper()
 	var allocs []*api.AllocationListStub
@@ -1469,10 +1505,8 @@ func TestSameRunInTwoPoolsRegistersTwoJobs(t *testing.T) {
 	}
 }
 
-// collectServer is a Nomad whose allocation alloc-1 reports running to its first running reads, then ended, complete
-// unless ended says otherwise; it lists
-// its outputs as the captured listings, plus extra root entries, and reads each regular file as its content in files;
-// it records every path read.
+// collectServer is a Nomad whose allocation alloc-1 reports running to its first running reads, then ended[0] or
+// complete. It lists the captured outputs plus extra, serves files by name, and records each read.
 func collectServer(t *testing.T, running int, extra []map[string]any, files map[string]string, ended ...string) (*Adapter, func() []string, func() []string) {
 	t.Helper()
 	var listing []map[string]any
@@ -1846,7 +1880,7 @@ func TestBuildJobDeliversFilesThroughTemplates(t *testing.T) {
 	}
 }
 
-// Variables of task paths that releases before this one wrote, under a job's group path, are swept like the rest.
+// Variables under a job's group path deeper than the group's own are swept like the rest.
 func TestSweepDeletesStaleLegacyTaskVariables(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	shortGrace(t)
@@ -1905,8 +1939,8 @@ func TestAgentEnvironmentReachesTheTask(t *testing.T) {
 	}
 }
 
-// A patch series written as the receiver's preamble writes one (wherry internal/receiver gitPreamble: format-patch
-// --output into the outputs directory) is collected as one regular file holding every commit, with this host's git.
+// A patch series written by git format-patch --output into the outputs directory is collected as one regular file
+// holding every commit.
 func TestCollectReturnsAPatchSeries(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")

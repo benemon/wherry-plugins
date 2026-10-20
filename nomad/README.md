@@ -8,37 +8,43 @@ the same address, CA file, namespace and token share one Nomad client.
 
 ## Build
 
-The plugin builds against the adapter protocol module,
-`github.com/benemon/wherry/adapter`. Until that module is tagged, build in
-this repository's Go workspace with a checkout of
-[wherry](https://github.com/benemon/wherry) beside it:
-
-```
-wherry/
-wherry-plugins/
-```
-
-From `wherry-plugins`:
+The plugin builds against the tagged adapter protocol module,
+`github.com/benemon/wherry/adapter`. From a clone of this repository:
 
 ```sh
-go build -o wherry-plugin-nomad ./nomad
+make build
 ```
 
-For a Linux receiver host, set `GOOS=linux GOARCH=amd64`.
+This writes `wherry-plugin-nomad` at the repository root. For a Linux
+receiver host, set `GOOS=linux GOARCH=amd64`. `make check` runs the CI
+gates, and `make dist VERSION=<version>` writes release archives and
+`checksums.txt` into `dist`.
+
+To develop against a local [wherry](https://github.com/benemon/wherry)
+checkout beside this repository, create a Go workspace from the repository
+root. `go.work` is for local development only and is not tracked.
+
+```sh
+go work init ./nomad ../wherry/adapter
+```
 
 ## Install
 
-Copy `wherry-plugin-nomad` into the receiver's plugin directory and start
-the receiver with `--plugin-dir` naming it:
+1. Copy `wherry-plugin-nomad` into the receiver's plugin directory:
 
-```sh
-install -o root -g root -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
-wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir /usr/local/libexec/wherry/plugins
-```
+   ```sh
+   install -o root -g root -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
+   ```
 
-The receiver refuses a plugin directory or binary owned by a user other
-than root or the receiver's, or that group or others can write, and a
-plugin that is not a regular file. The plugin is not run by hand.
+2. Start the receiver with `--plugin-dir` naming that directory:
+
+   ```sh
+   wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir /usr/local/libexec/wherry/plugins
+   ```
+
+The receiver checks the plugin directory and binary before it runs them;
+see [`wherry receiver`](https://github.com/benemon/wherry/blob/main/docs/reference.md).
+The plugin is not run by hand.
 
 ## Credentials
 
@@ -48,13 +54,59 @@ plugin inherits the receiver's environment, so a receiver running as a
 Nomad job with
 [workload identity](https://developer.hashicorp.com/nomad/docs/concepts/workload-identity)
 supplies `NOMAD_TOKEN` to it. The token needs the
-[receiver policy](https://github.com/benemon/wherry/blob/main/docs/operator-guide.md#nomad-acl-policy).
+[ACL policy](#acl-policy).
 
 | Variable | Effect |
 | --- | --- |
 | `NOMAD_TOKEN` | Nomad token for adapters without a platform credential in the bundle |
 | `NOMAD_ADDR` | Nomad address when `address` is empty |
 | `NOMAD_REGION` | Nomad region for API requests |
+| `NOMAD_HTTP_AUTH` | HTTP basic auth for API requests |
+
+Other `NOMAD_*` TLS variables are not read; `ca_file` is the only TLS
+setting.
+
+## ACL policy
+
+The plugin's calls need this policy, with the namespace adjusted:
+
+```hcl
+namespace "agents" {
+  capabilities = ["submit-job", "list-jobs", "read-job", "read-logs", "read-fs", "alloc-lifecycle"]
+
+  variables {
+    path "nomad/jobs/agent-*" {
+      capabilities = ["write", "read", "destroy"]
+    }
+  }
+}
+
+node {
+  policy = "read"
+}
+
+node_pool "default" {
+  policy = "read"
+}
+```
+
+- `submit-job`: register a run's job, deregister one that outlives its
+  stop signal or its dispatch wait, and purge one that never started or
+  has been dead for 10 minutes.
+- `list-jobs`: find dead agent jobs to purge.
+- `read-job`: read a job and its allocations.
+- `read-logs`: stream the agent task's standard output.
+- `read-fs`: list and read the agent task's outputs directory once the job
+  has stopped.
+- `alloc-lifecycle`: send `SIGTERM` to the agent task.
+- Variables `write`, `read` and `destroy`: hold each run's prompt,
+  credentials and input files, and sweep them after the job
+  ends. The sweep
+  lists variables under `nomad/jobs/agent-`; see
+  [Nomad variables](https://developer.hashicorp.com/nomad/docs/concepts/variables)
+  for the access rules.
+- `node` read: find a ready node with the runtime's driver healthy.
+- `node_pool` read: register jobs in the node pools the adapters name.
 
 ## Settings
 
@@ -116,41 +168,24 @@ adapters:
 
 ## Agent jobs
 
-The plugin registers one batch job per turn,
-`agent-<pool>-<run>-t<turn>`, in its namespace, node pool and datacenters,
-with restarts and rescheduling disabled. Its task group `agent` holds the
-task `agent`, built from the adapter's `runtime`, alone. The job's metadata holds
-`run_id`, `turn`, `attempt`, `adapter` and `agent`, which the receiver
-reads to decide whether to adopt the job.
+The plugin registers one batch job per turn, `agent-<pool>-<run>-t<turn>`,
+in its namespace, node pool and datacenters, with restarts and rescheduling
+disabled. `<pool>` is the first 12 hexadecimal digits of the SHA-256 of the
+pool name, since Nomad limits a variable path to 128 characters. The job's
+task group `agent` holds the task `agent`, built from the adapter's
+`runtime`, alone. The job's metadata holds `run_id`, `turn`, `attempt`,
+`adapter` and `agent`, which the receiver reads to decide whether to adopt
+the job.
 
-The prompt and the credentials travel in Nomad variables
-under `nomad/jobs/agent-<pool>-<run>-t<turn>`, which the job's own workload
-identity reads. The turn's input files travel in the job's group variable,
-`nomad/jobs/agent-<pool>-<run>-t<turn>/agent`, one item per file holding
-its base64 encoding, since Nomad's implicit workload policy reads no deeper
-path. Nomad caps a variable at 64 KiB of item names and values together,
-so a turn's inputs hold about 48 KiB; Dispatch refuses a turn over that,
-naming the input, and creates nothing. The plugin deletes them when the turn ends. Every 30
-seconds it also deletes the variables of jobs that have stopped, and of
-jobs never registered within 10 minutes, and purges agent jobs that have
-been dead for 10 minutes. `<pool>` is the first 12 hexadecimal digits of
-the SHA-256 of the pool name, since Nomad limits a variable path to 128
-characters. A receiver sweeps only its own pool's jobs and variables. The
-10 minutes run from a job's last allocation change, so a turn whose job
-ended while no pool member could hold it for longer than that runs again
-from the start on its next delivery. The sweep also deletes the per-task
-variables of earlier releases, `nomad/jobs/agent-<pool>-<run>-t<turn>/agent/<task>`.
-Lookup does not adopt a job of an earlier release that holds a task beside
-`agent`, so drain such jobs before upgrading.
-
-An agent task with no `Started` event in a terminal allocation never
-started, and the plugin reports the job as never started.
+An agent task in a terminal allocation with neither a `Started` event nor a
+start time never started, and the plugin reports the job as never started.
 
 An adapter is ready when some ready, eligible node in its node pool and
 datacenters has the runtime's driver detected and healthy.
 
-The plugin stops a job by sending `SIGTERM` to the agent task. If the task
-is still running 15 seconds later, it deregisters the job.
+The plugin stops a job by sending `SIGTERM` to the agent task. If the
+signal fails, or the task is still running 15 seconds later, it deregisters
+the job.
 
 The agent task receives:
 
@@ -159,28 +194,12 @@ The agent task receives:
   the adapter delivers one;
 - each input file in `$NOMAD_TASK_DIR/inputs`, rendered by a template that
   decodes its base64, so binary files arrive intact;
-- each S3 input in `$NOMAD_TASK_DIR/inputs`, fetched by an `artifact` of
-  the agent task from the presigned URL the receiver passes, with
-  `options.checksum` `sha256:<hex>`, `options.archive` `false` and mode
-  `file`. Nomad fetches it before the task starts and verifies its SHA-256
-  once the download ends. The checksum does not bound the transfer: the
-  Nomad client's `artifact.http_max_size` is the only limit on how much a
-  fetch reads. `archive=false` keeps it from unpacking an
-  input whose name ends like an archive. A fetch that fails or does not
-  verify fails the task before it starts, and the plugin reports the job
-  never started with class `fetch`, which the receiver ends
-  `TASK_STATE_FAILED`. Measured on Nomad 2.0.7: the fetcher follows
-  redirects and no artifact option stops it, so the checksum alone holds a
-  redirected fetch to the object. The URL is the artifact's source for the
-  job's lifetime and appears in the task event of a failed fetch, so anyone
-  who can read the job can read it until it expires; purging the job
-  removes it. Each Nomad client reaches the endpoint and trusts its
-  certificate through its system roots;
+- each S3 input in `$NOMAD_TASK_DIR/inputs`, fetched as described in
+  [S3 inputs](#s3-inputs);
 - each task credential as a file in `$NOMAD_SECRETS_DIR/credentials`,
   rendered the same way, with Nomad's default template mode, 0644. `ssh`
   refuses a private key that others can read when the agent's user owns
-  the file, so a deploy key works only where it does not; that is not
-  measured here;
+  the file;
 - `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR` and `WHERRY_CREDENTIALS_DIR` set
   to `$NOMAD_TASK_DIR/inputs`, `$NOMAD_TASK_DIR/outputs` and
   `$NOMAD_SECRETS_DIR/credentials`, and the same paths written into the
@@ -191,50 +210,134 @@ The agent task receives:
   plugin reports `${NOMAD_TASK_DIR}` and `${NOMAD_SECRETS_DIR}` forms and the
   prompt's template replaces them with the task's own values;
 - `HOME` set to the task directory;
-- the variables of the adapter protocol's `AgentEnvironment` over the
-  runtime's `env`, with those of `AgentUnset` removed from the runtime's
-  `env`, so no system, global or environment `git` configuration reaches
-  the agent's clones. The plugin removes them from the runtime's `env`
-  only: a `raw_exec` task also inherits the Nomad client's environment,
-  and a container keeps its image's `ENV`, and Nomad offers no way to unset
-  either. Add `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_SSH_VARIANT`, `GIT_DIR`,
-  `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
-  `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_EXEC_PATH`, `GIT_SSL_NO_VERIFY` and
-  `GIT_CURL_VERBOSE` to the client's `env.denylist`, and keep them out of
-  agent images. CA and proxy variables pass through as the operator sets
-  them. This protects an agent that follows its prompt; it does not
-  constrain one that runs commands of its own, which can undo it;
+- the variables of the adapter protocol's `AgentEnvironment`, as described
+  in [Agent environment](#agent-environment);
 - the runtime's `env`, driver `config` and `resources`.
 
 The plugin collects outputs from `$NOMAD_TASK_DIR/outputs` through the
 allocation filesystem API, once the allocation is terminal. Stopping a job
 returns before its allocation ends, so the plugin reads the allocation
 every 500 ms until it is terminal, within the receiver's 2-minute
-collection bound, and reports the outputs not collected when it is still
-running at the bound. It lists the
-whole tree first, and refuses it, reading nothing, when it holds more
-entries than the receiver's limit. The listing's modes come from `lstat`,
-so a link shows as a link; the API's stat and read follow links, and both
-block on a FIFO, so the plugin reads only the regular files the listing
-shows within the limits, and refuses a read whose length differs from the
-listing, since the API answers some failed reads with status 200 and the
-error as the body. An output the receiver streams, an S3 output, it
-streams as the receiver reads it, at most the size the listing shows; the
-receiver's upload fails when the length differs. The agent creates the outputs directory; without one
-there are no outputs. The listing shows no link count, so a hard link to
-a credential file reads as a regular file; on the macOS dev agent such a
-link is created and read. Nomad's source mounts the secrets directory as a
-tmpfs on Linux clients that run as root, where the link would cross
-filesystems; that is not measured here. The receiver's redaction of
-delivered credential values covers both cases.
+collection bound, and returns an error when it is still running at the
+bound. It lists the whole tree first, and refuses it, reading nothing, when
+it holds more entries than the receiver's limit. The listing's modes come
+from `lstat`, so a link shows as a link; the API's stat and read follow
+links, and both block on a FIFO, so the plugin reads only the regular files
+the listing shows within the limits, and refuses a read whose length
+differs from the listing, since the API answers some failed reads with
+status 200 and the error as the body. An output the receiver streams, an
+S3 output, it streams as the receiver reads it, at most the size the
+listing shows; the receiver's upload fails when the length differs. The
+agent creates the outputs directory; without one there are no outputs. The
+listing shows no link count, so a hard link to a credential file reads as
+a regular file; the receiver's redaction of delivered credential values
+covers it.
 
 The plugin reads the agent task's standard output. For the `podman` driver
 it reads the logs in CRI format.
 
+### Variables
+
+The prompt and the credentials travel in the Nomad variable
+`nomad/jobs/agent-<pool>-<run>-t<turn>`, which the job's own workload
+identity reads. The turn's input files travel in the job's group variable,
+`nomad/jobs/agent-<pool>-<run>-t<turn>/agent`, one item per file holding
+its base64 encoding, since Nomad's implicit workload policy reads no deeper
+path. Nomad caps a variable at 64 KiB of item names and values together,
+so a turn's inputs hold about 48 KiB; Dispatch refuses a turn over that,
+naming the input, and creates nothing. The plugin deletes the variables
+when the turn ends.
+
+### Sweep
+
+Every 30 seconds the plugin deletes the variables of jobs that have
+stopped, and of jobs never registered within 10 minutes, and purges agent
+jobs that have been dead for 10 minutes. A receiver sweeps only its own
+pool's jobs and variables. The 10 minutes run from a job's last allocation
+change, so a turn whose job ended while no pool member could hold it for
+longer than that runs again from the start on its next delivery.
+
+### S3 inputs
+
+The plugin fetches each S3 input from the presigned URL the receiver passes
+with an [`artifact`](https://developer.hashicorp.com/nomad/docs/job-specification/artifact)
+of the agent task. It sets `options.checksum` to `sha256:<hex>`,
+`options.archive` to `false`, mode `file`, and the destination
+`local/inputs/<name>`. `archive=false` keeps Nomad from unpacking an input
+whose name ends like an archive.
+
+Nomad verifies the checksum after the download ends, so it bounds neither
+the redirect target nor the size. On Nomad 2.0.7 the fetcher follows
+redirects and no artifact option stops it, so the checksum alone holds a
+redirected fetch to the object. The Nomad client's `artifact.http_max_size`
+is the only limit on how much a fetch reads. A fetch that fails or does not
+verify fails the task before it starts, and the plugin reports the job
+never started with class `fetch`, which the receiver ends
+`TASK_STATE_FAILED`.
+
+The URL is the artifact's source for the job's lifetime and appears in the
+task event of a failed fetch, so anyone who can read the job can read it
+until it expires. Purging the job removes it.
+
+### Agent environment
+
+The plugin sets the variables of the adapter protocol's `AgentEnvironment`
+over the runtime's `env` and removes those of `AgentUnset` from it, so no
+system, global or environment `git` configuration reaches the agent's
+clones. It removes them from the runtime's `env` only. A `raw_exec` task
+also inherits the Nomad client's environment, a container keeps its
+image's `ENV`, and Nomad offers no way to unset either. Add the variables
+of [`AgentUnset`](https://github.com/benemon/wherry/blob/main/adapter/adapter.go)
+to the client's `env.denylist`, and keep them out of agent images. CA and
+proxy variables pass through as the operator sets them. This protects an
+agent that follows its prompt. An agent that runs commands of its own can
+undo this.
+
+## Agent network reach
+
+The operator guide's
+[Agent network reach](https://github.com/benemon/wherry/blob/main/docs/operator-guide.md#agent-network-reach)
+says what an agent job's egress policy denies and allows.
+
+The plugin's agent jobs carry no `network` block, so the driver decides
+the task's network. `exec` and `raw_exec` tasks share the client host's
+network namespace. Podman tasks take Podman's default for the client
+(bridge networking when rootful, `slirp4netns` or `pasta` when rootless),
+or the network the runtime's `config` names in `network_mode`.
+
+1. Enable [Nomad ACLs](https://developer.hashicorp.com/nomad/docs/secure/acl).
+   An agent that shares the host's network reaches the client's HTTP API
+   on loopback, and without ACLs that API serves every job, URLs included.
+2. Place agents in their own node pool (the adapter's `node_pool`), on
+   hosts that run nothing else, so a host firewall can carry the policy.
+3. Use `exec` or Podman. Avoid `raw_exec`: a `raw_exec` task has no filesystem
+   isolation and runs as the client's user, often root, so no rule can tell it
+   from the client.
+4. On a host that runs `exec` tasks, the Nomad client must still reach the
+   servers, so a rule for the whole host cannot deny them. Match the agent
+   task's user instead (for example nftables `meta skuid`). The plugin sets
+   no task user, so `exec` tasks run as the driver's default, `nobody`; the
+   rule is as narrow as that user is dedicated to agents.
+5. For Podman, attach agents to a Podman network whose firewall rules carry
+   the policy, named by `network_mode` in the runtime's `config`.
+
+Every Nomad task has the
+[task API](https://developer.hashicorp.com/nomad/docs/runtime/task-api)
+socket in its secrets directory, which no address rule covers. It accepts
+only an authenticated request. The plugin exposes no workload identity
+token to the agent; keep `NOMAD_TOKEN`, `CONSUL_TOKEN`,
+`CONSUL_HTTP_TOKEN` and `VAULT_TOKEN` out of the runtime's `env` and the
+image. A client `env.denylist` replaces Nomad's default list, which holds
+those names, rather than extending it.
+
+The client's artifact fetches run in a subprocess of the client, in the
+client host's network namespace, outside any task network. Restrict the
+client host's egress separately.
+
 ## Tests
 
 ```sh
-go test ./nomad/...
+make test
 ```
 
 Tests that need a Nomad agent run when `WHERRY_NOMAD_DEV_ADDR` names a dev

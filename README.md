@@ -8,6 +8,15 @@ plugin directory for each adapter type in its configuration.
 | --- | --- | --- |
 | [`nomad`](nomad) | `wherry-plugin-nomad` | `nomad` |
 
-Each plugin is its own Go module. `go.work` joins them with the adapter
-protocol module in a wherry checkout beside this repository, which local
-builds need until the protocol module is tagged.
+Each plugin is its own Go module and builds against the tagged adapter
+protocol module, `github.com/benemon/wherry/adapter`. `make build` builds
+the Nomad plugin, `make check` runs the CI gates, and
+`make dist VERSION=<version>` writes release archives into `dist`.
+
+To develop against a local wherry checkout beside this repository, create
+a Go workspace from the repository root. `go.work` is for local development
+only and is not tracked.
+
+```sh
+go work init ./nomad ../wherry/adapter
+```

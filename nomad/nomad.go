@@ -82,8 +82,8 @@ type Adapter struct {
 	runtime       Runtime
 	nodePool      string
 	datacenters   []string
-	// prefix starts every job ID of the adapter's pool; agentJob matches those IDs, runVariable a run
-	// variable, its group's variable, or a task's variable that releases before this one wrote, of one of those jobs.
+	// prefix starts every job ID of the adapter's pool; agentJob matches those IDs and runVariable the variables of
+	// those jobs, including per-task variables one level below a group's.
 	prefix      string
 	agentJob    *regexp.Regexp
 	runVariable *regexp.Regexp
@@ -105,7 +105,7 @@ func newClient(config Config, token string) (*api.Client, error) {
 	return api.NewClient(apiConfig)
 }
 
-// New builds an adapter for a pool's jobs on client, which config's address, CA and namespace built.
+// New builds an adapter for a pool's jobs on client.
 func New(config Config, pool string, client *api.Client) (*Adapter, error) {
 	if config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv) {
 		return nil, errors.New("credential_env must be an environment variable name")
@@ -207,7 +207,7 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 			return wherry.OutcomeUnknown, wherry.Handle{}, err
 		}
 		if _, _, err := adapter.client.Jobs().RegisterOpts(job, &api.RegisterOptions{EnforceIndex: true, ModifyIndex: 0}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-			return adapter.notStarted(ctx, run, fmt.Errorf("register: %w", err))
+			return adapter.notStarted(ctx, run, redacted("register", jobID, err))
 		}
 	}
 	handle, _, err := adapter.wait(ctx, jobID, job.TaskGroups[0].Tasks[0].Driver)
@@ -308,7 +308,7 @@ func jobState(alloc *api.AllocationListStub) wherry.JobState {
 	return wherry.JobNeverStarted
 }
 
-// buildJob takes nothing from the task except the run ID and the matched offer.
+// buildJob builds the turn's batch job, whose templates read the run's material from the variables at path.
 func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) {
 	runtime := adapter.runtime
 	jobID := adapter.jobID(run.ID, run.Turn)
@@ -350,9 +350,8 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 			DestPath:     new("${NOMAD_SECRETS_DIR}/credentials/" + secret.File), ChangeMode: new("noop"),
 		})
 	}
-	// Nomad's go-getter verifies each fetch's SHA-256, which fixes its size too. It follows redirects, and Nomad 2.0.7
-	// has no setting that stops it, so a redirect is held to the content's hash alone. archive=false keeps it from
-	// unpacking an object whose name ends like an archive.
+	// go-getter follows redirects and Nomad 2.0.7 has no option that stops it, so the checksum alone holds a
+	// redirected fetch to the object. archive=false keeps it from unpacking an object whose name ends like an archive.
 	var artifacts []*api.TaskArtifact
 	for _, fetch := range run.Fetches {
 		artifacts = append(artifacts, &api.TaskArtifact{
@@ -676,10 +675,9 @@ func (adapter *Adapter) release(ctx context.Context, jobID string) error {
 	return errors.Join(adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+inputsSuffix))
 }
 
-// Collect waits until the allocation is terminal, for as long as ctx allows, then lists the outputs directory through
-// the allocation filesystem API. The listing's modes are lstat's, so a link is never followed; the API's stat and
-// read follow links and block on a FIFO, so only regular files within the limits are read, and only after the whole
-// tree is listed and counted. A regular file the limits stream is read as the receiver of its Body reads it.
+// Collect lists the outputs directory once the allocation is terminal. The listing's modes are lstat's, and the API's
+// stat and read follow links and block on a FIFO, so it reads only listed regular files within the limits, after
+// counting the whole tree.
 func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limits wherry.Limits, outputs chan<- wherry.Output) error {
 	handle, err := decodeHandle(encoded)
 	if err != nil {

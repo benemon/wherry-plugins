@@ -21,9 +21,8 @@ func sum(data []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
-// objects serves data by path over plain http, which the dev agent's go-getter can reach without a trusted certificate;
-// the plugin fetches whatever URL the core has checked, so the scheme does not matter here. /moved/ redirects to the
-// object of the rest of its path. It records each request's method and path.
+// objects serves data by path over plain http, which the dev agent's go-getter reaches without a trusted certificate.
+// /moved/ redirects to the rest of its path. It records each request's method and path.
 type objects struct {
 	server   *httptest.Server
 	mu       sync.Mutex
@@ -126,7 +125,7 @@ func TestNomadFollowsAFetchsRedirect(t *testing.T) {
 	}
 }
 
-// A streamed output's Body reads the file whole as the receiver of the Output reads it; the others are read as before.
+// A streamed output's Body reads the whole file; the other outputs arrive as Data.
 func TestCollectStreamsOnNomad(t *testing.T) {
 	adapter, ctx := scriptAdapter(t, `set -e; o="$WHERRY_OUTPUT_DIR"; mkdir -p "$o"; yes b | head -c 3145728 > "$o/big.bin"; echo small > "$o/small.txt"; echo '{"type":"result","result":"done"}'`)
 	run := testRun("stream")
