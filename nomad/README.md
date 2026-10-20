@@ -33,7 +33,7 @@ the receiver with `--plugin-dir` naming it:
 
 ```sh
 install -o root -g root -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
-wherry receiver --bundle FILE --state-dir DIR --plugin-dir /usr/local/libexec/wherry/plugins
+wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir /usr/local/libexec/wherry/plugins
 ```
 
 The receiver refuses a plugin directory or binary owned by a user other
