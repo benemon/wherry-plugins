@@ -135,6 +135,19 @@ receiver exits with `adapter <name>: ...` on an error.
 | `config` | the driver's task configuration |
 | `env` | environment variables for the agent task |
 | `resources` | `cpu` (MHz) and `memory_mb`; unset values take Nomad defaults |
+| `user` | the agent task's user; unset, the driver's default |
+
+`user` is a name matching `[a-z_][a-z0-9_-]*`, or `UID` or `UID:GID` with
+positive integers below 2^32 and no leading zeros; root (0) is refused. A numeric `user` also owns the task's credential
+files, with the UID as the group when the GID is absent. The plugin cannot
+resolve a name to an ID on the client, so with a name the credential files
+keep the client's owner; use a numeric `user` where the driver takes one.
+The `docker` and `podman` drivers pass `user` to the container runtime,
+which takes either form. The `exec` and `raw_exec` drivers look `user` up
+by name on the client and fail a task whose user has no account there, so
+for them `user` is a name. A numeric `user` fails every `exec` and
+`raw_exec` task, and on those drivers the credential files keep the
+client's owner and mode 0644 whatever `user` is set.
 
 The plugin sets `HOME` in `env`. [Agent jobs](#agent-jobs) describes the
 job it builds.
@@ -197,9 +210,12 @@ The agent task receives:
 - each S3 input in `$NOMAD_TASK_DIR/inputs`, fetched as described in
   [S3 inputs](#s3-inputs);
 - each task credential as a file in `$NOMAD_SECRETS_DIR/credentials`,
-  rendered the same way, with Nomad's default template mode, 0644. `ssh`
-  refuses a private key that others can read when the agent's user owns
-  the file;
+  rendered the same way. With a numeric `user`, each file belongs to that
+  UID and GID with mode 0600. With a user name or no `user`, each file
+  belongs to the Nomad client's user, usually root, with Nomad's default
+  template mode, 0644, so any user in the task's filesystem can read it.
+  `ssh` refuses a private key that others can read when the agent's user
+  owns the file;
 - `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR` and `WHERRY_CREDENTIALS_DIR` set
   to `$NOMAD_TASK_DIR/inputs`, `$NOMAD_TASK_DIR/outputs` and
   `$NOMAD_SECRETS_DIR/credentials`, and the same paths written into the
@@ -315,9 +331,10 @@ or the network the runtime's `config` names in `network_mode`.
    from the client.
 4. On a host that runs `exec` tasks, the Nomad client must still reach the
    servers, so a rule for the whole host cannot deny them. Match the agent
-   task's user instead (for example nftables `meta skuid`). The plugin sets
-   no task user, so `exec` tasks run as the driver's default, `nobody`; the
-   rule is as narrow as that user is dedicated to agents.
+   task's user instead (for example nftables `meta skuid`). Set the
+   runtime's `user` to a user dedicated to agents, so the rule matches
+   agents alone. Without `user`, `exec` tasks run as the driver's default,
+   `nobody`, and the rule is as narrow as that user is dedicated to agents.
 5. For Podman, attach agents to a Podman network whose firewall rules carry
    the policy, named by `network_mode` in the runtime's `config`.
 
