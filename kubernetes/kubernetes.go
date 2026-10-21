@@ -37,6 +37,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 	utilexec "k8s.io/client-go/util/exec"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 const (
@@ -153,7 +154,8 @@ func (e *fetchError) Error() string { return "fetch " + e.name + ": " + e.reason
 
 // newClient builds the API configuration for config's address and CA with token, or the in-cluster one.
 func newClient(config Config, token string) (*rest.Config, error) {
-	client := &rest.Config{Host: config.Address, BearerToken: token, QPS: 50, Burst: 100}
+	client := &rest.Config{Host: config.Address, BearerToken: token, QPS: 50, Burst: 100,
+		RateLimiter: limiter{flowcontrol.NewTokenBucketRateLimiter(50, 100)}}
 	switch {
 	case config.Address == "":
 		host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
@@ -178,6 +180,17 @@ func newClient(config Config, token string) (*rest.Config, error) {
 		client.CAFile = config.CAFile
 	}
 	return client, nil
+}
+
+// limiter makes the client-side limiter's predictive refusal the context ending, which is what it predicts.
+type limiter struct{ flowcontrol.RateLimiter }
+
+func (l limiter) Wait(ctx context.Context) error {
+	if err := l.RateLimiter.Wait(ctx); err != nil {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
 }
 
 func quantity(field, value, fallback string) (*resource.Quantity, error) {

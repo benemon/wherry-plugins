@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 const (
@@ -84,7 +85,7 @@ func testRun(name string) wherry.Run {
 func fast(t *testing.T) {
 	t.Helper()
 	saved := []time.Duration{waitPoll, followPoll, collectPoll, stopGrace}
-	waitPoll, followPoll, collectPoll, stopGrace = 5*time.Millisecond, 5*time.Millisecond, 5*time.Millisecond, 100*time.Millisecond
+	waitPoll, followPoll, collectPoll, stopGrace = 10*time.Millisecond, 10*time.Millisecond, 10*time.Millisecond, 100*time.Millisecond
 	t.Cleanup(func() { waitPoll, followPoll, collectPoll, stopGrace = saved[0], saved[1], saved[2], saved[3] })
 }
 
@@ -1754,6 +1755,35 @@ func TestLookupTimeoutDeletesThePod(t *testing.T) {
 	}
 	if api.pod(pod.Name) != nil {
 		t.Fatal("the pod of a cut-short lookup remains")
+	}
+}
+
+func TestRateLimitedWaitPastTheDeadlineIsTheDeadline(t *testing.T) {
+	fast(t)
+	api := newFakeAPI(t)
+	client := mustClient(t, api)
+	if _, ok := client.RateLimiter.(limiter); !ok {
+		t.Fatalf("rate limiter %T; want the limiter wrapper", client.RateLimiter)
+	}
+	// One token a second: the second read of the wait needs a token past the deadline.
+	client.RateLimiter = limiter{flowcontrol.NewTokenBucketRateLimiter(1, 1)}
+	adapter, err := New(testConfig(api.server.URL, api.caFile), testAdapter, testPool, client, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.set(func() { api.kubelet = pendingKubelet })
+	pod := api.agentPod(t, adapter, "limited", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	var failure *wherry.Error
+	if _, err := adapter.Lookup(ctx, "run-limited", 1); !errors.Is(err, context.DeadlineExceeded) || errors.As(err, &failure) && failure.Class != "timeout" {
+		t.Fatalf("lookup = %v; want the deadline", err)
+	}
+	if api.pod(pod.Name) != nil {
+		t.Fatal("the pod of a lookup cut short by the rate limiter remains")
+	}
+	if samples(t, adapter)["wherry_adapter_platform_errors_total/other"].Value != 0 {
+		t.Fatal("the rate limiter's refusal was counted as class other")
 	}
 }
 
