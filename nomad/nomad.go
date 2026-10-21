@@ -714,26 +714,23 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 	if alloc.ClientTerminalStatus() {
 		return nil
 	}
-	if signalErr := adapter.client.Allocations().Signal(alloc, (&api.QueryOptions{}).WithContext(ctx), taskName, "SIGTERM"); signalErr != nil {
-		// Nomad refuses to signal a task that exited after the read above.
-		latest, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
-		if err == nil && (latest.ClientTerminalStatus() || latest.TaskStates[taskName] != nil && latest.TaskStates[taskName].State == "dead") {
+	// Nomad refuses to signal a task that has just exited, and the server learns of the exit only when the client
+	// next reports, so a refused signal waits for the allocation like a delivered one.
+	signalErr := adapter.client.Allocations().Signal(alloc, (&api.QueryOptions{}).WithContext(ctx), taskName, "SIGTERM")
+	poll := time.NewTicker(time.Second)
+	defer poll.Stop()
+	for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); {
+		if adapter.finished(ctx, handle.Alloc) != nil {
 			return nil
 		}
-		adapter.failed("signal allocation", signalErr)
-	} else {
-		poll := time.NewTicker(time.Second)
-		defer poll.Stop()
-		for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); {
-			if adapter.finished(ctx, handle.Alloc) != nil {
-				return nil
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-poll.C:
-			}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-poll.C:
 		}
+	}
+	if signalErr != nil {
+		adapter.failed("signal allocation", signalErr)
 	}
 	_, _, err = adapter.client.Jobs().Deregister(handle.Job, false, (&api.WriteOptions{}).WithContext(ctx))
 	return adapter.failed("deregister job", err)

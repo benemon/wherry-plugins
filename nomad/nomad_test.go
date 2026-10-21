@@ -2274,30 +2274,25 @@ func TestTerminalCarriesTheStartFailuresMessage(t *testing.T) {
 	}
 }
 
-func TestStopTreatsASignalRefusedForAnExitedTaskAsStopped(t *testing.T) {
+func TestStopWaitsForATaskWhoseSignalWasRefused(t *testing.T) {
 	running := api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusRunning, TaskStates: map[string]*api.TaskState{taskName: {State: "running"}}}
 	for _, test := range []struct {
-		name   string
-		latest api.Allocation
+		name string
+		// exitedAt is the allocation read from which Nomad reports the task complete; 0 is never.
+		exitedAt int
 		// stopped is whether Stop counts the signal's failure and stops the job.
 		stopped bool
 	}{
-		{"terminal", api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusComplete}, false},
-		{"task dead", api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusRunning, TaskStates: map[string]*api.TaskState{taskName: {State: "dead"}}}, false},
-		{"still running", running, true},
-		{"read fails", api.Allocation{}, true},
+		{"exit reported late", 3, false},
+		{"still running", 0, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reads := 0
 			adapter, requests := nomadServer(t, map[string]http.HandlerFunc{
 				"GET /v1/allocation/alloc-1": func(response http.ResponseWriter, _ *http.Request) {
 					alloc := running
-					if reads++; reads > 1 {
-						if test.latest.ID == "" {
-							http.Error(response, "unavailable", http.StatusInternalServerError)
-							return
-						}
-						alloc = test.latest
+					if reads++; test.exitedAt > 0 && reads >= test.exitedAt {
+						alloc = api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusComplete}
 					}
 					_ = json.NewEncoder(response).Encode(&alloc)
 				},
