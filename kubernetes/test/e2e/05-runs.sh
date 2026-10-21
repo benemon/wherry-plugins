@@ -15,7 +15,7 @@ submit() {
 }
 # finish awaits a run into $work/<run>.await and its outputs into $work/outputs/<run>, and checks the state it ended in.
 finish() {
-	host await --timeout 5m --outputs-dir "$work/outputs/$1" "$1" >"$work/$1.await" || true
+	wherry await "$1" --config-file "$host_config" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.await" || true
 	[ "$(head -n 1 "$work/$1.await")" = "$2" ] || fail "run $1 ended $(head -n 1 "$work/$1.await"); want $2"
 }
 replied() { grep -x -F "$2" "$work/$1.await" >/dev/null || fail "run $1 did not reply '$2'"; }
