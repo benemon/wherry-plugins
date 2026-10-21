@@ -15,12 +15,7 @@ import (
 	wherry "github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/adapter/adaptertest"
 	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/nomad/api"
 )
-
-func newFactory() *factory {
-	return &factory{clients: map[clientKey]*api.Client{}}
-}
 
 func settings(t *testing.T, name string, config map[string]any) wherry.Settings {
 	t.Helper()
@@ -39,58 +34,29 @@ func execConfig(address string, command string, args ...any) map[string]any {
 }
 
 func TestFactoryDecodesStrictly(t *testing.T) {
-	f := newFactory()
 	withCredential := settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true"))
 	withCredential.Credential = "model"
-	if _, err := f.adapter(withCredential, hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "credential_env") {
+	if _, err := newAdapter(withCredential, hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "credential_env") {
 		t.Fatalf("got %v, want credential_env required", err)
 	}
 	unknown := execConfig("http://127.0.0.1:1", "/bin/true")
 	unknown["token"] = "x"
-	if _, err := f.adapter(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
+	if _, err := newAdapter(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
 		t.Fatal("accepted adapter config with an unknown member")
 	}
-	if _, err := f.adapter(settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true")), hclog.NewNullLogger()); err != nil {
+	if _, err := newAdapter(settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true")), hclog.NewNullLogger()); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestFactoryGivesTheAdapterServesLogger(t *testing.T) {
 	logger := hclog.New(&hclog.LoggerOptions{Name: "served"})
-	built, err := newFactory().adapter(settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true")), logger)
+	built, err := newAdapter(settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true")), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if built.(*Adapter).logger != logger {
 		t.Fatal("adapter logs elsewhere than the logger Serve gave the factory")
-	}
-}
-
-func TestFactorySharesClients(t *testing.T) {
-	f := newFactory()
-	first, err := f.adapter(settings(t, "exec", execConfig("http://127.0.0.1:1", "/bin/true")), hclog.NewNullLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	same, err := f.adapter(settings(t, "podman", execConfig("http://127.0.0.1:1", "/bin/false")), hclog.NewNullLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.(*Adapter).client != same.(*Adapter).client {
-		t.Fatal("adapters with the same address, CA, namespace and token got separate clients")
-	}
-	other := settings(t, "other", execConfig("http://127.0.0.1:1", "/bin/true"))
-	other.Platform = "another-token"
-	elsewhere := execConfig("http://127.0.0.1:1", "/bin/true")
-	elsewhere["namespace"] = "wherry"
-	for _, s := range []wherry.Settings{other, settings(t, "elsewhere", elsewhere)} {
-		distinct, err := f.adapter(s, hclog.NewNullLogger())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if distinct.(*Adapter).client == first.(*Adapter).client {
-			t.Fatalf("adapter %s shares a client across different connection settings", s.Name)
-		}
 	}
 }
 
@@ -102,11 +68,10 @@ func TestFactoryTokenFallsBackToNomadToken(t *testing.T) {
 		_, _ = response.Write([]byte("[]"))
 	}))
 	defer server.Close()
-	f := newFactory()
 	withBundle := settings(t, "bundle", execConfig(server.URL, "/bin/true"))
 	withBundle.Platform = "bundle-token"
 	for _, s := range []wherry.Settings{settings(t, "environment", execConfig(server.URL, "/bin/true")), withBundle} {
-		a, err := f.adapter(s, hclog.NewNullLogger())
+		a, err := newAdapter(s, hclog.NewNullLogger())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,7 +96,7 @@ func conformanceSettings(t *testing.T) (wherry.Settings, wherry.Settings) {
 
 func TestConformance(t *testing.T) {
 	completes, neverStarts := conformanceSettings(t)
-	adaptertest.Run(t, newFactory().adapter, completes, neverStarts)
+	adaptertest.Run(t, newAdapter, completes, neverStarts)
 }
 
 // TestConformanceOverTheLink runs the suite against the built plugin, through the receiver's side of the link.

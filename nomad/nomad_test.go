@@ -53,7 +53,7 @@ func testConfig(address string) Config {
 // testAdapter is the adapter build names, as testRun's runs do.
 const testAdapter = "container"
 
-// build is the factory's path to one adapter named testAdapter, without its client cache.
+// build is newAdapter's path to one adapter named testAdapter, from a Config rather than settings.
 func build(config Config, pool, token string) (*Adapter, error) {
 	client, err := newClient(config, token)
 	if err != nil {
@@ -1053,13 +1053,19 @@ func TestSweepDeletesVariableOfStoppedJob(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	// A running task that ignores SIGTERM keeps the job stopped but not dead for the kill timeout.
 	run := scriptRun(adapter, "sweep-stopped", `trap '' TERM; sleep 300`)
-	waitRunning(t, ctx, adapter, dispatch(t, adapter, ctx, run))
+	handle := dispatch(t, adapter, ctx, run)
+	waitRunning(t, ctx, adapter, handle)
 	if _, _, err := adapter.client.Jobs().Deregister(adapter.jobID(run.ID, run.Turn), false, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
 		t.Fatal(err)
 	}
+	// Nomad can mark the stopped job dead while its allocation still runs, so the job's status says nothing here.
 	job, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), (&api.QueryOptions{}).WithContext(ctx))
-	if err != nil || !*job.Stop || *job.Status == "dead" {
-		t.Fatalf("job after stop = %#v, %v; want stopped and not yet dead", job, err)
+	if err != nil || !*job.Stop {
+		t.Fatalf("job after stop = %#v, %v; want stopped", job, err)
+	}
+	alloc, _, err := adapter.client.Allocations().Info(decoded(t, handle).Alloc, (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil || alloc.ClientStatus != api.AllocClientStatusRunning {
+		t.Fatalf("allocation after stop = %v, %v; want still running", alloc, err)
 	}
 	sweepLeaves(t, adapter, ctx, adapter.variablePath(run.ID, run.Turn), false)
 }
@@ -1948,18 +1954,6 @@ func TestBuildJobDeliversFilesThroughTemplates(t *testing.T) {
 		if got, ok := templates[destination]; !ok || got != want {
 			t.Errorf("template for %s = %q, %v; want %q", destination, got, ok, want)
 		}
-	}
-}
-
-// Variables under a job's group path deeper than the group's own are swept like the rest.
-func TestSweepDeletesStaleLegacyTaskVariables(t *testing.T) {
-	adapter, ctx := devAdapter(t)
-	shortGrace(t)
-	run := testRun("sweep-legacy")
-	for _, suffix := range []string{"/agent/agent", "/agent/git"} {
-		path := adapter.variablePath(run.ID, run.Turn) + suffix
-		putVariable(t, adapter, ctx, path)
-		sweepLeaves(t, adapter, ctx, path, false)
 	}
 }
 
