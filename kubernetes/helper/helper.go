@@ -29,6 +29,8 @@ const (
 	ExitFailed   = 1
 	ExitFetch    = 2
 	ExitProtocol = 3
+	// ExitNotWaiting is a put that found no init container waiting for it yet.
+	ExitNotWaiting = 4
 )
 
 // The pod's paths, below Env.Root.
@@ -43,6 +45,8 @@ const (
 )
 
 const poll = 100 * time.Millisecond
+
+var errNotWaiting = errors.New("the init container is not waiting for inputs")
 
 // awaitIdle is how long the init container waits with no put in progress before it gives up on the fetches.
 var awaitIdle = 10 * time.Minute
@@ -96,7 +100,11 @@ func run(env Env, args []string) (int, error) {
 	case verb == "inputs" && (len(args) == 1 || args[1] == "--await"):
 		return env.inputs(args[1:])
 	case verb == "inputs" && len(args) == 3 && args[1] == "put":
-		return 0, env.put(args[2])
+		err := env.put(args[2])
+		if errors.Is(err, errNotWaiting) {
+			return ExitNotWaiting, err
+		}
+		return 0, err
 	case verb == "inputs" && len(args) == 2 && args[1] == "done":
 		return 0, env.done()
 	case verb == "inputs" && len(args) == 3 && args[1] == "fail":
@@ -152,6 +160,15 @@ func (env Env) inputs(args []string) (int, error) {
 			return 0, err
 		}
 	}
+	// The plugin puts once the container runs, so the lock must exist before the material is copied.
+	var lock *os.File
+	if fetches != nil {
+		var err error
+		if lock, err = env.coordinate(fetches); err != nil {
+			return 0, err
+		}
+		defer lock.Close()
+	}
 	entries, err := os.ReadDir(env.path(materialDir))
 	if err != nil {
 		return 0, errors.New("the material volume is not readable")
@@ -180,23 +197,27 @@ func (env Env) inputs(args []string) (int, error) {
 	if fetches == nil {
 		return 0, nil
 	}
-	return env.await(fetches)
+	return env.await(lock, fetches)
 }
 
-// await waits for done or fail from the plugin, or gives up after awaitIdle with no put in progress.
-func (env Env) await(fetches []expected) (int, error) {
+// coordinate writes the fetch manifest and creates the put lock.
+func (env Env) coordinate(fetches []expected) (*os.File, error) {
 	if err := mkdir(env.path(coordination)); err != nil {
-		return 0, err
+		return nil, err
 	}
 	manifest, _ := json.Marshal(fetches) // strings and integers always encode
 	if err := os.WriteFile(env.path(coordination, "manifest"), manifest, 0o600); err != nil {
-		return 0, errors.New("cannot write the fetch manifest")
+		return nil, errors.New("cannot write the fetch manifest")
 	}
 	lock, err := os.OpenFile(env.path(coordination, "lock"), os.O_CREATE|os.O_RDONLY, 0o600)
 	if err != nil {
-		return 0, errors.New("cannot create the put lock")
+		return nil, errors.New("cannot create the put lock")
 	}
-	defer lock.Close()
+	return lock, nil
+}
+
+// await waits for done or fail from the plugin, or gives up after awaitIdle with no put in progress.
+func (env Env) await(lock *os.File, fetches []expected) (int, error) {
 	for busy := time.Now(); ; time.Sleep(poll) {
 		if name, err := os.ReadFile(env.path(coordination, "fail")); err == nil {
 			return ExitFetch, fmt.Errorf("input %s: not fetched", name)
@@ -225,7 +246,7 @@ func (env Env) await(fetches []expected) (int, error) {
 func (env Env) put(name string) error {
 	lock, err := os.Open(env.path(coordination, "lock"))
 	if err != nil {
-		return errors.New("the init container is not waiting for inputs")
+		return errNotWaiting
 	}
 	defer lock.Close()
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_SH); err != nil {

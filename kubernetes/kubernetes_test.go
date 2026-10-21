@@ -1456,10 +1456,12 @@ func TestDispatchRetriesAFailedPut(t *testing.T) {
 		failFail bool
 		state    wherry.JobState
 		gets     int
+		failure  error
 	}{
-		{"one transport failure", 1, false, wherry.JobRunning, 2},
-		{"three transport failures", 3, false, wherry.JobNeverStarted, 3},
-		{"a failed fail", 3, true, 0, 3},
+		{"one transport failure", 1, false, wherry.JobRunning, 2, transportFailure},
+		{"three transport failures", 3, false, wherry.JobNeverStarted, 3, transportFailure},
+		{"a failed fail", 3, true, 0, 3, transportFailure},
+		{"a put before the init container waits", 1, false, wherry.JobRunning, 2, &exitError{code: helper.ExitNotWaiting, message: "the init container is not waiting for inputs"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			api := newFakeAPI(t)
@@ -1472,7 +1474,7 @@ func TestDispatchRetriesAFailedPut(t *testing.T) {
 				execer.fail = func(_ string, args []string) error {
 					if args[1] == "put" {
 						if puts++; puts <= test.failures {
-							return transportFailure
+							return test.failure
 						}
 					}
 					if args[1] == "fail" && test.failFail {

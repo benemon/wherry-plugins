@@ -205,6 +205,37 @@ func TestInputsPutVerifiesSizeAndDigest(t *testing.T) {
 	}
 }
 
+func TestInputsPutBeforeTheWaitExitsNotWaiting(t *testing.T) {
+	root := pod(t)
+	if code, _, _ := invoke(root, strings.NewReader("hello"), nil, "inputs", "put", "object.bin"); code != ExitNotWaiting {
+		t.Fatalf("put with no init container waiting exited %d; want %d", code, ExitNotWaiting)
+	}
+}
+
+func TestInputsAwaitTakesPutsWhileCopyingTheMaterial(t *testing.T) {
+	root := pod(t)
+	material(t, root, map[string]string{"prompt": "p"})
+	// The copy blocks on the FIFO until it is written.
+	fifo := filepath.Join(root, materialDir, "inputs.slow")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wait := await(t, root, "object.bin", "5", digest("hello"))
+	if code, _, stderr := invoke(root, strings.NewReader("hello"), nil, "inputs", "put", "object.bin"); code != 0 {
+		t.Fatalf("put during the material copy exited %d: %s", code, stderr)
+	}
+	if err := os.WriteFile(fifo, []byte("slow"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	invoke(root, nil, nil, "inputs", "done")
+	if end := ended(t, wait); end.code != 0 {
+		t.Fatalf("init exited %d: %s", end.code, end.stderr)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, inputsDir, "slow")); err != nil || string(got) != "slow" {
+		t.Fatalf("copied %q, %v; want the material after the put", got, err)
+	}
+}
+
 // unread fails the test on any read.
 type unread struct{ t *testing.T }
 

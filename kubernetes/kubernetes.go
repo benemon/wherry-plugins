@@ -664,14 +664,14 @@ func (adapter *Adapter) deliver(ctx context.Context, name string, fetches []wher
 	return nil
 }
 
-// retried calls call up to putAttempts times while it fails in transport, and reports whether the init container
-// ended in between.
+// retried calls call up to putAttempts times while it fails in transport or finds the init container not yet waiting,
+// and reports whether the init container ended in between.
 func (adapter *Adapter) retried(ctx context.Context, name, op string, call func() error) (bool, error) {
 	for attempt := 1; ; attempt++ {
 		err := call()
 		var exit *exitError
 		var fetchErr *fetchError
-		if err == nil || errors.As(err, &exit) || errors.As(err, &fetchErr) || ctx.Err() != nil {
+		if err == nil || errors.As(err, &exit) && exit.code != helper.ExitNotWaiting || errors.As(err, &fetchErr) || ctx.Err() != nil {
 			return false, err
 		}
 		adapter.handled(op, err)
