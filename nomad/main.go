@@ -10,11 +10,15 @@ import (
 	"sync"
 
 	wherry "github.com/benemon/wherry/adapter"
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/api"
 )
 
 func main() {
-	wherry.Serve((&factory{clients: map[clientKey]*api.Client{}}).adapter)
+	// Serve points os.Stderr at its stdio stream, which the receiver discards; the receiver relays JSON lines written to
+	// the process's own stderr at their level.
+	logger := hclog.New(&hclog.LoggerOptions{Output: os.Stderr, JSONFormat: true, Level: hclog.Info})
+	wherry.Serve((&factory{clients: map[clientKey]*api.Client{}, logger: logger}).adapter)
 }
 
 type clientKey struct{ address, ca, namespace, token string }
@@ -23,6 +27,7 @@ type clientKey struct{ address, ca, namespace, token string }
 type factory struct {
 	mu      sync.Mutex
 	clients map[clientKey]*api.Client
+	logger  hclog.Logger
 }
 
 func (f *factory) adapter(settings wherry.Settings) (wherry.Adapter, error) {
@@ -42,7 +47,7 @@ func (f *factory) adapter(settings wherry.Settings) (wherry.Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return New(config, settings.Pool, client)
+	return New(config, settings.Name, settings.Pool, client, f.logger)
 }
 
 func (f *factory) client(config Config, token string) (*api.Client, error) {

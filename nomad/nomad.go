@@ -24,6 +24,7 @@ import (
 	"time"
 
 	wherry "github.com/benemon/wherry/adapter"
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/api"
 )
 
@@ -80,6 +81,8 @@ type Resources struct {
 
 // Adapter registers per-run agent jobs in one namespace.
 type Adapter struct {
+	// name is the adapter's name, which its jobs' meta records.
+	name          string
 	client        *api.Client
 	namespace     string
 	credentialEnv string
@@ -94,6 +97,7 @@ type Adapter struct {
 	agentJob    *regexp.Regexp
 	runVariable *regexp.Regexp
 	metrics     metrics
+	logger      hclog.Logger
 }
 
 // metrics holds the values Metrics reports: API errors by class, sweep deletions by kind, the dead jobs the latest sweep
@@ -123,8 +127,8 @@ func newClient(config Config, token string) (*api.Client, error) {
 	return api.NewClient(apiConfig)
 }
 
-// New builds an adapter for a pool's jobs on client.
-func New(config Config, pool string, client *api.Client) (*Adapter, error) {
+// New builds the adapter named name for a pool's jobs on client.
+func New(config Config, name, pool string, client *api.Client, logger hclog.Logger) (*Adapter, error) {
 	if config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv) {
 		return nil, errors.New("credential_env must be an environment variable name")
 	}
@@ -157,12 +161,13 @@ func New(config Config, pool string, client *api.Client) (*Adapter, error) {
 	sum := sha256.Sum256([]byte(pool))
 	prefix := jobPrefix + hex.EncodeToString(sum[:])[:12] + "-"
 	return &Adapter{
-		client: client, namespace: config.Namespace, credentialEnv: config.CredentialEnv, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters,
+		name: name, client: client, namespace: config.Namespace, credentialEnv: config.CredentialEnv, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters,
 		uid: uid, gid: gid,
 		prefix:      prefix,
 		agentJob:    regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+$`),
 		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+)(` + regexp.QuoteMeta(inputsSuffix) + `(/[a-z]+)?)?$`),
 		metrics:     metrics{errors: map[string]float64{}, deletions: map[string]float64{}, placement: wherry.Histogram{Buckets: make([]uint64, len(wherry.PlacementBuckets))}},
+		logger:      logger,
 	}, nil
 }
 
@@ -185,7 +190,7 @@ func (adapter *Adapter) Directories() wherry.Directories {
 func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 	nodes, _, err := adapter.client.Nodes().List((&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return false, adapter.failed(err)
+		return false, adapter.failed("list nodes", err)
 	}
 	for _, node := range nodes {
 		if node.Status != api.NodeStatusReady || node.SchedulingEligibility != api.NodeSchedulingEligible {
@@ -232,21 +237,21 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 	}
 	variable := &api.Variable{Namespace: adapter.namespace, Path: path, Items: items}
 	if _, _, err := adapter.client.Variables().Update(variable, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-		return adapter.notStarted(ctx, run, redacted("write", path, adapter.failed(err)))
+		return adapter.notStarted(ctx, run, redacted("write", path, adapter.failed("write variable", err)))
 	}
 	if len(inputs) > 0 {
 		inputsPath := path + inputsSuffix
 		if _, _, err := adapter.client.Variables().Update(&api.Variable{Namespace: adapter.namespace, Path: inputsPath, Items: inputs}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-			return adapter.notStarted(ctx, run, redacted("write", inputsPath, adapter.failed(err)))
+			return adapter.notStarted(ctx, run, redacted("write", inputsPath, adapter.failed("write variable", err)))
 		}
 	}
 	registered := false
 	if _, _, err := adapter.client.Jobs().Info(jobID, (&api.QueryOptions{}).WithContext(ctx)); err != nil {
 		if !notFound(err) {
-			return wherry.OutcomeUnknown, wherry.Handle{}, adapter.failed(err)
+			return wherry.OutcomeUnknown, wherry.Handle{}, adapter.failed("read job", err)
 		}
 		if _, _, err := adapter.client.Jobs().RegisterOpts(job, &api.RegisterOptions{EnforceIndex: true, ModifyIndex: 0}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-			return adapter.notStarted(ctx, run, redacted("register", jobID, adapter.failed(err)))
+			return adapter.notStarted(ctx, run, redacted("register", jobID, adapter.failed("register job", err)))
 		}
 		registered = true
 	}
@@ -266,7 +271,7 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 // the core resolves with Lookup.
 func (adapter *Adapter) notStarted(ctx context.Context, run wherry.Run, cause error) (wherry.Outcome, wherry.Handle, error) {
 	if _, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), (&api.QueryOptions{}).WithContext(ctx)); !notFound(err) {
-		adapter.failed(err)
+		adapter.failed("read job", err)
 		return wherry.OutcomeUnknown, wherry.Handle{}, cause
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
@@ -281,7 +286,7 @@ func (adapter *Adapter) Lookup(ctx context.Context, runID string, turn int64) (w
 		return wherry.Job{}, nil
 	}
 	if err != nil {
-		return wherry.Job{}, adapter.failed(err)
+		return wherry.Job{}, adapter.failed("read job", err)
 	}
 	if len(job.TaskGroups) != 1 || len(job.TaskGroups[0].Tasks) != 1 || job.TaskGroups[0].Tasks[0].Name != taskName {
 		return wherry.Job{}, errors.New("existing job is not an agent job")
@@ -326,7 +331,7 @@ func (adapter *Adapter) wait(ctx context.Context, jobID, driver string) (wherry.
 			if ctx.Err() != nil {
 				return wherry.Handle{}, 0, adapter.deregisterTimedOut(ctx, jobID)
 			}
-			return wherry.Handle{}, 0, adapter.failed(err)
+			return wherry.Handle{}, 0, adapter.failed("list allocations", err)
 		}
 		alloc := current(allocs)
 		// The logs API answers 404 until the task has started.
@@ -369,6 +374,9 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 	env["WHERRY_INPUT_DIR"] = "${NOMAD_TASK_DIR}/inputs"
 	env["WHERRY_OUTPUT_DIR"] = "${NOMAD_TASK_DIR}/outputs"
 	env["WHERRY_CREDENTIALS_DIR"] = "${NOMAD_SECRETS_DIR}/credentials"
+	if run.Model != "" {
+		env["WHERRY_MODEL"] = run.Model
+	}
 	prompt := `{{ .prompt }}`
 	if !slices.Contains(isolated, runtime.Driver) {
 		prompt = `{{ .prompt.Value | replaceAll "${NOMAD_TASK_DIR}" (env "NOMAD_TASK_DIR") | replaceAll "${NOMAD_SECRETS_DIR}" (env "NOMAD_SECRETS_DIR") }}`
@@ -455,7 +463,7 @@ func (adapter *Adapter) deregisterTimedOut(ctx context.Context, jobID string) er
 	defer cancel()
 	_, _, err := adapter.client.Jobs().Deregister(jobID, true, (&api.WriteOptions{}).WithContext(cleanupCtx))
 	if err != nil {
-		return errors.Join(ctx.Err(), fmt.Errorf("deregister timed-out job: %w", adapter.failed(err)))
+		return errors.Join(ctx.Err(), fmt.Errorf("deregister timed-out job: %w", adapter.failed("deregister job", err)))
 	}
 	return ctx.Err()
 }
@@ -524,7 +532,7 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, offse
 	}
 	alloc, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return wherry.Terminal{}, adapter.failed(err)
+		return wherry.Terminal{}, adapter.failed("read allocation", err)
 	}
 	// The logs API answers 404 for a task that never started.
 	if alloc.ClientTerminalStatus() && !started(alloc.TaskStates[taskName]) {
@@ -543,7 +551,7 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, offse
 		case <-ctx.Done():
 			return wherry.Terminal{}, ctx.Err()
 		case err := <-errs:
-			return wherry.Terminal{}, adapter.failed(err)
+			return wherry.Terminal{}, adapter.failed("read logs", err)
 		case <-poll.C:
 			if final := adapter.finished(ctx, handle.Alloc); final != nil {
 				stopStream()
@@ -575,7 +583,7 @@ func (adapter *Adapter) drain(ctx context.Context, alloc *api.Allocation, reader
 			return ctx.Err()
 		case err := <-errs:
 			if err != nil {
-				return adapter.failed(err)
+				return adapter.failed("read logs", err)
 			}
 		case frame, ok := <-frames:
 			if !ok {
@@ -683,7 +691,7 @@ func (reader *lineReader) emit(ctx context.Context, data []byte, advance int64) 
 func (adapter *Adapter) finished(ctx context.Context, allocID string) *api.Allocation {
 	alloc, _, err := adapter.client.Allocations().Info(allocID, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil || !alloc.ClientTerminalStatus() {
-		adapter.failed(err)
+		adapter.failed("read allocation", err)
 		return nil
 	}
 	return alloc
@@ -699,12 +707,12 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 	}
 	alloc, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return adapter.failed(err)
+		return adapter.failed("read allocation", err)
 	}
 	if alloc.ClientTerminalStatus() {
 		return nil
 	}
-	if err := adapter.failed(adapter.client.Allocations().Signal(alloc, (&api.QueryOptions{}).WithContext(ctx), taskName, "SIGTERM")); err == nil {
+	if err := adapter.failed("signal allocation", adapter.client.Allocations().Signal(alloc, (&api.QueryOptions{}).WithContext(ctx), taskName, "SIGTERM")); err == nil {
 		for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); time.Sleep(time.Second) {
 			if adapter.finished(ctx, handle.Alloc) != nil {
 				return nil
@@ -712,7 +720,7 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 		}
 	}
 	_, _, err = adapter.client.Jobs().Deregister(handle.Job, false, (&api.WriteOptions{}).WithContext(ctx))
-	return adapter.failed(err)
+	return adapter.failed("deregister job", err)
 }
 
 // Release deletes the per-turn variables holding the credentials, the prompt and the inputs.
@@ -743,7 +751,7 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 		alloc, _, err = adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	}
 	if err != nil {
-		return adapter.failed(err)
+		return adapter.failed("read allocation", err)
 	}
 	// A lost allocation's client is gone, and its filesystem with it.
 	if alloc.ClientStatus == api.AllocClientStatusLost {
@@ -759,7 +767,7 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 			return nil
 		}
 		if err != nil {
-			return redacted("list", outputsDir, adapter.failed(err))
+			return redacted("list", outputsDir, adapter.failed("list outputs", err))
 		}
 		for _, entry := range entries {
 			name, mode := path.Join(dir, entry.Name), fileMode(entry.FileMode)
@@ -809,7 +817,7 @@ func (adapter *Adapter) read(ctx context.Context, alloc *api.Allocation, name st
 	}
 	body, err := adapter.client.AllocFS().ReadAt(alloc, path.Join(outputsDir, name), 0, size, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return nil, redacted("read", outputsDir, adapter.failed(err))
+		return nil, redacted("read", outputsDir, adapter.failed("read output", err))
 	}
 	defer body.Close()
 	data, err := io.ReadAll(io.LimitReader(body, size+1))
@@ -829,7 +837,7 @@ func (adapter *Adapter) open(ctx context.Context, alloc *api.Allocation, name st
 	}
 	body, err := adapter.client.AllocFS().ReadAt(alloc, path.Join(outputsDir, name), 0, size, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return nil, redacted("read", outputsDir, adapter.failed(err))
+		return nil, redacted("read", outputsDir, adapter.failed("read output", err))
 	}
 	return body, nil
 }
@@ -869,28 +877,35 @@ func (adapter *Adapter) Purge(ctx context.Context, runID string, turn int64) err
 
 func (adapter *Adapter) purge(ctx context.Context, jobID string) error {
 	if _, _, err := adapter.client.Jobs().Deregister(jobID, true, (&api.WriteOptions{}).WithContext(ctx)); err != nil && !notFound(err) {
-		return adapter.failed(err)
+		return adapter.failed("purge job", err)
 	}
 	return adapter.release(ctx, jobID)
 }
 
-// Sweep purges agent jobs dead for the grace period, and deletes per-run variables whose job has ended,
-// been stopped, or never registered.
+// Sweep purges this adapter's agent jobs dead for the grace period, and deletes per-run variables whose job is this
+// adapter's and has ended or been stopped, is any adapter's and dead for the grace period, or never registered. Every
+// adapter of the pool shares the job prefix, so a job's meta decides whose it is; variables hold the prompt and
+// credentials, so a removed adapter's are swept too. Pending jobs and deletions count this adapter's jobs only.
 func (adapter *Adapter) Sweep(ctx context.Context) error {
-	jobs, _, err := adapter.client.Jobs().List((&api.QueryOptions{Prefix: adapter.prefix}).WithContext(ctx))
+	jobs, _, err := adapter.client.Jobs().ListOptions(&api.JobListOptions{Fields: &api.JobListFields{Meta: true}}, (&api.QueryOptions{Prefix: adapter.prefix}).WithContext(ctx))
 	if err != nil {
-		return redacted("list jobs", adapter.prefix, adapter.failed(err))
+		return redacted("list jobs", adapter.prefix, adapter.failed("list jobs", err))
 	}
 	var errs []error
 	pending, purged := 0, 0
+	// expired holds other adapters' jobs dead for the grace period.
+	expired := map[string]bool{}
 	for _, job := range jobs {
 		if job.Status != "dead" || !adapter.agentJob.MatchString(job.ID) {
 			continue
 		}
-		pending++
+		own := job.Meta["adapter"] == adapter.name
+		if own {
+			pending++
+		}
 		allocs, _, err := adapter.client.Jobs().Allocations(job.ID, true, (&api.QueryOptions{}).WithContext(ctx))
 		if err != nil {
-			errs = append(errs, redacted("list allocations of", job.ID, adapter.failed(err)))
+			errs = append(errs, redacted("list allocations of", job.ID, adapter.failed("list allocations", err)))
 			continue
 		}
 		// An adopter may still read a dead job's log, so its age runs from its last allocation change.
@@ -899,6 +914,10 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 			ended = max(ended, alloc.ModifyTime)
 		}
 		if time.Since(time.Unix(0, ended)) < sweepGrace {
+			continue
+		}
+		if !own {
+			expired[job.ID] = true
 			continue
 		}
 		if err := adapter.purge(ctx, job.ID); err != nil {
@@ -915,7 +934,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 	prefix := jobVariablePrefix + adapter.prefix
 	variables, _, err := adapter.client.Variables().PrefixList(prefix, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return errors.Join(append(errs, redacted("list", prefix, adapter.failed(err)))...)
+		return errors.Join(append(errs, redacted("list", prefix, adapter.failed("list variables", err)))...)
 	}
 	for _, variable := range variables {
 		match := adapter.runVariable.FindStringSubmatch(variable.Path)
@@ -923,19 +942,28 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 			continue
 		}
 		job, _, err := adapter.client.Jobs().Info(match[1], (&api.QueryOptions{}).WithContext(ctx))
+		own := true
 		switch {
 		case notFound(err):
 			if time.Since(time.Unix(0, variable.ModifyTime)) < sweepGrace {
 				continue
 			}
 		case err != nil:
-			errs = append(errs, redacted("sweep", variable.Path, adapter.failed(err)))
+			errs = append(errs, redacted("sweep", variable.Path, adapter.failed("read job", err)))
 			continue
+		case job.Meta["adapter"] != adapter.name:
+			own = false
+			if !expired[match[1]] {
+				continue
+			}
 		case *job.Status != "dead" && !*job.Stop:
 			continue
 		}
 		if err := adapter.deleteVariable(ctx, variable.Path); err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		if !own {
 			continue
 		}
 		adapter.metrics.mu.Lock()
@@ -947,7 +975,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 
 func (adapter *Adapter) deleteVariable(ctx context.Context, path string) error {
 	if _, err := adapter.client.Variables().Delete(path, (&api.WriteOptions{}).WithContext(ctx)); err != nil && !errors.Is(err, api.ErrVariablePathNotFound) && !notFound(err) {
-		return redacted("delete", path, adapter.failed(err))
+		return redacted("delete", path, adapter.failed("delete variable", err))
 	}
 	return nil
 }
@@ -961,9 +989,10 @@ func redacted(op, path string, err error) error {
 	return fmt.Errorf("%s %s failed", op, path)
 }
 
-// failed counts err, from a Nomad API call, by its class and returns it. A not-found answer, which callers read as
-// absence, and a call its caller cancelled count nothing.
-func (adapter *Adapter) failed(err error) error {
+// failed counts err, from the Nomad API call op, by its class, logs op and the class once, and returns it. The log
+// line leaves out err's text, which can hold a request URL or a response body. A not-found answer, which callers read
+// as absence, and a call its caller cancelled count nothing.
+func (adapter *Adapter) failed(op string, err error) error {
 	var response api.UnexpectedResponseError
 	var network net.Error
 	class := "other"
@@ -991,6 +1020,7 @@ func (adapter *Adapter) failed(err error) error {
 	adapter.metrics.mu.Lock()
 	adapter.metrics.errors[class]++
 	adapter.metrics.mu.Unlock()
+	adapter.logger.Warn("nomad call failed", "adapter", adapter.name, "op", op, "class", class)
 	return err
 }
 

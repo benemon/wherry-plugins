@@ -25,6 +25,7 @@ import (
 	"time"
 
 	wherry "github.com/benemon/wherry/adapter"
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/api"
 )
 
@@ -49,13 +50,16 @@ func testConfig(address string) Config {
 	}
 }
 
-// build is the factory's path to one adapter, without its client cache.
+// testAdapter is the adapter build names, as testRun's runs do.
+const testAdapter = "container"
+
+// build is the factory's path to one adapter named testAdapter, without its client cache.
 func build(config Config, pool, token string) (*Adapter, error) {
 	client, err := newClient(config, token)
 	if err != nil {
 		return nil, err
 	}
-	return New(config, pool, client)
+	return New(config, testAdapter, pool, client, hclog.NewNullLogger())
 }
 
 func devAdapter(t *testing.T) (*Adapter, context.Context) {
@@ -76,7 +80,7 @@ func devAdapter(t *testing.T) (*Adapter, context.Context) {
 func testRun(name string) wherry.Run {
 	id := fmt.Sprintf("run-%s-%d", name, time.Now().UnixNano())
 	return wherry.Run{
-		ID: id, Adapter: "container", Agent: "coder", Turn: 1, Attempt: 2,
+		ID: id, Adapter: testAdapter, Agent: "coder", Turn: 1, Attempt: 2,
 		Prompt: []byte("hello-prompt"), Credential: []byte("test-credential"),
 	}
 }
@@ -823,6 +827,7 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	run.Inputs = []wherry.File{{Name: "data.csv", Data: []byte("input-content-never-in-urls")}}
 	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte("task-credential-never-in-urls")}}
 	run.Fetches = []wherry.Fetch{{Name: "dataset.bin", URL: "https://store.example.test/b/dataset.bin?X-Amz-Signature=secretsig-never-in-urls", Size: 8, SHA256: strings.Repeat("a", 64)}}
+	run.Model = "model-never-in-urls"
 	const outputContent = "output-content-never-in-urls"
 	var mu sync.Mutex
 	var urls []string
@@ -846,13 +851,13 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 		case "DELETE /v1/job/agent-44575cf5b285-run-urls-t1":
 			_, _ = response.Write([]byte(`{"EvalID":""}`))
 		case "GET /v1/jobs":
-			_, _ = response.Write([]byte(`[{"ID":"agent-44575cf5b285-run-urls-t1","Status":"dead","SubmitTime":0}]`))
+			_, _ = response.Write([]byte(`[{"ID":"agent-44575cf5b285-run-urls-t1","Status":"dead","SubmitTime":0,"Meta":{"adapter":"container"}}]`))
 		case "GET /v1/job/agent-44575cf5b285-run-urls-t1":
 			if !registered {
 				http.Error(response, "job not found", http.StatusNotFound)
 				return
 			}
-			_, _ = response.Write([]byte(`{"ID":"agent-44575cf5b285-run-urls-t1","Status":"dead","Stop":false,"TaskGroups":[{"Tasks":[{"Name":"agent","Driver":"raw_exec"}]}]}`))
+			_, _ = response.Write([]byte(`{"ID":"agent-44575cf5b285-run-urls-t1","Status":"dead","Stop":false,"Meta":{"adapter":"container"},"TaskGroups":[{"Tasks":[{"Name":"agent","Driver":"raw_exec"}]}]}`))
 		case "GET /v1/vars":
 			_, _ = response.Write([]byte(`[{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1/agent"}]`))
 		case "PUT /v1/jobs":
@@ -913,7 +918,7 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 		t.Fatalf("requests = %d %v, want ready, dispatch, lookup, follow, stop, collect, release, purge and sweep", len(urls), urls)
 	}
 	for _, url := range urls {
-		for _, secret := range []string{token, string(run.Credential), string(run.Prompt), string(run.Inputs[0].Data), string(run.Credentials[0].Value), run.Fetches[0].URL, "secretsig-never-in-urls", outputContent} {
+		for _, secret := range []string{token, string(run.Credential), string(run.Prompt), string(run.Inputs[0].Data), string(run.Credentials[0].Value), run.Fetches[0].URL, "secretsig-never-in-urls", outputContent, run.Model} {
 			if strings.Contains(url, secret) {
 				t.Fatalf("request URL %q contains %q", url, secret)
 			}
@@ -1457,7 +1462,7 @@ func TestFollowReturnsTerminal(t *testing.T) {
 func TestSweepPurgesJobsDeadPastTheGrace(t *testing.T) {
 	old, recent := time.Now().Add(-2*sweepGrace).UnixNano(), time.Now().UnixNano()
 	const mine, otherPool = poolPrefix + "old-t1", "agent-8934303dc131-old-t1" // pool-a's digest
-	jobs := fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d},{"ID":%q,"Status":"dead","SubmitTime":%d},{"ID":%q,"Status":"running","SubmitTime":%d},{"ID":%q,"Status":"dead","SubmitTime":%d},{"ID":%q,"Status":"dead","SubmitTime":%d}]`,
+	jobs := fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"running","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}}]`,
 		mine, old, poolPrefix+"recent-t1", old, poolPrefix+"live-t1", old, poolPrefix+"other", old, otherPool, old)
 	routes := map[string]http.HandlerFunc{
 		// The server ignores the prefix query, so the adapter's own pool filter is what is tested.
@@ -2100,7 +2105,7 @@ func TestSweepReportsDeletionsAndPendingJobs(t *testing.T) {
 	old, recent := time.Now().Add(-2*sweepGrace).UnixNano(), time.Now().UnixNano()
 	const dead, gone = poolPrefix + "old-t1", poolPrefix + "gone-t1"
 	routes := map[string]http.HandlerFunc{
-		"GET /v1/jobs":                                        serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d},{"ID":%q,"Status":"dead","SubmitTime":%d}]`, dead, old, poolPrefix+"recent-t1", recent)),
+		"GET /v1/jobs":                                        serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}}]`, dead, old, poolPrefix+"recent-t1", recent)),
 		"GET /v1/job/" + dead + "/allocations":                serve([]byte(`[]`)),
 		"GET /v1/job/" + poolPrefix + "recent-t1/allocations": serve([]byte(`[]`)),
 		"DELETE /v1/job/" + dead:                              serve([]byte(`{"EvalID":""}`)),
@@ -2137,5 +2142,115 @@ func TestDispatchReportsPlacement(t *testing.T) {
 	placement := samples(t, adapter)["wherry_adapter_placement_seconds/"].Histogram
 	if placement.Count != 1 || len(placement.Buckets) != len(wherry.PlacementBuckets) || placement.Buckets[len(placement.Buckets)-1] != 1 {
 		t.Fatalf("placement %+v; want one observation over the placement buckets", placement)
+	}
+}
+
+func TestJobEnvCarriesTheModelOnlyWhenSet(t *testing.T) {
+	adapter, err := build(testConfig("http://127.0.0.1:1"), testPool, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for model, want := range map[string]bool{"": false, "sonnet": true} {
+		run := testRun("model")
+		run.Model = model
+		job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+		if err != nil {
+			t.Fatal(err)
+		}
+		task := job.TaskGroups[0].Tasks[0]
+		if value, set := task.Env["WHERRY_MODEL"]; set != want || value != model {
+			t.Fatalf("model %q: env WHERRY_MODEL=%q set=%t, want set=%t", model, value, set, want)
+		}
+		if encoded, _ := json.Marshal(task.Config); model != "" && strings.Contains(string(encoded), model) {
+			t.Fatalf("model %q reached the task's command line: %s", model, encoded)
+		}
+	}
+}
+
+// Every adapter of a pool lists the pool's jobs; each counts and sweeps only the jobs its meta names.
+func TestSweepCountsOnlyThisAdaptersJobs(t *testing.T) {
+	old, recent := time.Now().Add(-2*sweepGrace).UnixNano(), time.Now().UnixNano()
+	const waiting, expired = poolPrefix + "waiting-t1", poolPrefix + "expired-t1"
+	routes := map[string]http.HandlerFunc{
+		"GET /v1/jobs": serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}}]`,
+			waiting, recent, expired, old)),
+		"GET /v1/job/" + waiting + "/allocations": serve([]byte(`[]`)),
+		"GET /v1/job/" + expired + "/allocations": serve([]byte(`[]`)),
+		"DELETE /v1/job/" + expired:               serve([]byte(`{"EvalID":""}`)),
+		"GET /v1/vars":                            serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d}]`, waiting, old)),
+		"GET /v1/job/" + waiting:                  serve([]byte(`{"ID":"` + waiting + `","Status":"dead","Stop":false,"Meta":{"adapter":"container"}}`)),
+	}
+	for _, path := range []string{waiting, expired, expired + "/agent"} {
+		routes["DELETE /v1/var/nomad/jobs/"+path] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
+	}
+	a, _ := nomadServer(t, routes)
+	b, requestsOfB := nomadServer(t, routes)
+	b.name = "host"
+	for _, adapter := range []*Adapter{a, b} {
+		if err := adapter.Sweep(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := samples(t, a); got["wherry_adapter_cleanup_pending/"].Value != 1 || got["wherry_adapter_sweep_deletions_total/job"].Value != 1 || got["wherry_adapter_sweep_deletions_total/variable"].Value != 1 {
+		t.Fatalf("container samples %+v; want its waiting job pending, its expired job and the waiting job's variable deleted", got)
+	}
+	if got := samples(t, b); got["wherry_adapter_cleanup_pending/"].Value != 0 || got["wherry_adapter_sweep_deletions_total/job"].Value != 0 || got["wherry_adapter_sweep_deletions_total/variable"].Value != 0 {
+		t.Fatalf("host samples %+v; want none of container's jobs counted", got)
+	}
+	if deleted := deletes(requestsOfB()); len(deleted) != 0 {
+		t.Fatalf("host's sweep deleted %v of container's jobs", deleted)
+	}
+}
+
+func TestPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
+	const token, body = "nomad-token-secret", "body-never-logged"
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		http.Error(response, body, http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	adapter, err := build(testConfig(server.URL), testPool, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	adapter.logger = hclog.New(&hclog.LoggerOptions{Output: &logs, JSONFormat: true})
+	if _, err := adapter.Ready(context.Background()); err == nil {
+		t.Fatal("ready answered 503 without an error")
+	}
+	lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], `"class":"unavailable"`) || !strings.Contains(lines[0], `"op":"list nodes"`) || !strings.Contains(lines[0], `"@level":"warn"`) {
+		t.Fatalf("logs %q; want one warning naming the operation and class unavailable", logs.String())
+	}
+	for _, forbidden := range []string{token, body, strings.TrimPrefix(server.URL, "http://"), "/v1/"} {
+		if strings.Contains(logs.String(), forbidden) {
+			t.Fatalf("log line %q holds %q", lines[0], forbidden)
+		}
+	}
+}
+
+// The variables of another adapter's job dead for the grace period, such as one whose adapter has left the receiver's
+// configuration, hold its prompt and credentials, so any adapter's sweep deletes them; the job and its count stay its
+// adapter's.
+func TestSweepDeletesVariablesOfAnotherAdaptersExpiredJob(t *testing.T) {
+	old := time.Now().Add(-2 * sweepGrace).UnixNano()
+	const expired = poolPrefix + "removed-t1"
+	routes := map[string]http.HandlerFunc{
+		"GET /v1/jobs": serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"removed"}}]`, expired, old)),
+		"GET /v1/job/" + expired + "/allocations": serve([]byte(`[]`)),
+		"GET /v1/vars":           serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d},{"Path":"nomad/jobs/%s/agent","ModifyTime":%d}]`, expired, old, expired, old)),
+		"GET /v1/job/" + expired: serve([]byte(`{"ID":"` + expired + `","Status":"dead","Stop":false,"Meta":{"adapter":"removed"}}`)),
+	}
+	for _, path := range []string{expired, expired + "/agent"} {
+		routes["DELETE /v1/var/nomad/jobs/"+path] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
+	}
+	adapter, requests := nomadServer(t, routes)
+	if err := adapter.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := deletes(requests()), []string{"DELETE /v1/var/nomad/jobs/" + expired, "DELETE /v1/var/nomad/jobs/" + expired + "/agent"}; !slices.Equal(got, want) {
+		t.Fatalf("deletes %v, want the expired job's variables and not the job", got)
+	}
+	if got := samples(t, adapter); got["wherry_adapter_cleanup_pending/"].Value != 0 || got["wherry_adapter_sweep_deletions_total/job"].Value != 0 || got["wherry_adapter_sweep_deletions_total/variable"].Value != 0 {
+		t.Fatalf("samples %+v; want nothing counted for another adapter's job", got)
 	}
 }
