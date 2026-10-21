@@ -226,6 +226,10 @@ The agent task receives:
   plugin reports `${NOMAD_TASK_DIR}` and `${NOMAD_SECRETS_DIR}` forms and the
   prompt's template replaces them with the task's own values;
 - `HOME` set to the task directory;
+- `WHERRY_MODEL` set to the task's model, one the pool's terms allow, when
+  the task has one, and not set by the plugin otherwise. The plugin never puts
+  it in the driver `config`; the command reads it from the environment, such
+  as `--model "${WHERRY_MODEL:-haiku}"`;
 - the variables of the adapter protocol's `AgentEnvironment`, as described
   in [Agent environment](#agent-environment);
 - the runtime's `env`, driver `config` and `resources`.
@@ -269,7 +273,13 @@ when the turn ends.
 Every 30 seconds the plugin deletes the variables of jobs that have
 stopped, and of jobs never registered within 10 minutes, and purges agent
 jobs that have been dead for 10 minutes. A receiver sweeps only its own
-pool's jobs and variables. The 10 minutes run from a job's last allocation
+pool's jobs and variables. Each adapter purges and counts only the jobs
+whose `adapter` meta names it, and deletes the variables of any of the
+pool's jobs dead for 10 minutes, since they hold the prompt and
+credentials. A dead job whose adapter is no longer in the receiver's
+configuration stays until Nomad's garbage collection or a manual purge;
+its variables are swept. The sweep needs a Nomad server that returns job
+`Meta` in list responses, `GET /v1/jobs?meta=true`. The 10 minutes run from a job's last allocation
 change, so a turn whose job ended while no pool member could hold it for
 longer than that runs again from the start on its next delivery.
 
@@ -311,7 +321,7 @@ undo this.
 
 ## Metrics
 
-The plugin speaks adapter protocol version 4, and a receiver of another
+The plugin speaks adapter protocol version 5, and a receiver of another
 protocol version refuses it, so upgrade it with the receiver. For each
 adapter it reports these families, which the receiver serves on its
 `/metrics` with the adapter's name as `adapter`:
@@ -319,15 +329,17 @@ adapter it reports these families, which the receiver serves on its
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
 | `wherry_adapter_platform_errors_total` | counter | `class` | failed Nomad API calls |
-| `wherry_adapter_cleanup_pending` | gauge | none | dead agent jobs the latest sweep left |
-| `wherry_adapter_sweep_deletions_total` | counter | `kind` | jobs a sweep purged (`job`) and variables it deleted (`variable`) |
+| `wherry_adapter_cleanup_pending` | gauge | none | the adapter's dead agent jobs the latest sweep left |
+| `wherry_adapter_sweep_deletions_total` | counter | `kind` | the adapter's jobs a sweep purged (`job`) and variables it deleted (`variable`) |
 | `wherry_adapter_placement_seconds` | histogram | none | time from a Dispatch that registers the job to the plugin seeing its agent task started |
 
 An API call's class comes from its status code: 401 and 403 are `denied`,
 409 `conflict`, 408 and 504 `timeout`, and other 5xx codes `unavailable`. A
 call that cannot connect is `unavailable`, one that runs past its deadline
 `timeout`, and any other failure `other`. A 404, which the plugin reads as
-absence, and a call the receiver cancels count nothing.
+absence, and a call the receiver cancels count nothing. Each call that
+counts also logs one warning, `nomad call failed`, naming the adapter, the
+operation and the class; the line holds no URL, token or response body.
 
 A dead job counts as pending while it is inside the 10-minute
 [sweep](#sweep) grace or its purge fails. Dispatch polls the allocation

@@ -3,7 +3,8 @@ module github.com/benemon/wherry-plugins/nomad
 go 1.27
 
 require (
-	github.com/benemon/wherry/adapter v0.2.0-rc.1
+	github.com/benemon/wherry/adapter v0.3.0-rc.1
+	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/nomad/api v0.0.0-20261016150620-df630b26e78a
 )
 
@@ -14,7 +15,6 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/cronexpr v1.1.3 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
-	github.com/hashicorp/go-hclog v1.6.3 // indirect
 	github.com/hashicorp/go-plugin v1.8.0 // indirect
 	github.com/hashicorp/go-rootcerts v1.0.2 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
