@@ -963,7 +963,10 @@ func TestPerTurnPodNames(t *testing.T) {
 
 func dispatch(t *testing.T, adapter *Adapter, run wherry.Run) wherry.Handle {
 	t.Helper()
-	outcome, handle, err := adapter.Dispatch(context.Background(), run)
+	// A pod that never settles fails the test rather than hanging it.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	outcome, handle, err := adapter.Dispatch(ctx, run)
 	if err != nil || outcome != wherry.OutcomeCreated {
 		t.Fatalf("dispatch = %v, %v", outcome, err)
 	}
@@ -1055,6 +1058,18 @@ func TestDispatchLeavesTheSecretOfAnExistingPod(t *testing.T) {
 		if strings.Contains(r.path, "/secrets") {
 			t.Fatalf("dispatch onto an existing pod requested %s", r)
 		}
+	}
+}
+
+func TestDispatchRefusesAForeignPod(t *testing.T) {
+	api := newFakeAPI(t)
+	adapter, execer := api.adapter(t)
+	api.put(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: poolPrefix + "run-foreign-t1"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent"}}}})
+	if outcome, _, err := adapter.Dispatch(context.Background(), testRun("foreign")); outcome != wherry.OutcomeUnknown || err == nil || err.Error() != "existing pod is not an agent pod" {
+		t.Fatalf("dispatch onto a foreign pod = %v, %v", outcome, err)
+	}
+	if len(execer.recorded()) != 0 || api.secret(poolPrefix+"run-foreign-t1") != nil {
+		t.Fatalf("execs %v or a Secret for a foreign pod", execer.recorded())
 	}
 }
 
@@ -2519,6 +2534,16 @@ func TestReleaseDeletesSecretAndEndsTheHolder(t *testing.T) {
 	}
 }
 
+func TestReleaseExecsNothingIntoADeletingPod(t *testing.T) {
+	api := newFakeAPI(t)
+	adapter, execer := api.adapter(t)
+	api.set(func() { api.kubelet = nil })
+	api.put(captured(t, "lost-node-running"))
+	if err := adapter.Release(context.Background(), "capture-lost-node-running", 1); err != nil || len(execer.recorded()) != 0 {
+		t.Fatalf("release = %v with execs %v; want nil and none into a deleting pod", err, execer.recorded())
+	}
+}
+
 func TestPurgeDeletesWithGraceZero(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter, _ := api.adapter(t)
@@ -2979,18 +3004,15 @@ func turn(t *testing.T) (string, []string) {
 		http.Error(response, "SignatureDoesNotMatch", http.StatusForbidden)
 	}), files)
 	startInit(t, api, execer, adapter.jobName(failed.ID, failed.Turn), failed.Fetches, nil)
-	_, _, err = adapter.Dispatch(context.Background(), failed)
-	errs = append(errs, err)
+	dispatch(t, adapter, failed)
 	unreachable := fetchRun("unreachable", store, files)
 	unreachable.Fetches[0].URL = "https://unreachable.invalid/data.csv?X-Amz-Signature=signature-secret"
 	startInit(t, api, execer, adapter.jobName(unreachable.ID, unreachable.Turn), unreachable.Fetches, nil)
-	_, _, err = adapter.Dispatch(context.Background(), unreachable)
-	errs = append(errs, err)
+	dispatch(t, adapter, unreachable)
 	refused := fetchRun("refused", store, files)
 	refused.Fetches[0].SHA256 = strings.Repeat("0", 64)
 	startInit(t, api, execer, adapter.jobName(refused.ID, refused.Turn), refused.Fetches, nil)
-	_, _, err = adapter.Dispatch(context.Background(), refused)
-	errs = append(errs, err)
+	dispatch(t, adapter, refused)
 	if !strings.Contains(logs.String(), "fetch data.csv: 403") || !strings.Contains(logs.String(), "fetch data.csv: unreachable") || !strings.Contains(logs.String(), "does not match its digest") {
 		t.Fatalf("logs %q; want each failed fetch logged", logs.String())
 	}

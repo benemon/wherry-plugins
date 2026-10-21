@@ -528,7 +528,7 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 		return wherry.OutcomeNothingCreated, wherry.Handle{}, err
 	}
 	created := false
-	switch _, err := adapter.pods().Get(ctx, name, metav1.GetOptions{}); {
+	switch existing, err := adapter.pods().Get(ctx, name, metav1.GetOptions{}); {
 	case apierrors.IsNotFound(err):
 		if err := adapter.upsertSecret(ctx, name, adapter.labels(run), data); err != nil {
 			return adapter.notStarted(ctx, name, err)
@@ -551,6 +551,8 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 		}
 	case err != nil:
 		return wherry.OutcomeUnknown, wherry.Handle{}, adapter.failed("read pod "+name, err)
+	case !adapter.agentPod(existing):
+		return wherry.OutcomeUnknown, wherry.Handle{}, errors.New("existing pod is not an agent pod")
 	}
 	if err := adapter.deliver(ctx, name, run.Fetches); err != nil {
 		return wherry.OutcomeUnknown, wherry.Handle{}, err
@@ -875,8 +877,7 @@ func (adapter *Adapter) Lookup(ctx context.Context, runID string, turn int64) (w
 	if err != nil {
 		return wherry.Job{}, adapter.failed("read pod "+name, err)
 	}
-	if pod.Labels[labelPool] != adapter.pool || !hasContainer(pod.Spec.InitContainers, "inputs") ||
-		!hasContainer(pod.Spec.Containers, "agent") || !hasContainer(pod.Spec.Containers, "outputs") {
+	if !adapter.agentPod(pod) {
 		return wherry.Job{}, errors.New("existing pod is not an agent pod")
 	}
 	handle, state, err := adapter.wait(ctx, name)
@@ -886,6 +887,12 @@ func (adapter *Adapter) Lookup(ctx context.Context, runID string, turn int64) (w
 	// A pod created without the annotation reads as attempt 0.
 	attempt, _ := strconv.ParseInt(pod.Annotations[annotationAttempt], 10, 64)
 	return wherry.Job{State: state, Handle: handle, Attempt: attempt, Adapter: pod.Labels[labelAdapter], Agent: pod.Labels[labelAgent]}, nil
+}
+
+// agentPod reports whether pod is this pool's agent pod.
+func (adapter *Adapter) agentPod(pod *corev1.Pod) bool {
+	return pod.Labels[labelPool] == adapter.pool && hasContainer(pod.Spec.InitContainers, "inputs") &&
+		hasContainer(pod.Spec.Containers, "agent") && hasContainer(pod.Spec.Containers, "outputs")
 }
 
 func hasContainer(containers []corev1.Container, name string) bool {
