@@ -27,3 +27,11 @@ updates:
     groups:
       go-kubernetes:
         patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /kubernetes
+    schedule:
+      interval: weekly
+    groups:
+      images-kubernetes:
+        patterns: ["*"]
