@@ -7,7 +7,7 @@ VERSION   ?= dev
 DIST      ?= dist
 PLATFORMS ?= linux/amd64 linux/arm64
 PLUGINS   := nomad kubernetes
-PLUGIN    ?= nomad
+PLUGIN    ?=
 # image builds the receiver image from this checkout and the wherry release WHERRY_VERSION, such as v0.4.0.
 WHERRY_VERSION ?=
 IMAGE          ?= wherry-receiver
@@ -68,11 +68,13 @@ check: check-fmt vet test check-licenses check-markers ## Run every CI gate
 # its test-only dependencies. The tool reads tags through go-git, so run it
 # from a plain clone with tags fetched.
 sbom: $(CYCLONEDX) ## Write a CycloneDX SBOM for PLUGIN
+	@test -n "$(PLUGIN)" || { echo "FAIL: set PLUGIN"; exit 1; }
 	mkdir -p $(DIST)
 	cd $(PLUGIN) && $(CYCLONEDX) app -json -licenses -main . -output ../$(DIST)/wherry-plugin-$(PLUGIN).cdx.json .
 
 .PHONY: dist
 dist: ## Cross-compile PLUGIN's release archives and checksums.txt into DIST
+	@test -n "$(PLUGIN)" || { echo "FAIL: set PLUGIN"; exit 1; }
 	rm -rf $(DIST)/wherry-plugin-$(PLUGIN)_*
 	mkdir -p $(DIST)
 	@set -e; for p in $(PLATFORMS); do \
