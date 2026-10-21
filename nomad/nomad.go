@@ -503,7 +503,8 @@ var failureClasses = map[string]string{
 	api.TaskArtifactDownloadFailed: wherry.ClassFetch,
 }
 
-// terminalOf reads the agent task's final state; the class is that of its last failure event.
+// terminalOf reads the agent task's final state; the class is that of its last failure event, and the reason that
+// event's message.
 func terminalOf(alloc *api.Allocation) wherry.Terminal {
 	state := alloc.TaskStates[taskName]
 	result := wherry.Terminal{Started: started(state), Node: alloc.NodeName}
@@ -513,6 +514,7 @@ func terminalOf(alloc *api.Allocation) wherry.Terminal {
 	for _, event := range state.Events {
 		if class, ok := failureClasses[event.Type]; ok && !result.Started {
 			result.Class = class
+			result.Reason = cmp.Or(event.DisplayMessage, event.ValidationError, event.SetupError, event.DriverError, event.DownloadError)
 		}
 		if event.Type == api.TaskTerminated {
 			result.ExitCode = event.ExitCode
@@ -712,10 +714,24 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 	if alloc.ClientTerminalStatus() {
 		return nil
 	}
-	if err := adapter.failed("signal allocation", adapter.client.Allocations().Signal(alloc, (&api.QueryOptions{}).WithContext(ctx), taskName, "SIGTERM")); err == nil {
-		for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); time.Sleep(time.Second) {
+	if signalErr := adapter.client.Allocations().Signal(alloc, (&api.QueryOptions{}).WithContext(ctx), taskName, "SIGTERM"); signalErr != nil {
+		// Nomad refuses to signal a task that exited after the read above.
+		latest, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
+		if err == nil && (latest.ClientTerminalStatus() || latest.TaskStates[taskName] != nil && latest.TaskStates[taskName].State == "dead") {
+			return nil
+		}
+		adapter.failed("signal allocation", signalErr)
+	} else {
+		poll := time.NewTicker(time.Second)
+		defer poll.Stop()
+		for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); {
 			if adapter.finished(ctx, handle.Alloc) != nil {
 				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-poll.C:
 			}
 		}
 	}

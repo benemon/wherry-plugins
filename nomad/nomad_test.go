@@ -1421,7 +1421,7 @@ func TestFollowReturnsTerminal(t *testing.T) {
 		want    wherry.Terminal
 	}{
 		{"signal", []string{"working"}, wherry.Terminal{Started: true, ExitCode: 137, Signal: "9", Node: "dev-node"}},
-		{"pull-failure", nil, wherry.Terminal{Class: "driver", Node: "dev-node"}},
+		{"pull-failure", nil, wherry.Terminal{Class: "driver", Node: "dev-node", Reason: "Failed to pull `registry.invalid/wherry/no-such-image:1`: Error response from daemon: failed to resolve reference \"registry.invalid/wherry/no-such-image:1\": failed to do request: Head \"https://registry.invalid/v2/wherry/no-such-image/manifests/1\": dialing registry.invalid:443 container via direct connection because Docker Desktop has no HTTPS proxy: connecting to registry.invalid:443: dial tcp: lookup registry.invalid: no such host"}},
 	} {
 		t.Run(test.capture, func(t *testing.T) {
 			var alloc api.Allocation
@@ -2252,5 +2252,85 @@ func TestSweepDeletesVariablesOfAnotherAdaptersExpiredJob(t *testing.T) {
 	}
 	if got := samples(t, adapter); got["wherry_adapter_cleanup_pending/"].Value != 0 || got["wherry_adapter_sweep_deletions_total/job"].Value != 0 || got["wherry_adapter_sweep_deletions_total/variable"].Value != 0 {
 		t.Fatalf("samples %+v; want nothing counted for another adapter's job", got)
+	}
+}
+
+func TestTerminalCarriesTheStartFailuresMessage(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		event api.TaskEvent
+		want  wherry.Terminal
+	}{
+		{"validation", api.TaskEvent{Type: api.TaskFailedValidation, DisplayMessage: "failed to interpolate ${BAD:-x}", ValidationError: "interpolate"}, wherry.Terminal{Class: "validation", Reason: "failed to interpolate ${BAD:-x}"}},
+		{"fetch", api.TaskEvent{Type: api.TaskArtifactDownloadFailed, DisplayMessage: `error downloading "https://store.example/object?X-Amz-Signature=abc"`}, wherry.Terminal{Class: wherry.ClassFetch, Reason: `error downloading "https://store.example/object?X-Amz-Signature=abc"`}},
+		{"error field", api.TaskEvent{Type: api.TaskSetupFailure, SetupError: "failed to build task directory"}, wherry.Terminal{Class: "setup", Reason: "failed to build task directory"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			alloc := &api.Allocation{ClientStatus: api.AllocClientStatusFailed, TaskStates: map[string]*api.TaskState{taskName: {State: "dead", Failed: true, Events: []*api.TaskEvent{&test.event}}}}
+			if got := terminalOf(alloc); got != test.want {
+				t.Fatalf("terminal %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestStopTreatsASignalRefusedForAnExitedTaskAsStopped(t *testing.T) {
+	running := api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusRunning, TaskStates: map[string]*api.TaskState{taskName: {State: "running"}}}
+	for _, test := range []struct {
+		name   string
+		latest api.Allocation
+		// stopped is whether Stop counts the signal's failure and stops the job.
+		stopped bool
+	}{
+		{"terminal", api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusComplete}, false},
+		{"task dead", api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusRunning, TaskStates: map[string]*api.TaskState{taskName: {State: "dead"}}}, false},
+		{"still running", running, true},
+		{"read fails", api.Allocation{}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reads := 0
+			adapter, requests := nomadServer(t, map[string]http.HandlerFunc{
+				"GET /v1/allocation/alloc-1": func(response http.ResponseWriter, _ *http.Request) {
+					alloc := running
+					if reads++; reads > 1 {
+						if test.latest.ID == "" {
+							http.Error(response, "unavailable", http.StatusInternalServerError)
+							return
+						}
+						alloc = test.latest
+					}
+					_ = json.NewEncoder(response).Encode(&alloc)
+				},
+				"PUT /v1/client/allocation/alloc-1/signal": func(response http.ResponseWriter, _ *http.Request) {
+					http.Error(response, "task not running", http.StatusInternalServerError)
+				},
+				"DELETE /v1/job/agent-1": serve([]byte(`{"EvalID":"eval-1"}`)),
+			})
+			if err := adapter.Stop(context.Background(), wherry.Handle{Data: []byte(`{"v":1,"job":"agent-1","alloc":"alloc-1","format":""}`)}); err != nil {
+				t.Fatal(err)
+			}
+			counted, want := samples(t, adapter)["wherry_adapter_platform_errors_total/unavailable"].Value, 0.0
+			if test.stopped {
+				want = 1
+			}
+			if stopped := slices.Contains(requests(), "DELETE /v1/job/agent-1"); counted != want || stopped != test.stopped {
+				t.Fatalf("counted %v errors, stopped the job %t; want %v, %t", counted, stopped, want, test.stopped)
+			}
+		})
+	}
+}
+
+func TestStopReturnsWhenCancelledDuringTheGrace(t *testing.T) {
+	running := api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusRunning, TaskStates: map[string]*api.TaskState{taskName: {State: "running"}}}
+	adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
+		"GET /v1/allocation/alloc-1":               func(response http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(response).Encode(&running) },
+		"PUT /v1/client/allocation/alloc-1/signal": serve([]byte(`{}`)),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := adapter.Stop(ctx, wherry.Handle{Data: []byte(`{"v":1,"job":"agent-1","alloc":"alloc-1","format":""}`)})
+	if elapsed := time.Since(start); !errors.Is(err, context.DeadlineExceeded) || elapsed > 3*time.Second {
+		t.Fatalf("Stop returned %v after %v; want the context's error well inside the %v grace", err, elapsed, stopGrace)
 	}
 }

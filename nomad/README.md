@@ -192,13 +192,18 @@ the job.
 
 An agent task in a terminal allocation with neither a `Started` event nor a
 start time never started, and the plugin reports the job as never started.
+The message of the task event that kept it from starting goes to the receiver
+as the terminal's reason.
 
 An adapter is ready when some ready, eligible node in its node pool and
 datacenters has the runtime's driver detected and healthy.
 
 The plugin stops a job by sending `SIGTERM` to the agent task. If the
-signal fails, or the task is still running 15 seconds later, it deregisters
-the job.
+signal fails, it reads the allocation again: a terminal allocation or a dead
+agent task has exited, and the stop succeeds with nothing counted. If the
+signal fails otherwise, or the task is still running 15 seconds later, it
+deregisters the job. A stop whose context ends during those 15 seconds
+returns at once with the context's error.
 
 The agent task receives:
 
