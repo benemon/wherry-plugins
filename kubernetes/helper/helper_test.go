@@ -414,6 +414,26 @@ func TestHelperReadRefusesEscapingNames(t *testing.T) {
 	}
 }
 
+func TestHelperRefusesALinkedOutputsDirectory(t *testing.T) {
+	root := pod(t)
+	elsewhere := filepath.Join(root, workDir, "elsewhere")
+	if err := os.Mkdir(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(elsewhere, "f"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("elsewhere", filepath.Join(root, outputsDir)); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, _ := invoke(root, nil, nil, "list", "100"); code == 0 || stdout != "" {
+		t.Fatalf("list through a linked outputs directory exited %d with %q; want refused", code, stdout)
+	}
+	if code, stdout := readWithin(t, root, "f", 6); code == 0 || stdout != "" {
+		t.Fatalf("read through a linked outputs directory = %d, %q; want refused", code, stdout)
+	}
+}
+
 func TestHelperStopSparesTheHolder(t *testing.T) {
 	root := pod(t)
 	self := os.Getpid()

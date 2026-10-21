@@ -379,9 +379,22 @@ func (env Env) stop(sig syscall.Signal) error {
 	return nil
 }
 
+// outputs opens the outputs tree as a root, refusing anything but a directory in its place.
+func (env Env) outputs() (*os.Root, error) {
+	// A root follows a link in its own path.
+	info, err := os.Lstat(env.path(outputsDir))
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, errors.New("the outputs path is not a directory")
+	}
+	return os.OpenRoot(env.path(outputsDir))
+}
+
 // list prints the outputs tree, lstat'd and never through a link, stopping after limit+1 entries.
 func (env Env) list(limit int) error {
-	root, err := os.OpenRoot(env.path(outputsDir))
+	root, err := env.outputs()
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -426,7 +439,7 @@ func (env Env) list(limit int) error {
 
 // read copies a regular file of exactly size bytes to stdout.
 func (env Env) read(name string, size int64) error {
-	root, err := os.OpenRoot(env.path(outputsDir))
+	root, err := env.outputs()
 	if err != nil {
 		return errors.New("the outputs directory is not readable")
 	}
