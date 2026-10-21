@@ -198,12 +198,13 @@ as the terminal's reason.
 An adapter is ready when some ready, eligible node in its node pool and
 datacenters has the runtime's driver detected and healthy.
 
-The plugin stops a job by sending `SIGTERM` to the agent task. If the
-signal fails, it reads the allocation again: a terminal allocation or a dead
-agent task has exited, and the stop succeeds with nothing counted. If the
-signal fails otherwise, or the task is still running 15 seconds later, it
-deregisters the job. A stop whose context ends during those 15 seconds
-returns at once with the context's error.
+The plugin stops a job by sending `SIGTERM` to the agent task and waiting
+up to 15 seconds for its allocation to finish. Nomad refuses to signal a task
+that has just exited, and its server learns of the exit only when the client
+next reports, so a refused signal waits the same way. A stop whose task
+finishes in that time succeeds with nothing counted; otherwise the plugin
+counts a refused signal as a platform error and deregisters the job. A stop
+whose context ends during the wait returns at once with the context's error.
 
 The agent task receives:
 
