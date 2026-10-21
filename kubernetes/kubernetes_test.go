@@ -3009,11 +3009,18 @@ func turn(t *testing.T) (string, []string) {
 	unreachable.Fetches[0].URL = "https://unreachable.invalid/data.csv?X-Amz-Signature=signature-secret"
 	startInit(t, api, execer, adapter.jobName(unreachable.ID, unreachable.Turn), unreachable.Fetches, nil)
 	dispatch(t, adapter, unreachable)
+	untrusted := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(untrusted.Close)
+	certificate := fetchRun("certificate", store, files)
+	certificate.Fetches[0].URL = untrusted.URL + "/data.csv?X-Amz-Signature=signature-secret"
+	startInit(t, api, execer, adapter.jobName(certificate.ID, certificate.Turn), certificate.Fetches, nil)
+	dispatch(t, adapter, certificate)
 	refused := fetchRun("refused", store, files)
 	refused.Fetches[0].SHA256 = strings.Repeat("0", 64)
 	startInit(t, api, execer, adapter.jobName(refused.ID, refused.Turn), refused.Fetches, nil)
 	dispatch(t, adapter, refused)
-	if !strings.Contains(logs.String(), "fetch data.csv: 403") || !strings.Contains(logs.String(), "fetch data.csv: unreachable") || !strings.Contains(logs.String(), "does not match its digest") {
+	if !strings.Contains(logs.String(), "fetch data.csv: 403") || !strings.Contains(logs.String(), "fetch data.csv: unreachable") ||
+		!strings.Contains(logs.String(), "fetch data.csv: certificate") || !strings.Contains(logs.String(), "does not match its digest") {
 		t.Fatalf("logs %q; want each failed fetch logged", logs.String())
 	}
 	var seen []string

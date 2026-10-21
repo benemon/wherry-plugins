@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -704,9 +705,13 @@ func (adapter *Adapter) put(ctx context.Context, name string, fetch wherry.Fetch
 	response, err := adapter.fetcher.Do(request)
 	if err != nil {
 		var network net.Error
+		var certificate *tls.CertificateVerificationError
 		reason := "unreachable"
-		if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &network) && network.Timeout() {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &network) && network.Timeout():
 			reason = "timeout"
+		case errors.As(err, &certificate):
+			reason = "certificate"
 		}
 		return &fetchError{fetch.Name, reason}
 	}
