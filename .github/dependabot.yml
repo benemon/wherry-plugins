@@ -19,3 +19,11 @@ updates:
       # nomad/api publishes no module tags, so it is pinned at a
       # pseudo-version dependabot cannot resolve; bump it by hand.
       - dependency-name: github.com/hashicorp/nomad/api
+
+  - package-ecosystem: gomod
+    directory: /kubernetes
+    schedule:
+      interval: weekly
+    groups:
+      go-kubernetes:
+        patterns: ["*"]

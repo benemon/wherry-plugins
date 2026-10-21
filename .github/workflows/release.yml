@@ -1,13 +1,13 @@
 name: release
 
-# A nomad/v* tag is the Nomad plugin's release act; the prefix is the Go
-# module's directory, which its version tags must carry. Tags with a
-# hyphenated qualifier (nomad/v0.1.0-rc.1) publish a prerelease. The build
-# lives in the Makefile; CI only picks targets, so a release reproduces
-# locally.
+# A <plugin>/v* tag is that plugin's release act; the prefix is the Go
+# module's directory, which its version tags must carry, and names the
+# plugin the release builds. Tags with a hyphenated qualifier
+# (nomad/v0.1.0-rc.1) publish a prerelease. The build lives in the
+# Makefile; CI only picks targets, so a release reproduces locally.
 on:
   push:
-    tags: ['nomad/v*']
+    tags: ['nomad/v*', 'kubernetes/v*']
 
 permissions:
   contents: read
@@ -56,23 +56,27 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: nomad/go.mod
+          go-version-file: kubernetes/go.mod
           check-latest: true
           cache: true
-      - name: Write the SBOM
-        run: make sbom
-      - name: Build the release archives
+      - name: Pick the plugin and version from the tag
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           case "$RELEASE_TAG" in (*[!A-Za-z0-9._/-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
-          make dist VERSION="${RELEASE_TAG#nomad/}"
+          case "$RELEASE_TAG" in (nomad/v*|kubernetes/v*) ;; (*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
+          echo "PLUGIN=${RELEASE_TAG%%/*}" >> "$GITHUB_ENV"
+          echo "VERSION=${RELEASE_TAG#*/}" >> "$GITHUB_ENV"
+      - name: Write the SBOM
+        run: make sbom PLUGIN="$PLUGIN"
+      - name: Build the release archives
+        run: make dist PLUGIN="$PLUGIN" VERSION="$VERSION"
       # Verify with:
-      #   gh attestation verify wherry-plugin-nomad_<version>_<os>_<arch>.tar.gz -R benemon/wherry-plugins
+      #   gh attestation verify wherry-plugin-<plugin>_<version>_<os>_<arch>.tar.gz -R benemon/wherry-plugins
       - name: Attest the archives' provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
-          subject-path: dist/wherry-plugin-nomad_*.tar.gz
+          subject-path: dist/wherry-plugin-*_*.tar.gz
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       # Keyless signature over checksums.txt, which names every archive's
@@ -93,4 +97,4 @@ jobs:
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
             gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes $prerelease
           gh release upload "$RELEASE_TAG" --clobber \
-            dist/wherry-plugin-nomad_*.tar.gz dist/checksums.txt dist/checksums.txt.sigstore.json dist/wherry-plugin-nomad.cdx.json
+            dist/wherry-plugin-"$PLUGIN"_*.tar.gz dist/checksums.txt dist/checksums.txt.sigstore.json dist/wherry-plugin-"$PLUGIN".cdx.json

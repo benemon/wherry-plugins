@@ -24,6 +24,10 @@ jobs:
           go-version: stable
           check-latest: true
 
-      - name: Run govulncheck
+      - name: Run govulncheck on the Nomad plugin
         working-directory: nomad
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Run govulncheck on the Kubernetes plugin
+        working-directory: kubernetes
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
