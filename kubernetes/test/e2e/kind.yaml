@@ -1,0 +1,9 @@
+# One node. The Kafka listener's node ports reach the runner, which runs wherry admin and the host commands.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+    extraPortMappings:
+      - {containerPort: 31092, hostPort: 31092, listenAddress: 127.0.0.1}
+      - {containerPort: 31093, hostPort: 31093, listenAddress: 127.0.0.1}

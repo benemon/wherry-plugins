@@ -29,7 +29,7 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: docker
-    directory: /kubernetes
+    directories: [/kubernetes, /kubernetes/test/e2e/agent]
     schedule:
       interval: weekly
     groups:

@@ -1,0 +1,11 @@
+name: fake
+platform: kind
+agent: fake
+output: file
+labels:
+  e2e: fake
+config:
+  runtime:
+    image: wherry-e2e-agent:e2e
+    user: "1001"
+    resources: {cpu: 100m, memory: 64Mi}
