@@ -1,16 +1,17 @@
 # The wherry receiver image for Kubernetes and OpenShift: wherry from its verified release, the Kubernetes adapter
 # plugin, and the helper agent pods run. Build it with make image from a checkout of a kubernetes/v* tag.
 # The bases are pinned by digest, since cosign verifies wherry's release; dependabot moves the pins.
-FROM ghcr.io/sigstore/cosign/cosign:v3.0.2@sha256:b29487e48205d875c324c79583e2806d9d269c0fa299e0861bbec023d8430c8b AS cosign
+FROM --platform=$BUILDPLATFORM ghcr.io/sigstore/cosign/cosign:v3.0.2@sha256:b29487e48205d875c324c79583e2806d9d269c0fa299e0861bbec023d8430c8b AS cosign
 
-FROM docker.io/library/golang:1.27@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS build
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS build
+ARG TARGETARCH
 WORKDIR /src
 COPY kubernetes/ .
-RUN CGO_ENABLED=0 go build -trimpath -o /out/wherry-plugin-kubernetes . && \
-    CGO_ENABLED=0 go build -trimpath -o /out/wherry-k8s-helper ./cmd/wherry-k8s-helper
+RUN export CGO_ENABLED=0 GOARCH=$TARGETARCH && go build -trimpath -o /out/wherry-plugin-kubernetes . && \
+    go build -trimpath -o /out/wherry-k8s-helper ./cmd/wherry-k8s-helper
 
 # WHERRY_OS and WHERRY_ARCH fetch another platform's archive for the wherry target, such as darwin for a workstation.
-FROM docker.io/library/golang:1.27@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS fetch
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS fetch
 ARG WHERRY_VERSION
 ARG TARGETARCH
 ARG WHERRY_OS=linux
