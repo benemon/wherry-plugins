@@ -91,8 +91,7 @@ type Adapter struct {
 	datacenters   []string
 	// uid and gid own the task's credential files when the runtime's user is numeric.
 	uid, gid *int
-	// prefix starts every job ID of the adapter's pool; agentJob matches those IDs and runVariable the variables of
-	// those jobs, including per-task variables one level below a group's.
+	// prefix starts every job ID of the adapter's pool; agentJob matches those IDs and runVariable the variables of those jobs.
 	prefix      string
 	agentJob    *regexp.Regexp
 	runVariable *regexp.Regexp
@@ -165,7 +164,7 @@ func New(config Config, name, pool string, client *api.Client, logger hclog.Logg
 		uid: uid, gid: gid,
 		prefix:      prefix,
 		agentJob:    regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+$`),
-		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+)(` + regexp.QuoteMeta(inputsSuffix) + `(/[a-z]+)?)?$`),
+		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+)(` + regexp.QuoteMeta(inputsSuffix) + `)?$`),
 		metrics:     metrics{errors: map[string]float64{}, deletions: map[string]float64{}, placement: wherry.Histogram{Buckets: make([]uint64, len(wherry.PlacementBuckets))}},
 		logger:      logger,
 	}, nil

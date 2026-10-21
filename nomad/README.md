@@ -3,8 +3,7 @@
 The wherry adapter plugin for [HashiCorp Nomad](https://developer.hashicorp.com/nomad).
 A wherry receiver starts it from its plugin directory for adapters of type
 `nomad`, and runs each of the receiver's turns as one Nomad batch job. One
-plugin process hosts every `nomad` adapter of a receiver, and adapters with
-the same address, CA file, namespace and token share one Nomad client.
+plugin process hosts every `nomad` adapter of a receiver.
 
 ## Build
 
@@ -19,14 +18,6 @@ This writes `wherry-plugin-nomad` at the repository root. For a Linux
 receiver host, set `GOOS=linux GOARCH=amd64`. `make check` runs the CI
 gates, and `make dist VERSION=<version>` writes release archives and
 `checksums.txt` into `dist`.
-
-To develop against a local [wherry](https://github.com/benemon/wherry)
-checkout beside this repository, create a Go workspace from the repository
-root. `go.work` is for local development only and is not tracked.
-
-```sh
-go work init ./nomad ../wherry/adapter
-```
 
 ## Install
 
@@ -245,21 +236,21 @@ The agent task receives:
 The plugin collects outputs from `$NOMAD_TASK_DIR/outputs` through the
 allocation filesystem API, once the allocation is terminal. Stopping a job
 returns before its allocation ends, so the plugin reads the allocation
-every 500 ms until it is terminal, within the receiver's 2-minute
-collection bound, and returns an error when it is still running at the
-bound. It lists the whole tree first, and refuses it, reading nothing, when
-it holds more entries than the receiver's limit. The listing's modes come
-from `lstat`, so a link shows as a link; the API's stat and read follow
-links, and both block on a FIFO, so the plugin reads only the regular files
-the listing shows within the limits, and refuses a read whose length
-differs from the listing, since the API answers some failed reads with
-status 200 and the error as the body. An output the receiver streams, an
-S3 output, it streams as the receiver reads it, at most the size the
-listing shows; the receiver's upload fails when the length differs. The
-agent creates the outputs directory; without one there are no outputs. The
-listing shows no link count, so a hard link to a credential file reads as
-a regular file; the receiver's redaction of delivered credential values
-covers it.
+every 500 ms until it is terminal, for as long as the receiver's collect
+call lasts, and returns an error when the call ends with the allocation
+still running. It lists the whole tree first, and refuses it, reading
+nothing, when it holds more entries than the receiver's limit. The
+listing's modes come from `lstat`, so a link shows as a link; the API's
+stat and read follow links, and both block on a FIFO, so the plugin reads
+only the regular files the listing shows within the limits, and refuses a
+read whose length differs from the listing, since the API answers some
+failed reads with status 200 and the error as the body. An output the
+receiver streams, an S3 output, it streams as the receiver reads it, at
+most the size the listing shows; the receiver's upload fails when the
+length differs. The agent creates the outputs directory; without one there
+are no outputs. The listing shows no link count, so a hard link to a
+credential file reads as a regular file; the receiver's redaction of
+delivered credential values covers it.
 
 The plugin reads the agent task's standard output. For the `podman` driver
 it reads the logs in CRI format.
@@ -278,16 +269,18 @@ when the turn ends.
 
 ### Sweep
 
-Every 30 seconds the plugin deletes the variables of jobs that have
-stopped, and of jobs never registered within 10 minutes, and purges agent
-jobs that have been dead for 10 minutes. A receiver sweeps only its own
-pool's jobs and variables. Each adapter purges and counts only the jobs
-whose `adapter` meta names it, and deletes the variables of any of the
-pool's jobs dead for 10 minutes, since they hold the prompt and
-credentials. A dead job whose adapter is no longer in the receiver's
-configuration stays until Nomad's garbage collection or a manual purge;
-its variables are swept. The sweep needs a Nomad server that returns job
-`Meta` in list responses, `GET /v1/jobs?meta=true`. The 10 minutes run from a job's last allocation
+On each sweep the receiver requests
+([adapter plugins](https://github.com/benemon/wherry/blob/main/docs/reference.md#adapter-plugins)),
+the plugin deletes the variables of jobs that have stopped, and of jobs
+never registered within 10 minutes, and purges agent jobs that have been
+dead for 10 minutes. A receiver sweeps only its own pool's jobs and
+variables. Each adapter purges and counts only the jobs whose `adapter`
+meta names it, and deletes the variables of any of the pool's jobs dead
+for 10 minutes, since they hold the prompt and credentials. A dead job
+whose adapter is no longer in the receiver's configuration stays until
+Nomad's garbage collection or a manual purge; its variables are swept. The
+sweep needs a Nomad server that returns job `Meta` in list responses,
+`GET /v1/jobs?meta=true`. The 10 minutes run from a job's last allocation
 change, so a turn whose job ended while no pool member could hold it for
 longer than that runs again from the start on its next delivery.
 
