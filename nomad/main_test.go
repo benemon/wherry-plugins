@@ -14,6 +14,7 @@ import (
 
 	wherry "github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/adapter/adaptertest"
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/api"
 )
 
@@ -41,26 +42,37 @@ func TestFactoryDecodesStrictly(t *testing.T) {
 	f := newFactory()
 	withCredential := settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true"))
 	withCredential.Credential = "model"
-	if _, err := f.adapter(withCredential); err == nil || !strings.Contains(err.Error(), "credential_env") {
+	if _, err := f.adapter(withCredential, hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "credential_env") {
 		t.Fatalf("got %v, want credential_env required", err)
 	}
 	unknown := execConfig("http://127.0.0.1:1", "/bin/true")
 	unknown["token"] = "x"
-	if _, err := f.adapter(settings(t, "lab", unknown)); err == nil {
+	if _, err := f.adapter(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
 		t.Fatal("accepted adapter config with an unknown member")
 	}
-	if _, err := f.adapter(settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true"))); err != nil {
+	if _, err := f.adapter(settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true")), hclog.NewNullLogger()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFactoryGivesTheAdapterServesLogger(t *testing.T) {
+	logger := hclog.New(&hclog.LoggerOptions{Name: "served"})
+	built, err := newFactory().adapter(settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true")), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built.(*Adapter).logger != logger {
+		t.Fatal("adapter logs elsewhere than the logger Serve gave the factory")
 	}
 }
 
 func TestFactorySharesClients(t *testing.T) {
 	f := newFactory()
-	first, err := f.adapter(settings(t, "exec", execConfig("http://127.0.0.1:1", "/bin/true")))
+	first, err := f.adapter(settings(t, "exec", execConfig("http://127.0.0.1:1", "/bin/true")), hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
-	same, err := f.adapter(settings(t, "podman", execConfig("http://127.0.0.1:1", "/bin/false")))
+	same, err := f.adapter(settings(t, "podman", execConfig("http://127.0.0.1:1", "/bin/false")), hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +84,7 @@ func TestFactorySharesClients(t *testing.T) {
 	elsewhere := execConfig("http://127.0.0.1:1", "/bin/true")
 	elsewhere["namespace"] = "wherry"
 	for _, s := range []wherry.Settings{other, settings(t, "elsewhere", elsewhere)} {
-		distinct, err := f.adapter(s)
+		distinct, err := f.adapter(s, hclog.NewNullLogger())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,7 +106,7 @@ func TestFactoryTokenFallsBackToNomadToken(t *testing.T) {
 	withBundle := settings(t, "bundle", execConfig(server.URL, "/bin/true"))
 	withBundle.Platform = "bundle-token"
 	for _, s := range []wherry.Settings{settings(t, "environment", execConfig(server.URL, "/bin/true")), withBundle} {
-		a, err := f.adapter(s)
+		a, err := f.adapter(s, hclog.NewNullLogger())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -134,5 +146,7 @@ func TestConformanceOverTheLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer plugin.Close()
-	adaptertest.Run(t, plugin.Configure, completes, neverStarts)
+	adaptertest.Run(t, func(settings wherry.Settings, _ hclog.Logger) (wherry.Adapter, error) {
+		return plugin.Configure(settings)
+	}, completes, neverStarts)
 }

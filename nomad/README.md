@@ -345,9 +345,15 @@ An API call's class comes from its status code: 401 and 403 are `denied`,
 409 `conflict`, 408 and 504 `timeout`, and other 5xx codes `unavailable`. A
 call that cannot connect is `unavailable`, one that runs past its deadline
 `timeout`, and any other failure `other`. A 404, which the plugin reads as
-absence, and a call the receiver cancels count nothing. Each call that
-counts also logs one warning, `nomad call failed`, naming the adapter, the
-operation and the class; the line holds no URL, token or response body.
+absence, and a call the receiver cancels count nothing.
+
+A failed call the plugin returns reaches the receiver with its operation,
+class and text, and the receiver logs it redacted. A log stream the API
+cannot decode fails as `log stream not decodable`, since the API's own error
+quotes the agent's output. A failed call the plugin handles itself, such as
+a refused signal or a poll of the allocation, logs one warning, `nomad call
+failed`, naming the adapter, the operation and the class; the line holds no
+URL, token or response body.
 
 A dead job counts as pending while it is inside the 10-minute
 [sweep](#sweep) grace or its purge fails. Dispatch polls the allocation

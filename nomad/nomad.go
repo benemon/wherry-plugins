@@ -237,12 +237,12 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 	}
 	variable := &api.Variable{Namespace: adapter.namespace, Path: path, Items: items}
 	if _, _, err := adapter.client.Variables().Update(variable, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-		return adapter.notStarted(ctx, run, redacted("write", path, adapter.failed("write variable", err)))
+		return adapter.notStarted(ctx, run, adapter.failed("write variable "+path, err))
 	}
 	if len(inputs) > 0 {
 		inputsPath := path + inputsSuffix
 		if _, _, err := adapter.client.Variables().Update(&api.Variable{Namespace: adapter.namespace, Path: inputsPath, Items: inputs}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-			return adapter.notStarted(ctx, run, redacted("write", inputsPath, adapter.failed("write variable", err)))
+			return adapter.notStarted(ctx, run, adapter.failed("write variable "+inputsPath, err))
 		}
 	}
 	registered := false
@@ -251,7 +251,7 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 			return wherry.OutcomeUnknown, wherry.Handle{}, adapter.failed("read job", err)
 		}
 		if _, _, err := adapter.client.Jobs().RegisterOpts(job, &api.RegisterOptions{EnforceIndex: true, ModifyIndex: 0}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-			return adapter.notStarted(ctx, run, redacted("register", jobID, adapter.failed("register job", err)))
+			return adapter.notStarted(ctx, run, adapter.failed("register job "+jobID, err))
 		}
 		registered = true
 	}
@@ -271,7 +271,7 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 // the core resolves with Lookup.
 func (adapter *Adapter) notStarted(ctx context.Context, run wherry.Run, cause error) (wherry.Outcome, wherry.Handle, error) {
 	if _, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), (&api.QueryOptions{}).WithContext(ctx)); !notFound(err) {
-		adapter.failed("read job", err)
+		adapter.handled("read job", err)
 		return wherry.OutcomeUnknown, wherry.Handle{}, cause
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
@@ -553,7 +553,7 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, offse
 		case <-ctx.Done():
 			return wherry.Terminal{}, ctx.Err()
 		case err := <-errs:
-			return wherry.Terminal{}, adapter.failed("read logs", err)
+			return wherry.Terminal{}, adapter.failed("read logs", logsError(err))
 		case <-poll.C:
 			if final := adapter.finished(ctx, handle.Alloc); final != nil {
 				stopStream()
@@ -585,7 +585,7 @@ func (adapter *Adapter) drain(ctx context.Context, alloc *api.Allocation, reader
 			return ctx.Err()
 		case err := <-errs:
 			if err != nil {
-				return adapter.failed("read logs", err)
+				return adapter.failed("read logs", logsError(err))
 			}
 		case frame, ok := <-frames:
 			if !ok {
@@ -596,6 +596,17 @@ func (adapter *Adapter) drain(ctx context.Context, alloc *api.Allocation, reader
 			}
 		}
 	}
+}
+
+// logsError keeps a log stream's response, network or context error; any other quotes the stream's undecoded bytes,
+// the agent's output, so it becomes a fixed error.
+func logsError(err error) error {
+	var response api.UnexpectedResponseError
+	var network net.Error
+	if errors.As(err, &response) || errors.As(err, &network) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return errors.New("log stream not decodable")
 }
 
 func (adapter *Adapter) logs(ctx context.Context, alloc *api.Allocation, task string, follow bool, offset int64) (<-chan *api.StreamFrame, <-chan error) {
@@ -693,7 +704,7 @@ func (reader *lineReader) emit(ctx context.Context, data []byte, advance int64) 
 func (adapter *Adapter) finished(ctx context.Context, allocID string) *api.Allocation {
 	alloc, _, err := adapter.client.Allocations().Info(allocID, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil || !alloc.ClientTerminalStatus() {
-		adapter.failed("read allocation", err)
+		adapter.handled("read allocation", err)
 		return nil
 	}
 	return alloc
@@ -730,7 +741,7 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 		}
 	}
 	if signalErr != nil {
-		adapter.failed("signal allocation", signalErr)
+		adapter.handled("signal allocation", signalErr)
 	}
 	_, _, err = adapter.client.Jobs().Deregister(handle.Job, false, (&api.WriteOptions{}).WithContext(ctx))
 	return adapter.failed("deregister job", err)
@@ -743,7 +754,15 @@ func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) e
 
 func (adapter *Adapter) release(ctx context.Context, jobID string) error {
 	path := jobVariablePrefix + jobID
-	return errors.Join(adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+inputsSuffix))
+	// A single error is returned as it is, so it reaches the receiver with its op and class.
+	run, inputs := adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+inputsSuffix)
+	switch {
+	case run == nil:
+		return inputs
+	case inputs == nil:
+		return run
+	}
+	return errors.Join(run, inputs)
 }
 
 // Collect lists the outputs directory once the allocation is terminal. The listing's modes are lstat's, and the API's
@@ -780,7 +799,7 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 			return nil
 		}
 		if err != nil {
-			return redacted("list", outputsDir, adapter.failed("list outputs", err))
+			return adapter.failed("list outputs "+outputsDir, err)
 		}
 		for _, entry := range entries {
 			name, mode := path.Join(dir, entry.Name), fileMode(entry.FileMode)
@@ -830,7 +849,7 @@ func (adapter *Adapter) read(ctx context.Context, alloc *api.Allocation, name st
 	}
 	body, err := adapter.client.AllocFS().ReadAt(alloc, path.Join(outputsDir, name), 0, size, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return nil, redacted("read", outputsDir, adapter.failed("read output", err))
+		return nil, adapter.failed("read output "+outputsDir, err)
 	}
 	defer body.Close()
 	data, err := io.ReadAll(io.LimitReader(body, size+1))
@@ -850,7 +869,7 @@ func (adapter *Adapter) open(ctx context.Context, alloc *api.Allocation, name st
 	}
 	body, err := adapter.client.AllocFS().ReadAt(alloc, path.Join(outputsDir, name), 0, size, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return nil, redacted("read", outputsDir, adapter.failed("read output", err))
+		return nil, adapter.failed("read output "+outputsDir, err)
 	}
 	return body, nil
 }
@@ -902,7 +921,7 @@ func (adapter *Adapter) purge(ctx context.Context, jobID string) error {
 func (adapter *Adapter) Sweep(ctx context.Context) error {
 	jobs, _, err := adapter.client.Jobs().ListOptions(&api.JobListOptions{Fields: &api.JobListFields{Meta: true}}, (&api.QueryOptions{Prefix: adapter.prefix}).WithContext(ctx))
 	if err != nil {
-		return redacted("list jobs", adapter.prefix, adapter.failed("list jobs", err))
+		return adapter.failed("list jobs "+adapter.prefix, err)
 	}
 	var errs []error
 	pending, purged := 0, 0
@@ -918,7 +937,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 		}
 		allocs, _, err := adapter.client.Jobs().Allocations(job.ID, true, (&api.QueryOptions{}).WithContext(ctx))
 		if err != nil {
-			errs = append(errs, redacted("list allocations of", job.ID, adapter.failed("list allocations", err)))
+			errs = append(errs, adapter.failed("list allocations of "+job.ID, err))
 			continue
 		}
 		// An adopter may still read a dead job's log, so its age runs from its last allocation change.
@@ -947,7 +966,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 	prefix := jobVariablePrefix + adapter.prefix
 	variables, _, err := adapter.client.Variables().PrefixList(prefix, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return errors.Join(append(errs, redacted("list", prefix, adapter.failed("list variables", err)))...)
+		return errors.Join(append(errs, adapter.failed("list variables "+prefix, err))...)
 	}
 	for _, variable := range variables {
 		match := adapter.runVariable.FindStringSubmatch(variable.Path)
@@ -962,7 +981,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 				continue
 			}
 		case err != nil:
-			errs = append(errs, redacted("sweep", variable.Path, adapter.failed("read job", err)))
+			errs = append(errs, adapter.failed("sweep read job of "+variable.Path, err))
 			continue
 		case job.Meta["adapter"] != adapter.name:
 			own = false
@@ -988,30 +1007,23 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 
 func (adapter *Adapter) deleteVariable(ctx context.Context, path string) error {
 	if _, err := adapter.client.Variables().Delete(path, (&api.WriteOptions{}).WithContext(ctx)); err != nil && !errors.Is(err, api.ErrVariablePathNotFound) && !notFound(err) {
-		return redacted("delete", path, adapter.failed("delete variable", err))
+		return adapter.failed("delete variable "+path, err)
 	}
 	return nil
 }
 
-// redacted keeps response bodies, which may echo variable items, out of errors.
-func redacted(op, path string, err error) error {
-	var response api.UnexpectedResponseError
-	if errors.As(err, &response) {
-		return fmt.Errorf("%s %s: status %d", op, path, response.StatusCode())
-	}
-	return fmt.Errorf("%s %s failed", op, path)
-}
-
-// failed counts err, from the Nomad API call op, by its class, logs op and the class once, and returns it. The log
-// line leaves out err's text, which can hold a request URL or a response body. A not-found answer, which callers read
-// as absence, and a call its caller cancelled count nothing.
+// failed counts err, from the Nomad API call op, by its class and returns it as a wherry.Error, which the receiver
+// logs redacted. A not-found answer, which callers read as absence, and a call its caller cancelled count nothing and
+// have no class.
 func (adapter *Adapter) failed(op string, err error) error {
 	var response api.UnexpectedResponseError
 	var network net.Error
 	class := "other"
 	switch {
-	case err == nil || notFound(err) || errors.Is(err, context.Canceled):
-		return err
+	case err == nil:
+		return nil
+	case notFound(err) || errors.Is(err, context.Canceled):
+		return &wherry.Error{Op: op, Err: err}
 	case errors.Is(err, context.DeadlineExceeded):
 		class = "timeout"
 	case errors.As(err, &response):
@@ -1033,8 +1045,16 @@ func (adapter *Adapter) failed(op string, err error) error {
 	adapter.metrics.mu.Lock()
 	adapter.metrics.errors[class]++
 	adapter.metrics.mu.Unlock()
-	adapter.logger.Warn("nomad call failed", "adapter", adapter.name, "op", op, "class", class)
-	return err
+	return &wherry.Error{Op: op, Class: class, Err: err}
+}
+
+// handled counts err as failed does and logs its op and class for an error the adapter handles itself and never
+// returns. The line leaves out err's text, which can hold a request URL or a response body.
+func (adapter *Adapter) handled(op string, err error) {
+	var failure *wherry.Error
+	if errors.As(adapter.failed(op, err), &failure) && failure.Class != "" {
+		adapter.logger.Warn("nomad call failed", "adapter", adapter.name, "op", failure.Op, "class", failure.Class)
+	}
 }
 
 func (m *metrics) placed(seconds float64) {
