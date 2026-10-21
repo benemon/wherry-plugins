@@ -8,9 +8,11 @@ DIST      ?= dist
 PLATFORMS ?= linux/amd64 linux/arm64
 PLUGINS   := nomad kubernetes
 PLUGIN    ?=
-# image builds the receiver image from this checkout and the wherry release WHERRY_VERSION, such as v0.4.0.
+# image builds the receiver image from this checkout and the wherry release WHERRY_VERSION, such as v0.4.0, with
+# CONTAINER, podman or docker.
 WHERRY_VERSION ?=
 IMAGE          ?= wherry-receiver
+CONTAINER      ?= podman
 
 LICENCE_ALLOWLIST := MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0
 
@@ -91,6 +93,6 @@ dist: ## Cross-compile PLUGIN's release archives and checksums.txt into DIST
 	cd $(DIST) && sha256sum wherry-plugin-$(PLUGIN)_*.tar.gz > checksums.txt
 
 .PHONY: image
-image: ## Build the receiver image with Podman (VERSION, WHERRY_VERSION)
+image: ## Build the receiver image (VERSION, WHERRY_VERSION, CONTAINER)
 	@test -n "$(WHERRY_VERSION)" || { echo "FAIL: set WHERRY_VERSION"; exit 1; }
-	podman build -f kubernetes/Containerfile --build-arg WHERRY_VERSION=$(WHERRY_VERSION) -t $(IMAGE):$(VERSION) .
+	$(CONTAINER) build -f kubernetes/Containerfile --build-arg WHERRY_VERSION=$(WHERRY_VERSION) -t $(IMAGE):$(VERSION) .

@@ -1,5 +1,5 @@
-# The wherry receiver image for OpenShift: wherry from its verified release, the Kubernetes adapter plugin, and the
-# helper agent pods run. Build it with make image from a checkout of a kubernetes/v* tag.
+# The wherry receiver image for Kubernetes and OpenShift: wherry from its verified release, the Kubernetes adapter
+# plugin, and the helper agent pods run. Build it with make image from a checkout of a kubernetes/v* tag.
 # The bases are pinned by digest, since cosign verifies wherry's release; dependabot moves the pins.
 FROM ghcr.io/sigstore/cosign/cosign:v3.0.2@sha256:b29487e48205d875c324c79583e2806d9d269c0fa299e0861bbec023d8430c8b AS cosign
 
@@ -9,14 +9,17 @@ COPY kubernetes/ .
 RUN CGO_ENABLED=0 go build -trimpath -o /out/wherry-plugin-kubernetes . && \
     CGO_ENABLED=0 go build -trimpath -o /out/wherry-k8s-helper ./cmd/wherry-k8s-helper
 
+# WHERRY_OS and WHERRY_ARCH fetch another platform's archive for the wherry target, such as darwin for a workstation.
 FROM docker.io/library/golang:1.27@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS fetch
 ARG WHERRY_VERSION
 ARG TARGETARCH
+ARG WHERRY_OS=linux
+ARG WHERRY_ARCH
 COPY --from=cosign /ko-app/cosign /usr/local/bin/cosign
 WORKDIR /fetch
 RUN test -n "$WHERRY_VERSION" && \
     base="https://github.com/benemon/wherry/releases/download/$WHERRY_VERSION" && \
-    archive="wherry_${WHERRY_VERSION}_linux_${TARGETARCH}.tar.gz" && \
+    archive="wherry_${WHERRY_VERSION}_${WHERRY_OS}_${WHERRY_ARCH:-$TARGETARCH}.tar.gz" && \
     curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json" && \
     cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
       --certificate-identity-regexp '^https://github\.com/benemon/wherry/\.github/workflows/release\.yml@refs/tags/v' \
@@ -24,9 +27,16 @@ RUN test -n "$WHERRY_VERSION" && \
     grep "  $archive\$" checksums.txt | sha256sum -c - && \
     tar -xzf "$archive" --strip-components=1 "${archive%.tar.gz}/wherry"
 
+# The verified wherry binary alone, for the CLI outside the cluster: --target wherry --output type=local,dest=DIR.
+FROM scratch AS wherry
+COPY --from=fetch /fetch/wherry /wherry
+
+# The receiver runs as UID 1001, or the UID OpenShift assigns, with group 0. Its writable paths are volumes: state on
+# /var/lib/wherry, and HOME and TMPDIR on /tmp, whose mount points group 0 can write.
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8@sha256:c4c285d42941ebb2bd4da878479008e1e4536bb599aad1dbe568f89de9053661
 COPY --from=fetch --chown=0:0 --chmod=0755 /fetch/wherry /usr/local/bin/wherry
 COPY --from=build --chown=0:0 --chmod=0755 /out/wherry-plugin-kubernetes /usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes
 COPY --from=build --chown=0:0 --chmod=0755 /out/wherry-k8s-helper /usr/local/libexec/wherry/wherry-k8s-helper
-USER 1001
+RUN install -d -o 0 -g 0 -m 0775 /var/lib/wherry
+USER 1001:0
 ENTRYPOINT ["/usr/local/bin/wherry"]
