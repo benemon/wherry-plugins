@@ -229,7 +229,9 @@ The agent task receives:
 - `WHERRY_MODEL` set to the task's model, one the pool's terms allow, when
   the task has one, and not set by the plugin otherwise. The plugin never puts
   it in the driver `config`; the command reads it from the environment, such
-  as `--model "${WHERRY_MODEL:-haiku}"`;
+  as `test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;` then
+  `--model "$WHERRY_MODEL"`. Nomad interpolates `${...}` in driver `config`
+  and fails the task with a validation error on `${WHERRY_MODEL:-haiku}`;
 - the variables of the adapter protocol's `AgentEnvironment`, as described
   in [Agent environment](#agent-environment);
 - the runtime's `env`, driver `config` and `resources`.
