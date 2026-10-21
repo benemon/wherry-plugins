@@ -1,14 +1,13 @@
 # wherry-plugin-kubernetes
 
-The wherry adapter plugin for Kubernetes and OpenShift. A wherry receiver
-starts it from its plugin directory for adapters of type `kubernetes`, and
-runs each of the receiver's turns as one pod and one Secret in a namespace.
-One plugin process hosts every `kubernetes` adapter of a receiver.
+The wherry adapter plugin for Kubernetes. A wherry receiver starts it from
+its plugin directory for adapters of type `kubernetes`, and runs each of the
+receiver's turns as one pod and one Secret in a namespace. One plugin
+process hosts every `kubernetes` adapter of a receiver.
 
-The plugin works against any conformant cluster. OpenShift 4.18
-(Kubernetes 1.31) or later is the supported platform. Plain Kubernetes 1.31
-or later is best effort; [OpenShift and plain Kubernetes](#openshift-and-plain-kubernetes)
-lists the differences.
+Kubernetes 1.31 or later is the platform. The plugin, the receiver image
+and the receiver's manifests also run unchanged on OpenShift 4.18 or later;
+[OpenShift](#openshift) lists what differs there.
 
 ## Build
 
@@ -29,9 +28,9 @@ receiver image ([Image](#image)).
 
 ## Install
 
-On OpenShift, run the receiver from the receiver image, which holds wherry,
+In a cluster, run the receiver from the receiver image, which holds wherry,
 the plugin and the helper; see
-[Run the receiver on OpenShift](#run-the-receiver-on-openshift).
+[Run the receiver in the cluster](#run-the-receiver-in-the-cluster).
 
 On a receiver outside the cluster:
 
@@ -75,42 +74,16 @@ The plugin reads no kubeconfig and no `KUBECONFIG`. A kubeconfig can name
 exec credential plugins and auth providers, which run commands on the
 receiver, and the plugin needs only an address, a CA and a token.
 
-The token needs the [RBAC](#rbac) Role in the agent namespace.
+The token needs the [RBAC](#rbac) grants in the adapter's namespace.
 
 ## RBAC
 
-The plugin's calls need this Role, bound by a RoleBinding to the
-receiver's service account, in the agent namespace alone:
+Agent pods run in the receiver's own namespace. The receiver's service
+account holds the cluster role `admin` in that namespace alone, through the
+RoleBinding in [`deploy/receiver.yaml`](deploy/receiver.yaml), and nothing
+outside it.
 
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata: {name: wherry-receiver, namespace: wherry-agents}
-rules:
-  - apiGroups: [""]
-    resources: [pods]
-    verbs: [create, get, list, delete]
-  - apiGroups: [""]
-    resources: [pods/log]
-    verbs: [get]
-  - apiGroups: [""]
-    resources: [pods/exec]
-    verbs: [create, get]
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [create, get, update, list, delete]
-  - apiGroups: [""]
-    resources: [namespaces]
-    resourceNames: [wherry-agents]
-    verbs: [get]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata: {name: wherry-receiver, namespace: wherry-agents}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: wherry-receiver}
-subjects:
-  - {kind: ServiceAccount, name: wherry-receiver, namespace: wherry}
-```
+The plugin's calls, all in that namespace, need:
 
 - `pods` create, get, list, delete: create a turn's pod, read it for
   lookups and polls, list it for the sweep, and delete it for a stop's last
@@ -123,45 +96,42 @@ subjects:
   SPDY fallback is a POST, so both verbs are needed.
 - `secrets` create, get, update, list, delete: write a turn's material,
   delete it when the turn ends, and list its metadata for the sweep.
-- `namespaces` get on the agent namespace alone: readiness. A namespaced
-  Role can grant this, because a request for a namespace object is
-  authorised in that namespace.
+- `namespaces` get on the namespace: readiness.
 
-No `watch`, `patch`, `deletecollection` or `resourcequotas` access is
-needed.
+`admin` grants these and more. In the namespace, the receiver, or anyone
+holding its token, can:
 
-The API does not restrict the command an exec runs. With `pods` create,
-`pods/exec` and `secrets` get in the agent namespace, a compromised
-receiver, or anyone holding its token, can run commands in any running
-agent container, read the agent's environment (the model credential) and
-its credentials directory, use that pod's egress, start pods under
-restricted-v2 in that namespace, and read every turn's prompt and material
-from the Secrets. It cannot reach other namespaces, nodes or a wider SCC,
-because the Role is namespaced and admission uses the creator's SCCs. The
-outputs holder never mounts the credentials, but a process in it can read
-them through `/proc/<agent pid>/root` while the agent runs, since both share
-a UID and a process namespace. The holder's mounts are hygiene, not
-isolation.
+- read and write every Secret: the bundle Secret, which holds the
+  receiver's Kafka password, and every turn's prompt and material;
+- run commands in every pod, the receiver's own and each agent's, read an
+  agent's environment (the model credential) and its credentials
+  directory, and use that pod's egress;
+- create, change and delete pods, Deployments, Services,
+  PersistentVolumeClaims, ConfigMaps, ServiceAccounts and most other
+  namespaced objects, the receiver's own Deployment and state volume among
+  them;
+- impersonate the namespace's service accounts;
+- create Roles and RoleBindings in the namespace for permissions it holds.
 
-Do not grant:
+It cannot write the namespace itself, its ResourceQuotas or its
+LimitRanges, and it cannot reach other namespaces, nodes or other
+cluster-scoped objects. Pods it creates are admitted by the namespace's Pod
+Security level, so with the namespace at `restricted` none runs privileged
+or as root.
 
-- the Role as a ClusterRole, or any binding outside the agent namespace;
-- the Role in a namespace that holds anything but agent pods. `secrets` and
-  `pods/exec` there reach every Secret and pod;
-- `pods/attach`, `pods/portforward`, `pods/proxy`, `pods/ephemeralcontainers`
-  or `serviceaccounts/token`;
-- `escalate`, `bind` or `impersonate`;
-- `nodes` access of any kind;
-- `use` of any SCC beyond the default restricted-v2 to the receiver's
-  service account. OpenShift admits a pod against the SCCs its creator may
-  use as well as its service account's, so `anyuid` or `privileged` would
-  admit agent pods running as root;
-- RBAC to the agent namespace's `default` service account. Its token is
-  never mounted, and no agent may hold any API right.
+The API does not restrict the command an exec runs, and the outputs holder
+never mounts the credentials, but a process in it can read them through
+`/proc/<agent pid>/root` while the agent runs, since both share a UID and a
+process namespace. The holder's mounts are hygiene, not isolation.
 
-No service-account token Secret lives in `wherry-agents`. The only Secrets
-there when no turn runs are the image-pull Secrets OpenShift creates for
-the namespace's service accounts.
+Do not:
+
+- bind `admin` with a ClusterRoleBinding, or in any other namespace;
+- run anything but the receiver and its agent pods in the namespace, since
+  `admin` there reaches every Secret and pod;
+- lower the namespace's Pod Security level below `restricted`;
+- grant RBAC to the namespace's `default` service account. Agent pods run
+  as it with no token mounted, and no agent may hold any API right.
 
 ## Settings
 
@@ -196,12 +166,12 @@ adapter, and the receiver exits with `adapter <name>: ...` on an error.
 | `env` | environment variables for the agent; names match `[A-Za-z_][A-Za-z0-9_]*` |
 | `resources` | `cpu` (default `500m`), `memory` (default `2Gi`) and `ephemeral_storage` (default unset), Kubernetes quantities, each set as both request and limit |
 | `work_limit` | a quantity, the size limit of the agent's `/wherry` volume; unset, no limit |
-| `user` | `UID` or `UID:GID`; unset, the platform assigns one |
+| `user` | `UID` or `UID:GID`, a string; unset, the platform assigns one |
 
 `user` takes positive integers below 2^31 with no leading zeros; root (0)
-is refused. On OpenShift, a `user` outside the namespace's UID range is
-refused at admission. The resource defaults are starting points; set them
-for the agent.
+is refused. Quote it in YAML, such as `user: "1001"`. Kubernetes assigns no
+UID, so set it. The resource defaults are starting points; set them for the
+agent.
 
 The plugin sets `HOME`, the `WHERRY_*` variables and the credential
 variable over `env`, so a variable of these names in `env` is overwritten.
@@ -215,7 +185,7 @@ Readiness checks nothing else:
   `node_selector` no node matches, waits until the run's deadline, holding
   one of the receiver's `capacity` slots, and the turn then fails
   `timeout`.
-- Quota. A ResourceQuota in the agent namespace that is full refuses pod
+- Quota. A ResourceQuota in the namespace that is full refuses pod
   creation with 403. Each refusal counts a `dispatch` start failure, and
   the task spends its delivery budget.
 - Images. An agent or helper image that cannot be pulled shows only at
@@ -224,15 +194,16 @@ Readiness checks nothing else:
 An adapter file in a receiver configuration directory:
 
 ```yaml
-name: openshift
-platform: openshift
+name: kubernetes
+platform: kubernetes
 agent: coder
 credential: model-api-key
 labels:
-  platform: openshift
+  platform: kubernetes
 config:
   runtime:
-    image: image-registry.openshift-image-registry.svc:5000/wherry-images/agent:1.0
+    image: registry.example.com/agent:1.0
+    user: "1001"
     command: [/bin/sh, -c]
     args:
       - >-
@@ -240,15 +211,15 @@ config:
         exec agent-run --model "$WHERRY_MODEL" < /wherry/prompt.txt
 ```
 
-with `platforms/openshift.yaml`:
+with `platforms/kubernetes.yaml`, whose namespace is the receiver's own:
 
 ```yaml
-name: openshift
+name: kubernetes
 type: kubernetes
 config:
-  namespace: wherry-agents
+  namespace: wherry
   credential_env: MODEL_API_KEY
-  helper_image: image-registry.openshift-image-registry.svc:5000/wherry-images/wherry-receiver:<version>
+  helper_image: registry.example.com/wherry-receiver:<version>
 ```
 
 ## Agent pods
@@ -278,17 +249,18 @@ The pod sets `automountServiceAccountToken: false`,
 `enableServiceLinks: false`, `shareProcessNamespace: true`,
 `terminationGracePeriodSeconds: 15`, `runAsNonRoot`, the `RuntimeDefault`
 seccomp profile, and, in every container, no privilege escalation and no
-capabilities. The helper containers have read-only root filesystems and
+capabilities, which meets the Pod Security `restricted` level. The helper
+containers have read-only root filesystems and
 request 10m CPU and 16Mi memory, limited to 200m and 64Mi. The agent's
 requests equal its limits. The plugin sets no `ephemeral-storage` on the
 helper containers; where a ResourceQuota covers `ephemeral-storage`, give
-the agent namespace a LimitRange default. The pod runs as the namespace's
+the namespace a LimitRange default. The pod runs as the namespace's
 `default` service account, which carries the pull secrets for the agent
 and helper images.
 
 Every container must run as one UID, since the helper signals the agent's
-processes and owns its credential files. On OpenShift, restricted-v2 gives
-every container the namespace's first UID. If the admitted pod's containers
+processes and owns its credential files; `runtime.user` gives every
+container its UID. If the admitted pod's containers
 run as different users, or any has none, the plugin deletes the pod and its
 Secret and reports nothing created with
 `agent pod containers run as different users; set runtime.user`, so the
@@ -351,8 +323,7 @@ an offset, after a receiver restart or an adoption, reads the current log
 file only. If the kubelet has rotated the log past that offset, the follow
 fails with `the agent's log is shorter than the offset`, and the turn
 fails. Agents whose standard output can pass the kubelet's
-`containerLogMaxSize` (50 MiB on OpenShift, 10 MiB on Kubernetes by
-default) are exposed to this. An offset inside the rotated part that is
+`containerLogMaxSize`, 10 MiB by default, are exposed to this. An offset inside the rotated part that is
 still below the current file's length is not detected: the follow discards
 that many bytes of the current file, so the transcript loses lines without
 an error.
@@ -526,26 +497,26 @@ ingress: the plugin reaches them through the API server's exec and logs.
 They need no route to the storage endpoint. Until an egress policy is set,
 agent pods have the cluster's default egress.
 
-To restrict agents, put a default-deny egress NetworkPolicy in the agent
+To restrict agents, put a default-deny egress NetworkPolicy in the
 namespace with allow rules for what agents reach (DNS, the model API, git
-hosts). On OpenShift, a destination known only by DNS name needs an
-OVN-Kubernetes `EgressFirewall` with `dnsName` rules, which a cluster
-administrator creates. The agent namespace holds nothing but agent pods,
-so such a policy constrains agents alone.
+hosts). Agent pods share the namespace with the receiver, so select them
+by the label `wherry.io/pool`, which the receiver's pod does not carry:
 
-## Run the receiver on OpenShift
+```yaml
+podSelector:
+  matchExpressions: [{key: wherry.io/pool, operator: Exists}]
+```
 
-The receiver runs as a one-replica Deployment in its own namespace, with
-its own service account, and holds the [RBAC](#rbac) Role in a separate
-namespace that holds only agent pods. The default names, to be changed
-together:
+## Run the receiver in the cluster
 
-- `wherry`: the receiver's namespace, holding the ServiceAccount, the
-  bundle Secret, the state PersistentVolumeClaim, the Deployment, the
-  metrics Service and ServiceMonitor, and the NetworkPolicies.
-- `wherry-agents`: agent pods and their Secrets alone, and the Role and
-  RoleBinding.
-- `wherry-images`: the receiver and agent images.
+The receiver runs as a one-replica Deployment with its own service account,
+and its agent pods run beside it in the same namespace.
+[`deploy/receiver.yaml`](deploy/receiver.yaml) holds its manifests: the
+ServiceAccount, the RoleBinding of `admin` ([RBAC](#rbac)), the state
+PersistentVolumeClaim, the Deployment and the metrics Service. The Secret
+`wherry-receiver-bundle` holds the bundle. Kubernetes and OpenShift take the
+same manifests; only the namespace, the image and the Kafka bootstrap
+address differ.
 
 ### Image
 
@@ -557,8 +528,9 @@ the tag `kubernetes/<version>`, where `<version>` carries its `v`, such as
 make image VERSION=<version> WHERRY_VERSION=<wherry version>
 ```
 
-The build compiles the plugin and the helper from the checkout, downloads
-the wherry release archive for the target architecture with its
+`make image` runs Podman; `CONTAINER=docker` runs Docker instead. The
+build compiles the plugin and the helper from the checkout, downloads the
+wherry release archive for the target architecture with its
 `checksums.txt` and `checksums.txt.sigstore.json`, and verifies the
 checksums' signature, then the archive's SHA-256 against them:
 
@@ -573,225 +545,112 @@ CA bundle the receiver's S3 uploads and the plugin's S3 fetches trust. It
 holds `/usr/local/bin/wherry`,
 `/usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes` and
 `/usr/local/libexec/wherry/wherry-k8s-helper`, each mode 0755 and owned by
-root, so the receiver's checks pass under any UID. It runs as UID 1001,
-which OpenShift replaces with the namespace's UID, with the entrypoint
-`wherry`. It holds no Nomad plugin. The same image is the `helper_image`.
-For a storage endpoint under a private CA, add the CA with
-`update-ca-trust` in a derived image.
+root, so the receiver's checks pass under any UID. It runs as UID 1001 and
+group 0, with the entrypoint `wherry`; its writable paths are volumes whose
+mount points, `/var/lib/wherry` and `/tmp`, group 0 can write. It holds no
+Nomad plugin. The same image is the `helper_image`. For a storage endpoint
+under a private CA, add the CA with `update-ca-trust` in a derived image.
 
 No image is published, since an image couples a wherry release and a
-plugins release. Push the image you build to the internal registry through
-its route, since the Service name resolves only inside the cluster; pods
-pull it by the Service name:
+plugins release. Push the image you build to a registry the cluster pulls
+from.
 
-```sh
-oc new-project wherry-images
-registry=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
-oc whoami -t | podman login -u "$(oc whoami)" --password-stdin "$registry"
-podman push wherry-receiver:<version> "$registry/wherry-images/wherry-receiver:<version>"
-```
+### Deploy
 
-Agent pods and the receiver pull from `wherry-images`:
+1. Create the receiver's namespace, enforcing Pod Security `restricted`:
 
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata: {name: wherry-image-pullers, namespace: wherry-images}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: system:image-puller}
-subjects:
-  - {kind: ServiceAccount, name: default, namespace: wherry-agents}
-  - {kind: ServiceAccount, name: wherry-receiver, namespace: wherry}
-```
+   ```sh
+   kubectl create namespace wherry
+   kubectl label namespace wherry pod-security.kubernetes.io/enforce=restricted
+   ```
 
-### Manifests
+2. Add the receiver with `wherry admin receiver add`, as the operator guide
+   says, with adapters whose `namespace` is the receiver's and whose
+   `helper_image` is the receiver image ([Settings](#settings)). The
+   in-cluster receiver's adapters take no platform entry in the bundle; the
+   service account supplies the token.
 
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata: {name: wherry}
----
-apiVersion: v1
-kind: Namespace
-metadata: {name: wherry-agents}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata: {name: wherry-receiver, namespace: wherry}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata: {name: wherry-receiver-state, namespace: wherry}
-spec:
-  accessModes: [ReadWriteOnce]
-  resources: {requests: {storage: 1Gi}}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name: wherry-receiver, namespace: wherry}
-spec:
-  replicas: 1
-  strategy: {type: Recreate}
-  selector: {matchLabels: {app: wherry-receiver}}
-  template:
-    metadata: {labels: {app: wherry-receiver}}
-    spec:
-      serviceAccountName: wherry-receiver
-      securityContext:
-        runAsNonRoot: true
-        seccompProfile: {type: RuntimeDefault}
-        fsGroupChangePolicy: OnRootMismatch
-      containers:
-        - name: receiver
-          image: image-registry.openshift-image-registry.svc:5000/wherry-images/wherry-receiver:<version>
-          args: [receiver, --bundle-file, /etc/wherry/bundle/bundle.yaml, --state-dir, /var/lib/wherry/state,
-                 --plugin-dir, /usr/local/libexec/wherry/plugins, --metrics-addr, "0.0.0.0:9464"]
-          env:
-            - {name: TMPDIR, value: /tmp}
-            - {name: HOME, value: /tmp}
-          ports: [{name: metrics, containerPort: 9464}]
-          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, readOnlyRootFilesystem: true}
-          resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 512Mi}}
-          volumeMounts:
-            - {name: bundle, mountPath: /etc/wherry/bundle, readOnly: true}
-            - {name: state, mountPath: /var/lib/wherry}
-            - {name: tmp, mountPath: /tmp}
-      volumes:
-        - {name: bundle, secret: {secretName: wherry-receiver-bundle, defaultMode: 0400}}
-        - {name: state, persistentVolumeClaim: {claimName: wherry-receiver-state}}
-        - {name: tmp, emptyDir: {medium: Memory, sizeLimit: 16Mi}}
----
-apiVersion: v1
-kind: Service
-metadata: {name: wherry-receiver-metrics, namespace: wherry, labels: {app: wherry-receiver}}
-spec:
-  selector: {app: wherry-receiver}
-  ports: [{name: metrics, port: 9464, targetPort: metrics}]
----
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata: {name: wherry-receiver, namespace: wherry}
-spec:
-  selector: {matchLabels: {app: wherry-receiver}}
-  endpoints: [{port: metrics, scheme: http, path: /metrics}]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: {name: wherry-receiver-metrics, namespace: wherry}
-spec:
-  podSelector: {matchLabels: {app: wherry-receiver}}
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-user-workload-monitoring}}
-      ports: [{protocol: TCP, port: 9464}]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: {name: wherry-receiver-egress, namespace: wherry}
-spec:
-  podSelector: {matchLabels: {app: wherry-receiver}}
-  policyTypes: [Egress]
-  egress:
-    - to:
-        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kafka}}
-          podSelector: {matchLabels: {strimzi.io/broker-role: "true"}}
-      ports: [{protocol: TCP, port: 9093}]
-    - to:
-        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-dns}}
-      ports: [{protocol: UDP, port: 5353}, {protocol: TCP, port: 5353}]
-    - to:
-        # One ipBlock for each address of the default/kubernetes Endpoints.
-        - ipBlock: {cidr: <API server address>/32}
-      ports: [{protocol: TCP, port: 6443}]
-    - to:
-        - ipBlock: {cidr: <storage endpoint address>/32}
-      ports: [{protocol: TCP, port: 443}]
-```
+3. Apply the receiver:
 
-Apply the [RBAC](#rbac) Role and RoleBinding and the image-puller
-RoleBinding above beside them, and create the bundle Secret as
-[Bundle and Kafka](#bundle-and-kafka) describes.
+   ```sh
+   NAMESPACE=wherry IMAGE=registry.example.com/wherry-receiver:<version> \
+     BOOTSTRAP=wherry-kafka-kafka-bootstrap.kafka.svc:9093 BUNDLE=kubernetes-1.bundle \
+     kubernetes/deploy/apply.sh
+   kubectl rollout status deployment/wherry-receiver -n wherry
+   ```
+
+[`deploy/apply.sh`](deploy/apply.sh) creates or replaces the Secret
+`wherry-receiver-bundle` from `BUNDLE` with its `broker` replaced by
+`BOOTSTRAP` ([Bundle and Kafka](#bundle-and-kafka)), never writing the
+bundle to disk, then applies `receiver.yaml` with the namespace and the
+image substituted, both with server-side apply. Run it again to change
+either, and restart the Deployment to read a new bundle.
 
 - One replica with the `Recreate` strategy: a receiver is one principal
   with one key pair, and a rolling update would briefly run two.
 - The receiver's service account token is mounted, and the plugin, a child
   process of the receiver, uses it.
+- The pod sets no `runAsUser`, so it runs as the image's UID 1001 with
+  group 0.
 - `/tmp` is a writable memory volume, and `TMPDIR` and `HOME` point at it.
   The root filesystem is read-only, and the plugin creates its socket for
   the receiver in `$TMPDIR`; without it the plugin cannot start, and the
   receiver exits with `adapter <name>: plugin ...` and restarts in a loop.
 - State lives on the PVC, in the `state` subdirectory, which the receiver
-  creates at 0700 with its signing key at 0600. `fsGroupChangePolicy:
-  OnRootMismatch` keeps the kubelet from adding group access to the key on
-  every mount, which would stop the receiver. If the namespace's fsGroup
-  ever changes, the receiver stops with `chmod 600 it`; fix the modes. A
-  restarted pod mounts the same volume and is the same receiver. Losing
-  the PVC loses the receiver's identity; provision it again under a new
-  name, as the operator guide says for a lost state directory.
-- The bundle Secret is mounted at 0400, which becomes 0440 with the pod's
-  fsGroup.
+  creates at 0700 with its signing key at 0600. The volume's root must be
+  writable by the receiver. The pod sets no fsGroup, so use a storage
+  class whose volumes UID 1001 or group 0 can write, such as kind's
+  local-path volumes, which are mode 0777. A restarted pod mounts the same
+  volume and is the same
+  receiver. Losing the PVC loses the receiver's identity; provision it
+  again under a new name, as the operator guide says for a lost state
+  directory.
+- The bundle Secret is mounted at 0440, owned by group 0, the receiver's
+  group.
 - The receiver has no health endpoint, so the pod has no probes.
-- The metrics address binds the pod's own addresses. The ingress policy
-  admits only user workload monitoring, and the ServiceMonitor scrapes over
-  plain HTTP, since the endpoint has no TLS or authentication. Whoever can
-  read the user workload Prometheus sees every tenant of the pool.
-- The egress policy allows exactly the Kafka brokers (TCP 9093), the DNS
-  pods (5353), the API server (TCP 6443) and the storage endpoint
-  (TCP 443). The API server runs on the host network, so a namespace
-  selector does not reach it; list the addresses of the `default/kubernetes`
-  Endpoints. The policy makes the receiver work under a cluster-wide
-  default-deny egress policy, and limits it otherwise. A storage endpoint
-  outside the cluster must also pass the cluster's own egress rules, and one
-  known only by DNS name needs an `EgressFirewall`.
-
-Some items need more than a project administrator:
-
-- user workload monitoring must be enabled cluster-wide for the
-  ServiceMonitor to be scraped;
-- an `EgressFirewall` is OVN-Kubernetes only and created by a cluster
-  administrator;
-- raising `containerLogMaxSize` is a `KubeletConfig`, which rolls every
-  node of its MachineConfigPool.
+- The metrics address binds the pod's own addresses, with no TLS or
+  authentication. Scrape the Service `wherry-receiver-metrics`, port
+  `metrics`, path `/metrics`. Whoever reads the scrape sees every tenant of
+  the pool; where the CNI enforces NetworkPolicy, admit only the scraper to
+  port 9464.
+- Under a default-deny egress policy, allow the receiver's pod
+  (`app: wherry-receiver`) the Kafka brokers (TCP 9093), the cluster's DNS,
+  the API server and the storage endpoint. The API server usually runs on
+  the host network, where a namespace selector does not reach it; allow the
+  addresses of the `default/kubernetes` Endpoints.
 
 ### Bundle and Kafka
 
-The pool's Kafka runs in the same cluster under Streams for Apache Kafka or
-Strimzi, with Kafka 4.3, share groups enabled, and a `tls` internal listener
-with `authentication: scram-sha-512` and `authorization: simple`. The
-operator guide's Strimzi notes apply. The listener's `networkPolicyPeers`
-admits the `wherry` namespace.
+The pool's Kafka runs in the same cluster under Strimzi, with Kafka 4.3, share groups enabled, and a
+`tls` internal listener with `authentication: scram-sha-512` and
+`authorization: simple`. The operator guide's Strimzi notes apply. Where
+the listener sets `networkPolicyPeers`, they admit the receiver's
+namespace.
 
 The bundle `wherry admin receiver add` writes names `WHERRY_TRUST_BROKER`,
-the address hosts use. Before creating the Secret, replace the bundle's
-`broker` with the internal bootstrap address, such as
+the address hosts use. `apply.sh` replaces it with `BOOTSTRAP`, the
+internal bootstrap address, such as
 `wherry-kafka-kafka-bootstrap.kafka.svc:9093`; Strimzi's broker
 certificates carry the internal Service names. The bundle's `ca` is the
 Strimzi cluster CA (`<cluster>-cluster-ca-cert`, key `ca.crt`).
-
-```sh
-oc create secret generic wherry-receiver-bundle -n wherry --from-file=bundle.yaml=openshift-1.bundle
-```
-
-The in-cluster receiver's adapters take no platform entry in the bundle;
-the service account supplies the token.
 
 Strimzi renews its cluster CA, and nothing renews the receiver's copy:
 
 1. When the renewal begins, Strimzi keeps the old certificate in
    `<cluster>-cluster-ca-cert` beside the new `ca.crt`. Write both
    certificates into the bundle's `ca`.
-2. Replace `wherry-receiver-bundle` and run
-   `oc rollout restart deployment/wherry-receiver -n wherry`.
+2. Run `apply.sh` with the new bundle and
+   `kubectl rollout restart deployment/wherry-receiver -n wherry`.
 3. Once Strimzi has removed the old certificate, remove it from the bundle
-   and restart again.
+   and run both again.
 
-### Members on Nomad and OpenShift
+### Members on Nomad and Kubernetes
 
 Members are asymmetric. The in-cluster receiver carries only Kubernetes
-adapters, labelled `platform: openshift`, and holds no Nomad token. A
+adapters, labelled `platform: kubernetes`, and holds no Nomad token. A
 Nomad-hosted receiver carries only Nomad adapters, labelled
-`platform: nomad`, and holds no OpenShift token. A task is admitted only by
-an adapter whose labels satisfy its selector.
+`platform: nomad`, and holds no Kubernetes token. A task is admitted only
+by an adapter whose labels satisfy its selector.
 
 A run is adopted only by a receiver with the same adapter. For a
 Kubernetes run that is the in-cluster receiver itself, restarted: the new
@@ -806,24 +665,67 @@ unfollowed.
 Members may instead be symmetric, each receiver carrying the other
 platform's adapters and tokens. That costs a long-lived token for the
 remote receiver, whose service account and token Secret live outside the
-agent namespace and are bound in by a RoleBinding, and the sweep's double
-count across two receivers sharing an adapter name.
+receiver's namespace and are bound in by a RoleBinding, and the sweep's
+double count across two receivers sharing an adapter name.
 
-### OpenShift and plain Kubernetes
+## OpenShift
 
-| Concern | OpenShift | Plain Kubernetes |
+The image, `receiver.yaml` and `apply.sh` are the same on OpenShift, which
+ships `kubectl` beside `oc`. What differs:
+
+- Create the namespace with `oc new-project wherry`. OpenShift sets the
+  namespace's Pod Security labels itself and admits pods by SCC: the
+  receiver's pod and agent pods run under restricted-v2. Do not allow the
+  receiver's service account any SCC beyond restricted-v2; OpenShift admits
+  a pod against the SCCs its creator may use as well as its service
+  account's, so `anyuid` or `privileged` would admit agent pods running as
+  root.
+- restricted-v2 gives every container of a pod the namespace's first UID,
+  with group 0. Leave `runtime.user` unset; a `user` outside the
+  namespace's UID range is refused at admission.
+- restricted-v2 also sets the pod's fsGroup, which the bundle file and the
+  state volume take. `fsGroupChangePolicy: OnRootMismatch` keeps the
+  kubelet from adding group access to the receiver's signing key on every
+  mount, which would stop the receiver. If the namespace's fsGroup ever
+  changes, the receiver stops with `chmod 600 it`; fix the modes.
+- Streams for Apache Kafka serves as Strimzi.
+- Push the receiver and agent images to the internal registry, into the
+  receiver's namespace, through the registry's route, since the Service
+  name resolves only inside the cluster. Pods in the namespace pull its
+  images by the Service name with no further grant, such as
+  `IMAGE=image-registry.openshift-image-registry.svc:5000/wherry/wherry-receiver:<version>`:
+
+  ```sh
+  registry=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
+  oc whoami -t | podman login -u "$(oc whoami)" --password-stdin "$registry"
+  podman push wherry-receiver:<version> "$registry/wherry/wherry-receiver:<version>"
+  ```
+
+- With user workload monitoring enabled, a ServiceMonitor selecting
+  `app: wherry-receiver`, port `metrics`, scheme `http`, scrapes the
+  receiver.
+- An `EgressFirewall` with `dnsName` rules restricts egress by host name.
+  It applies to every pod of the namespace, the receiver's included, so its
+  rules also allow the receiver's storage endpoint.
+- Some items need a cluster administrator: enabling user workload
+  monitoring, an `EgressFirewall` (OVN-Kubernetes only), and raising
+  `containerLogMaxSize`, a `KubeletConfig` that rolls every node of its
+  MachineConfigPool.
+
+| Concern | Kubernetes | OpenShift |
 | --- | --- | --- |
-| Agent UID | restricted-v2 gives every container the namespace's first UID; leave `runtime.user` unset | nothing assigns one; set `runtime.user` |
-| fsGroup | restricted-v2 sets it; Secret files take its group | unset; Secret files stay root-owned at mode 0444, which the init container reads |
-| Admission | SCCs of the creator and the pod's service account; a refusal is 403 at create | Pod Security Admission; label the agent namespace `pod-security.kubernetes.io/enforce: restricted`, which the pod meets |
-| Image user | an arbitrary UID with GID 0; agent images keep their writable paths group-0 writable | the image's own user |
-| Node selection | a project's `openshift.io/node-selector` merges with `node_selector`; a conflict is 403 at create | `node_selector` alone |
-| Registry | the internal registry, `wherry-images`, with `system:image-puller` | any registry; pull secrets on the namespace's `default` service account |
-| Egress by name | OVN-Kubernetes `EgressFirewall` with `dnsName` | a DNS-aware CNI policy, such as Cilium FQDN |
-| DNS for NetworkPolicy | `openshift-dns`, pods on port 5353 | the cluster's DNS namespace and port |
-| API server for NetworkPolicy | host network; `ipBlock` of the `default/kubernetes` Endpoints, port 6443 | the same, port per distribution |
-| Container logs | CRI-O, `containerLogMaxSize` 50 MiB by default | the kubelet's `containerLogMaxSize`, 10 MiB by default |
-| Metrics | user workload monitoring and a ServiceMonitor | any Prometheus scrape configuration |
+| Agent UID | nothing assigns one; set `runtime.user` | restricted-v2 gives every container the namespace's first UID; leave `runtime.user` unset |
+| Receiver UID | the image's, 1001, with group 0 | the namespace's, with group 0 |
+| fsGroup | unset; agent Secret files stay root-owned at mode 0444, which the init container reads; the receiver's bundle is group 0 | restricted-v2 sets it; Secret files take its group |
+| Admission | Pod Security Admission; label the namespace `pod-security.kubernetes.io/enforce: restricted`, which the pods meet | SCCs of the creator and the pod's service account; a refusal is 403 at create |
+| Image user | the image's own user | an arbitrary UID with GID 0; agent images keep their writable paths group-0 writable |
+| Node selection | `node_selector` alone | a project's `openshift.io/node-selector` merges with `node_selector`; a conflict is 403 at create |
+| Registry | any registry; pull secrets on the namespace's `default` service account | the internal registry, in the receiver's namespace |
+| Egress by name | a DNS-aware CNI policy, such as Cilium FQDN | OVN-Kubernetes `EgressFirewall` with `dnsName` |
+| DNS for NetworkPolicy | the cluster's DNS namespace and port | `openshift-dns`, pods on port 5353 |
+| API server for NetworkPolicy | `ipBlock` of the `default/kubernetes` Endpoints, port per distribution | the same, port 6443 |
+| Container logs | the kubelet's `containerLogMaxSize`, 10 MiB by default | CRI-O, `containerLogMaxSize` 50 MiB by default |
+| Metrics | any Prometheus scrape configuration | user workload monitoring and a ServiceMonitor |
 
 ## Tests
 
@@ -838,11 +740,50 @@ otherwise. They read:
 
 | Variable | Content |
 | --- | --- |
-| `WHERRY_KUBERNETES_DEV_TOKEN_FILE` | a token of a service account bound only to the [RBAC](#rbac) Role |
+| `WHERRY_KUBERNETES_DEV_TOKEN_FILE` | a token of a service account bound to `admin` in the namespace alone ([RBAC](#rbac)) |
 | `WHERRY_KUBERNETES_DEV_CA_FILE` | the API server's CA bundle |
-| `WHERRY_KUBERNETES_DEV_NAMESPACE` | the agent namespace |
+| `WHERRY_KUBERNETES_DEV_NAMESPACE` | the namespace for agent pods |
 | `WHERRY_KUBERNETES_DEV_HELPER_IMAGE` | the receiver image to run as `helper_image` |
 
 They include the protocol's conformance suite,
 `github.com/benemon/wherry/adapter/adaptertest`, in process and against
-the built plugin.
+the built plugin. They set no `runtime.user`, and `TestRoleSuffices`
+requires pods admitted under restricted-v2, so they run on OpenShift.
+
+### End to end on kind
+
+[`test/e2e`](test/e2e) runs a receiver from the receiver image and the
+plugin together on a kind cluster, as the `e2e` workflow does for every
+change to `kubernetes/`, the root `Makefile` or the workflow. Each step is
+a script; with Docker, kind and kubectl on a Linux machine:
+
+```sh
+export WHERRY_VERSION=v0.1.0-rc.6
+for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/collect.sh; break; }; done
+```
+
+1. `01-cluster.sh` replaces the kind cluster `wherry-e2e`, installs
+   Strimzi and a single-node Kafka 4.3 (KRaft, share groups, TLS with
+   SCRAM-SHA-512, simple authorization, `kafka-admin` a super user and
+   `wherry.operator`), and maps its external listener to `localhost`.
+2. `02-wherry.sh` fetches the wherry CLI of `WHERRY_VERSION` through the
+   receiver image's verifying fetch stage.
+3. `03-provision.sh` runs `wherry admin` from the machine: the pool, the
+   tenant, the host and the receiver, whose adapters run a fake agent and a
+   missing image. It writes the host's configuration with a generated dummy
+   credential and runs `wherry init`.
+4. `04-deploy.sh` builds the receiver image with `make image` and the fake
+   agent's image, loads both into kind, and deploys the receiver as
+   [Deploy](#deploy) says, into a namespace enforcing Pod Security
+   `restricted`.
+5. `05-runs.sh` submits and awaits, as the host: a run it cancels, a plain
+   run, a credentialed run, a run with an input file and a run whose image
+   is missing. It checks each state, the result and output, the
+   credential's mode 0600 in a 0700 directory, the input's SHA-256, the
+   start failure's reason in the receiver's log, the dummy credential's
+   absence from the log, pods and events, and the sweep's removal of the
+   cancelled run's Secret and pod.
+
+`collect.sh` writes the receiver's log and the cluster's state, but no
+Secret, to `artifacts` in the state directory, `$E2E_WORK`, by default
+`$TMPDIR/wherry-e2e`.

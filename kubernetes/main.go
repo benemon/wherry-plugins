@@ -1,5 +1,5 @@
-// Command wherry-plugin-kubernetes is the wherry adapter plugin for Kubernetes and OpenShift. The receiver starts it
-// from its plugin directory; it is not run by hand.
+// Command wherry-plugin-kubernetes is the wherry adapter plugin for Kubernetes, which also runs on OpenShift. The
+// receiver starts it from its plugin directory; it is not run by hand.
 package main
 
 import (
