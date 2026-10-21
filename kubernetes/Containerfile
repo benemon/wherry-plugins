@@ -1,0 +1,35 @@
+# The wherry receiver image for OpenShift: wherry from its verified release, the Kubernetes adapter plugin, and the
+# helper agent pods run. Build it with make image from a checkout of a kubernetes/v* tag.
+ARG GO_IMAGE=docker.io/library/golang:1.27
+ARG COSIGN_IMAGE=ghcr.io/sigstore/cosign/cosign:v3.0.2
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/ubi-minimal
+
+FROM ${COSIGN_IMAGE} AS cosign
+
+FROM ${GO_IMAGE} AS build
+WORKDIR /src
+COPY kubernetes/ .
+RUN CGO_ENABLED=0 go build -trimpath -o /out/wherry-plugin-kubernetes . && \
+    CGO_ENABLED=0 go build -trimpath -o /out/wherry-k8s-helper ./cmd/wherry-k8s-helper
+
+FROM ${GO_IMAGE} AS fetch
+ARG WHERRY_VERSION
+ARG TARGETARCH
+COPY --from=cosign /ko-app/cosign /usr/local/bin/cosign
+WORKDIR /fetch
+RUN test -n "$WHERRY_VERSION" && \
+    base="https://github.com/benemon/wherry/releases/download/$WHERRY_VERSION" && \
+    archive="wherry_${WHERRY_VERSION}_linux_${TARGETARCH}.tar.gz" && \
+    curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json" && \
+    cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+      --certificate-identity-regexp '^https://github\.com/benemon/wherry/\.github/workflows/release\.yml@refs/tags/v' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com && \
+    grep "  $archive\$" checksums.txt | sha256sum -c - && \
+    tar -xzf "$archive" --strip-components=1 "${archive%.tar.gz}/wherry"
+
+FROM ${BASE_IMAGE}
+COPY --from=fetch --chown=0:0 --chmod=0755 /fetch/wherry /usr/local/bin/wherry
+COPY --from=build --chown=0:0 --chmod=0755 /out/wherry-plugin-kubernetes /usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes
+COPY --from=build --chown=0:0 --chmod=0755 /out/wherry-k8s-helper /usr/local/libexec/wherry/wherry-k8s-helper
+USER 1001
+ENTRYPOINT ["/usr/local/bin/wherry"]
