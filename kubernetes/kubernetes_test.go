@@ -2165,6 +2165,47 @@ func TestStopReturnsNilAfterDelete(t *testing.T) {
 	}
 }
 
+func TestStopWaitsOutASignalLostInTransport(t *testing.T) {
+	fast(t)
+	api := newFakeAPI(t)
+	adapter, execer := api.adapter(t)
+	stopsOn(api, execer, syscall.SIGTERM)
+	execer.set(func() {
+		execer.fail = func(container string, args []string) error {
+			if slices.Equal(args, []string{"stop", "TERM"}) {
+				_ = execer.send(agentPID, syscall.SIGTERM)
+				return errors.New("connection reset by peer")
+			}
+			return nil
+		}
+	})
+	pod := api.agentPod(t, adapter, "reset", nil)
+	if err := adapter.Stop(context.Background(), handleOf(pod)); err != nil {
+		t.Fatal(err)
+	}
+	if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
+		t.Fatalf("stop deleted %v after a signal that reached the agent", deleted)
+	}
+}
+
+func TestStopDeletesWhenTheHelperRefuses(t *testing.T) {
+	fast(t)
+	api := newFakeAPI(t)
+	adapter, execer := api.adapter(t)
+	stopsOn(api, execer)
+	execer.set(func() { execer.signal = func(int, syscall.Signal) error { return syscall.EPERM } })
+	pod := api.agentPod(t, adapter, "refused", nil)
+	if err := adapter.Stop(context.Background(), handleOf(pod)); err != nil {
+		t.Fatal(err)
+	}
+	if calls := execer.recorded(); !slices.Equal(calls, []string{"outputs stop TERM"}) {
+		t.Fatalf("execs %v; want the refused SIGTERM only", calls)
+	}
+	if deleted := paths(api.recorded(), http.MethodDelete); len(deleted) != 1 {
+		t.Fatalf("deletes %v; want the pod deleted at once", deleted)
+	}
+}
+
 func TestStopReturnsTheDeleteError(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)

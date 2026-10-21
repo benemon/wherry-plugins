@@ -1038,7 +1038,11 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 	for _, signal := range []string{"TERM", "KILL"} {
 		if err := adapter.exec.exec(ctx, h.Pod, "outputs", command("stop", signal), nil, io.Discard); err != nil {
 			adapter.handled("exec outputs stop "+signal, err)
-			break
+			// A transport failure does not show the signal undelivered; only the helper's refusal does.
+			var exit *exitError
+			if errors.As(err, &exit) {
+				break
+			}
 		}
 		if stopped, err := adapter.stopped(ctx, h); err != nil || stopped {
 			return err
