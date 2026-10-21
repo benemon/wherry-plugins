@@ -926,31 +926,28 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	}
 }
 
-func TestRedactedDropsResponseBody(t *testing.T) {
-	const echoed = `{"Items":{"credential":"test-credential","prompt":"hello-prompt"}}`
+// A response body can echo variable items, so the error text goes to the receiver, which redacts it before it logs it.
+func TestReturnedErrorCarriesOpAndClass(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
-		http.Error(response, echoed, http.StatusInternalServerError)
+		http.Error(response, "unavailable", http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
 	adapter, err := build(Config{Address: server.URL, Runtime: Runtime{Driver: "raw_exec"}}, testPool, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = adapter.client.Variables().Update(&api.Variable{Path: "nomad/jobs/agent-run-redact", Items: map[string]string{"credential": "test-credential"}}, nil)
+	err = adapter.Sweep(context.Background())
+	var failure *wherry.Error
 	var response api.UnexpectedResponseError
-	if !errors.As(err, &response) || !strings.Contains(err.Error(), "test-credential") {
-		t.Fatalf("fixture error %v does not echo the body", err)
+	if !errors.As(err, &failure) || failure.Op != "list jobs "+adapter.prefix || failure.Class != "unavailable" || !errors.As(err, &response) {
+		t.Fatalf("sweep error %#v; want a wherry.Error naming the call and its class over the response", err)
 	}
-	got := redacted("write", "nomad/jobs/agent-run-redact", err).Error()
-	if strings.Contains(got, "test-credential") || strings.Contains(got, "hello-prompt") {
-		t.Fatalf("redacted error %q contains variable items", got)
-	}
-	if err := adapter.Sweep(context.Background()); err == nil || strings.Contains(err.Error(), "test-credential") {
-		t.Fatalf("sweep error %v, want a redacted failure", err)
+	if got := samples(t, adapter)["wherry_adapter_platform_errors_total/unavailable"].Value; got != 1 {
+		t.Fatalf("unavailable errors counted %v; want 1", got)
 	}
 }
 
-func TestRegisterFailureDropsResponseBody(t *testing.T) {
+func TestRegisterFailureCarriesOpAndClass(t *testing.T) {
 	const signature = "X-Amz-Signature=secretsig-register"
 	infos := 0
 	adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
@@ -970,8 +967,10 @@ func TestRegisterFailureDropsResponseBody(t *testing.T) {
 	run := testRun("register")
 	run.ID = "run-register"
 	run.Fetches = []wherry.Fetch{{Name: "dataset.bin", URL: "https://store.example.test/b/dataset.bin?" + signature, Size: 8, SHA256: strings.Repeat("a", 64)}}
-	if _, _, err := adapter.Dispatch(context.Background(), run); err == nil || strings.Contains(err.Error(), "secretsig-register") {
-		t.Fatalf("dispatch error %v, want a register failure without the fetch URL", err)
+	_, _, err := adapter.Dispatch(context.Background(), run)
+	var failure *wherry.Error
+	if !errors.As(err, &failure) || failure.Op != "register job agent-44575cf5b285-run-register-t1" || failure.Class != "other" {
+		t.Fatalf("dispatch error %#v, want the register failure as a wherry.Error", err)
 	}
 }
 
@@ -1009,7 +1008,7 @@ func putVariable(t *testing.T, adapter *Adapter, ctx context.Context, path strin
 	t.Helper()
 	t.Cleanup(func() { _, _ = adapter.client.Variables().Delete(path, nil) })
 	if _, _, err := adapter.client.Variables().Update(&api.Variable{Path: path, Items: map[string]string{"credential": "test-credential"}}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-		t.Fatal(redacted("write", path, err))
+		t.Fatalf("write %s failed", path)
 	}
 }
 
@@ -1020,7 +1019,7 @@ func sweepLeaves(t *testing.T, adapter *Adapter, ctx context.Context, path strin
 	}
 	variable, _, err := adapter.client.Variables().Peek(path, nil)
 	if err != nil {
-		t.Fatal(redacted("peek", path, err))
+		t.Fatalf("peek %s failed", path)
 	}
 	if (variable != nil) != want {
 		t.Fatalf("variable %s present after sweep = %v, want %v", path, variable != nil, want)
@@ -2202,7 +2201,8 @@ func TestSweepCountsOnlyThisAdaptersJobs(t *testing.T) {
 	}
 }
 
-func TestPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
+// A returned error is the receiver's to log; one the adapter handles itself, such as a poll read, it logs by op and class.
+func TestHandledPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
 	const token, body = "nomad-token-secret", "body-never-logged"
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		http.Error(response, body, http.StatusServiceUnavailable)
@@ -2217,8 +2217,14 @@ func TestPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
 	if _, err := adapter.Ready(context.Background()); err == nil {
 		t.Fatal("ready answered 503 without an error")
 	}
+	if logs.Len() != 0 {
+		t.Fatalf("returned error logged by the adapter: %q", logs.String())
+	}
+	if adapter.finished(context.Background(), "alloc-id") != nil {
+		t.Fatal("finished read a 503 as a finished allocation")
+	}
 	lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
-	if len(lines) != 1 || !strings.Contains(lines[0], `"class":"unavailable"`) || !strings.Contains(lines[0], `"op":"list nodes"`) || !strings.Contains(lines[0], `"@level":"warn"`) {
+	if len(lines) != 1 || !strings.Contains(lines[0], `"class":"unavailable"`) || !strings.Contains(lines[0], `"op":"read allocation"`) || !strings.Contains(lines[0], `"@level":"warn"`) {
 		t.Fatalf("logs %q; want one warning naming the operation and class unavailable", logs.String())
 	}
 	for _, forbidden := range []string{token, body, strings.TrimPrefix(server.URL, "http://"), "/v1/"} {
@@ -2327,5 +2333,47 @@ func TestStopReturnsWhenCancelledDuringTheGrace(t *testing.T) {
 	err := adapter.Stop(ctx, wherry.Handle{Data: []byte(`{"v":1,"job":"agent-1","alloc":"alloc-1","format":""}`)})
 	if elapsed := time.Since(start); !errors.Is(err, context.DeadlineExceeded) || elapsed > 3*time.Second {
 		t.Fatalf("Stop returned %v after %v; want the context's error well inside the %v grace", err, elapsed, stopGrace)
+	}
+}
+
+// Nomad's API quotes the bytes of a log frame it cannot decode in its error, and those are the agent's output.
+func TestUndecodableLogStreamKeepsItsBytesOut(t *testing.T) {
+	const marker = "agent-output-never-in-errors"
+	encoded := base64.StdEncoding.EncodeToString([]byte(marker))
+	raw := testdata(t, "signal.allocation.json")
+	var alloc api.Allocation
+	if err := json.Unmarshal(raw, &alloc); err != nil {
+		t.Fatal(err)
+	}
+	adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
+		"GET /v1/allocation/" + alloc.ID: serve(raw),
+		"GET /v1/client/fs/logs/" + alloc.ID: func(response http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(response, `{"Data":"`+encoded)
+		},
+	})
+	data, _ := json.Marshal(handle{V: 1, Job: alloc.JobID, Alloc: alloc.ID})
+	_, err := adapter.Follow(context.Background(), wherry.Handle{Data: data}, 0, make(chan wherry.Line, 4))
+	var failure *wherry.Error
+	if !errors.As(err, &failure) || failure.Op != "read logs" {
+		t.Fatalf("follow = %#v; want the log read's failure", err)
+	}
+	for _, leaked := range []string{marker, encoded} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("follow error %q holds the stream's bytes", err)
+		}
+	}
+}
+
+func TestReleaseReturnsOneFailureAsItIs(t *testing.T) {
+	path := "/v1/var/nomad/jobs/" + poolPrefix + "run-release-t1"
+	adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
+		"DELETE " + path: func(response http.ResponseWriter, _ *http.Request) {
+			http.Error(response, "denied", http.StatusForbidden)
+		},
+		"DELETE " + path + "/agent": func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) },
+	})
+	err := adapter.Release(context.Background(), "run-release", 1)
+	if failure, ok := err.(*wherry.Error); !ok || failure.Class != "denied" {
+		t.Fatalf("release = %#v; want the one failure as a wherry.Error", err)
 	}
 }

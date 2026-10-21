@@ -15,10 +15,7 @@ import (
 )
 
 func main() {
-	// Serve points os.Stderr at its stdio stream, which the receiver discards; the receiver relays JSON lines written to
-	// the process's own stderr at their level.
-	logger := hclog.New(&hclog.LoggerOptions{Output: os.Stderr, JSONFormat: true, Level: hclog.Info})
-	wherry.Serve((&factory{clients: map[clientKey]*api.Client{}, logger: logger}).adapter)
+	wherry.Serve((&factory{clients: map[clientKey]*api.Client{}}).adapter)
 }
 
 type clientKey struct{ address, ca, namespace, token string }
@@ -27,10 +24,9 @@ type clientKey struct{ address, ca, namespace, token string }
 type factory struct {
 	mu      sync.Mutex
 	clients map[clientKey]*api.Client
-	logger  hclog.Logger
 }
 
-func (f *factory) adapter(settings wherry.Settings) (wherry.Adapter, error) {
+func (f *factory) adapter(settings wherry.Settings, logger hclog.Logger) (wherry.Adapter, error) {
 	var config Config
 	if err := json.Unmarshal(settings.Config, &config, json.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
@@ -47,7 +43,7 @@ func (f *factory) adapter(settings wherry.Settings) (wherry.Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return New(config, settings.Name, settings.Pool, client, f.logger)
+	return New(config, settings.Name, settings.Pool, client, logger)
 }
 
 func (f *factory) client(config Config, token string) (*api.Client, error) {
