@@ -114,7 +114,8 @@ subjects:
 
 - `pods` create, get, list, delete: create a turn's pod, read it for
   lookups and polls, list it for the sweep, and delete it for a stop's last
-  resort, a dispatch or lookup cut short, and a purge.
+  resort, a dispatch or lookup cut short, a pod whose containers run as
+  different users, and a purge.
 - `pods/log` get: stream the agent's standard output.
 - `pods/exec` create and get: signal the agent, list and read its outputs,
   end the outputs holder, and deliver S3 inputs. A WebSocket exec is an
@@ -158,6 +159,10 @@ Do not grant:
 - RBAC to the agent namespace's `default` service account. Its token is
   never mounted, and no agent may hold any API right.
 
+No service-account token Secret lives in `wherry-agents`. The only Secrets
+there when no turn runs are the image-pull Secrets OpenShift creates for
+the namespace's service accounts.
+
 ## Settings
 
 An adapter's `config` section in the receiver configuration:
@@ -170,7 +175,7 @@ An adapter's `config` section in the receiver configuration:
 | `credential_env` | none | environment variable the agent receives the credential in |
 | `node_selector` | none | node labels agent pods require |
 | `tolerations` | none | taints agent pods tolerate |
-| `helper_image` | required | image holding `wherry-k8s-helper` at `/usr/local/libexec/wherry/`; the receiver image at the receiver's tag |
+| `helper_image` | required | image, with no whitespace, holding `wherry-k8s-helper` at `/usr/local/libexec/wherry/`; the receiver image at the receiver's tag |
 | `runtime` | required | the agent container's definition |
 
 `credential_env` is required when the adapter sets `credential`, and
@@ -185,7 +190,7 @@ adapter, and the receiver exits with `adapter <name>: ...` on an error.
 
 | Field | Content |
 | --- | --- |
-| `image` | the agent image; required |
+| `image` | the agent image, with no whitespace; required |
 | `command` | the container's command; unset, the image's entrypoint |
 | `args` | the container's arguments |
 | `env` | environment variables for the agent; names match `[A-Za-z_][A-Za-z0-9_]*` |
@@ -285,8 +290,9 @@ Every container must run as one UID, since the helper signals the agent's
 processes and owns its credential files. On OpenShift, restricted-v2 gives
 every container the namespace's first UID. If the admitted pod's containers
 run as different users, or any has none, the plugin deletes the pod and its
-Secret and the turn fails with
-`agent pod containers run as different users; set runtime.user`.
+Secret and reports nothing created with
+`agent pod containers run as different users; set runtime.user`, so the
+task is redelivered until it spends its delivery budget, as under Quota.
 
 A pod that cannot start is reported as never started, with the platform's
 message as the reason:
@@ -346,13 +352,17 @@ file only. If the kubelet has rotated the log past that offset, the follow
 fails with `the agent's log is shorter than the offset`, and the turn
 fails. Agents whose standard output can pass the kubelet's
 `containerLogMaxSize` (50 MiB on OpenShift, 10 MiB on Kubernetes by
-default) are exposed to this.
+default) are exposed to this. An offset inside the rotated part that is
+still below the current file's length is not detected: the follow discards
+that many bytes of the current file, so the transcript loses lines without
+an error.
 
 The plugin stops an agent by sending `SIGTERM` to every process of the
 pod but the holder, through the holder, and waiting up to 15 seconds for
-the agent container to end; then `SIGKILL` and 15 seconds more. If the
-agent still runs, or the holder cannot signal it, the plugin deletes the
-pod at once, logs `agent outlived SIGKILL; pod deleted`, and the turn ends
+the agent container to end; then `SIGKILL` and 15 seconds more. A signal
+whose exec fails in transport may still have been delivered, so the plugin
+waits for it as for a delivered one. If the agent still runs, or the holder
+refuses to signal it, the plugin deletes the pod at once, logs `agent outlived SIGKILL; pod deleted`, and the turn ends
 with `outputs not collected`. The agent can see and signal the holder too;
 an agent that kills the holder loses its outputs, and collection fails with
 `the outputs container has ended`.
@@ -540,7 +550,8 @@ together:
 ### Image
 
 `kubernetes/Containerfile` builds the receiver image. From a checkout of
-the tag `kubernetes/<version>`:
+the tag `kubernetes/<version>`, where `<version>` carries its `v`, such as
+`v0.1.0`:
 
 ```sh
 make image VERSION=<version> WHERRY_VERSION=<wherry version>
@@ -569,12 +580,15 @@ For a storage endpoint under a private CA, add the CA with
 `update-ca-trust` in a derived image.
 
 No image is published, since an image couples a wherry release and a
-plugins release. Push the image you build to the internal registry:
+plugins release. Push the image you build to the internal registry through
+its route, since the Service name resolves only inside the cluster; pods
+pull it by the Service name:
 
 ```sh
 oc new-project wherry-images
-podman push wherry-receiver:<version> \
-  image-registry.openshift-image-registry.svc:5000/wherry-images/wherry-receiver:<version>
+registry=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
+oc whoami -t | podman login -u "$(oc whoami)" --password-stdin "$registry"
+podman push wherry-receiver:<version> "$registry/wherry-images/wherry-receiver:<version>"
 ```
 
 Agent pods and the receiver pull from `wherry-images`:
@@ -680,7 +694,7 @@ spec:
   egress:
     - to:
         - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kafka}}
-          podSelector: {matchLabels: {strimzi.io/kind: Kafka}}
+          podSelector: {matchLabels: {strimzi.io/broker-role: "true"}}
       ports: [{protocol: TCP, port: 9093}]
     - to:
         - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-dns}}
