@@ -903,8 +903,22 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, from 
 		return wherry.Terminal{}, err
 	}
 	// The logs API answers 400 for a container that never started and cannot answer for a lost node.
-	if state, terminal, _ := judge(pod); state == wherry.JobNeverStarted || pod.DeletionTimestamp != nil {
-		return terminal, nil
+	for {
+		state, terminal, settled := judge(pod)
+		if settled && (state == wherry.JobNeverStarted || pod.DeletionTimestamp != nil) {
+			return terminal, nil
+		}
+		if settled {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return wherry.Terminal{}, ctx.Err()
+		case <-time.After(followPoll):
+		}
+		if pod, err = adapter.current(ctx, h); err != nil {
+			return wherry.Terminal{}, err
+		}
 	}
 	reader := LineReader{Lines: lines, Position: from}
 	for {
@@ -1000,10 +1014,10 @@ func (adapter *Adapter) stream(ctx context.Context, h handle, reader *LineReader
 	}
 }
 
-// running reports whether the agent may still run in a live pod.
+// running reports whether the agent may still run in a live pod; a pod not yet settled may hold a running agent.
 func running(pod *corev1.Pod) bool {
-	state, _, _ := judge(pod)
-	return state == wherry.JobRunning && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed
+	state, _, settled := judge(pod)
+	return (!settled || state == wherry.JobRunning) && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed
 }
 
 // Stop signals the agent through the holder, SIGTERM then SIGKILL, and deletes the pod only if the agent outlives both.

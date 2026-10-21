@@ -1977,6 +1977,31 @@ func TestFollowOfANeverStartedPod(t *testing.T) {
 	}
 }
 
+// blipsThen is a kubelet whose first reads of a pod report no container statuses, before next's.
+func blipsThen(reads int, next func(*corev1.Pod)) func(*corev1.Pod) {
+	seen := 0
+	return func(pod *corev1.Pod) {
+		if seen++; seen <= reads {
+			setStatus(pod, corev1.PodRunning, exited("inputs", 0))
+			return
+		}
+		next(pod)
+	}
+}
+
+func TestFollowWaitsOutAnUnsettledPod(t *testing.T) {
+	fast(t)
+	api := newFakeAPI(t)
+	adapter, _ := api.adapter(t)
+	logs, _ := logStream(func(int) []byte { return []byte("a\n") }, nil)
+	api.set(func() { api.logs, api.kubelet = logs, blipsThen(2, endsAfter(0, 0)) })
+	handle := handleOf(api.agentPod(t, adapter, "blip", nil))
+	lines, terminal, err := followAll(t, adapter, handle, 0)
+	if err != nil || !terminal.Started || len(lines) != 1 {
+		t.Fatalf("lines %v, terminal %+v, %v; want the agent's line and its end, not a never-started terminal", lines, terminal, err)
+	}
+}
+
 func TestFollowOfADeletingPodOpensNoLogs(t *testing.T) {
 	fast(t)
 	logRequests := func(api *fakeAPI) int {
@@ -2227,6 +2252,24 @@ func TestStopOfANeverStartedPodLeavesIt(t *testing.T) {
 	}
 	if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
 		t.Fatalf("stop deleted %v; the core purges a pod that never started", deleted)
+	}
+}
+
+func TestStopSignalsAnUnsettledPod(t *testing.T) {
+	fast(t)
+	api := newFakeAPI(t)
+	adapter, execer := api.adapter(t)
+	stopsOn(api, execer, syscall.SIGTERM)
+	api.set(func() { api.kubelet = blipsThen(1, api.kubelet) })
+	pod := api.agentPod(t, adapter, "blip", nil)
+	if err := adapter.Stop(context.Background(), handleOf(pod)); err != nil {
+		t.Fatal(err)
+	}
+	if calls := execer.recorded(); !slices.Equal(calls, []string{"outputs stop TERM"}) {
+		t.Fatalf("execs %v; want one SIGTERM", calls)
+	}
+	if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
+		t.Fatalf("stop deleted %v", deleted)
 	}
 }
 
