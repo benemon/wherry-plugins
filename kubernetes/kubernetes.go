@@ -216,6 +216,8 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 		return nil, errors.New("namespace must be a DNS-1123 label")
 	case config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv):
 		return nil, errors.New("credential_env must be an environment variable name")
+	case reservedEnv(config.CredentialEnv):
+		return nil, errors.New("credential_env must not be a variable the plugin sets for the agent, such as HOME or WHERRY_MODEL")
 	case !image(config.HelperImage):
 		return nil, errors.New("helper_image must be an image")
 	case !image(config.Runtime.Image):
