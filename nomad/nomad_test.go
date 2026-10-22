@@ -236,6 +236,7 @@ func TestNewValidatesConfig(t *testing.T) {
 		"gid not a number":  func(config *Config) { config.Runtime.User = "1001:x" },
 		"user name":         func(config *Config) { config.Runtime.User = "Bad Name" },
 		"root uid":          func(config *Config) { config.Runtime.User = "0" },
+		"root name":         func(config *Config) { config.Runtime.User = "root" },
 		"env name":          func(config *Config) { config.Runtime.Env = map[string]string{"BAD-NAME": "x"} },
 		"credential HOME":   func(config *Config) { config.CredentialEnv = "HOME" },
 		"credential WHERRY": func(config *Config) { config.CredentialEnv = "WHERRY_MODEL" },
@@ -2391,5 +2392,19 @@ func TestBuildJobDefaultsResources(t *testing.T) {
 	}
 	if resources := job.TaskGroups[0].Tasks[0].Resources; *resources.CPU != defaultCPU || *resources.MemoryMB != defaultMemoryMB {
 		t.Fatalf("resources %d MHz %d MiB, want the defaults", *resources.CPU, *resources.MemoryMB)
+	}
+}
+
+func TestJoinedKeepsASingleError(t *testing.T) {
+	single := &wherry.Error{Op: "list variables", Class: "unavailable", Err: errors.New("down")}
+	if err := joined([]error{nil, single, nil}); err != error(single) {
+		t.Fatalf("joined one error = %v; want it as it is, so its op and class cross the link", err)
+	}
+	if err := joined([]error{nil}); err != nil {
+		t.Fatalf("joined no errors = %v", err)
+	}
+	other := errors.New("other")
+	if err := joined([]error{single, other}); !errors.Is(err, single) || !errors.Is(err, other) {
+		t.Fatalf("joined two errors = %v; want both", err)
 	}
 }
