@@ -644,29 +644,19 @@ Strimzi renews its cluster CA, and nothing renews the receiver's copy:
 3. Once Strimzi has removed the old certificate, remove it from the bundle
    and run both again.
 
-### Members on Nomad and Kubernetes
+### Kubernetes and Nomad together
 
-Members are asymmetric. The in-cluster receiver carries only Kubernetes
-adapters, labelled `platform: kubernetes`, and holds no Nomad token. A
-Nomad-hosted receiver carries only Nomad adapters, labelled
-`platform: nomad`, and holds no Kubernetes token. A task is admitted only
-by an adapter whose labels satisfy its selector.
+Put the in-cluster receiver in a pool of its own, and Nomad-hosted receivers in
+another, and entitle the tenant to both. A submit places the task in a pool
+whose live adapters satisfy its selector, so a task meant for one platform is
+never delivered to the other's receivers. In one pool, a receiver with no
+matching adapter takes the task and hands it back, spending its delivery
+budget, and a task both platforms accept can be redelivered to a receiver that
+cannot see its running job and start a second one.
 
-A run is adopted only by a receiver with the same adapter. For a
-Kubernetes run that is the in-cluster receiver itself, restarted: the new
-pod mounts the same state volume, is the same principal, and finds the
-turn's pod.
-
-Every task must select a platform label. A task with no selector can be
-placed on either member; redelivered to the other, it meets an adapter that
-cannot see its job, and a second job starts while the first runs on
-unfollowed.
-
-Members may instead be symmetric, each receiver carrying the other
-platform's adapters and tokens. That costs a long-lived token for the
-remote receiver, whose service account and token Secret live outside the
-receiver's namespace and are bound in by a RoleBinding, and the sweep's
-double count across two receivers sharing an adapter name.
+A run is adopted only by a receiver with the same adapter. For a Kubernetes
+run that is the in-cluster receiver itself, restarted: the new pod mounts the
+same state volume, is the same principal, and finds the run's pod.
 
 ## OpenShift
 
