@@ -3,6 +3,6 @@ agents:
   - name: fake
 default_agent: fake
 delivery_limit: 2
-lock_duration_ms: 15000
+lock_duration: 15s
 producer_byte_rate: 1048576
 request_percentage: 10

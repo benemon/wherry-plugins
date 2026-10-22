@@ -44,7 +44,7 @@ finish "$plain" TASK_STATE_COMPLETED
 replied "$plain" 'uid 1001'
 grep -F 'e2e: plain' "$work/outputs/$plain/echo.txt" >/dev/null || fail "run $plain returned no echo.txt"
 
-credentialed=$(submit e2e=fake --prompt 'e2e: credential' --credential-file dummy=token)
+credentialed=$(submit e2e=fake --prompt 'e2e: credential' --credential dummy=token)
 finish "$credentialed" TASK_STATE_COMPLETED
 replied "$credentialed" 'dir 700 1001'
 replied "$credentialed" "file token 600 1001 $(sha256 "$work/host/dummy")"
