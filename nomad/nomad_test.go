@@ -2393,3 +2393,17 @@ func TestBuildJobDefaultsResources(t *testing.T) {
 		t.Fatalf("resources %d MHz %d MiB, want the defaults", *resources.CPU, *resources.MemoryMB)
 	}
 }
+
+func TestJoinedKeepsASingleError(t *testing.T) {
+	single := &wherry.Error{Op: "list variables", Class: "unavailable", Err: errors.New("down")}
+	if err := joined([]error{nil, single, nil}); err != error(single) {
+		t.Fatalf("joined one error = %v; want it as it is, so its op and class cross the link", err)
+	}
+	if err := joined([]error{nil}); err != nil {
+		t.Fatalf("joined no errors = %v", err)
+	}
+	other := errors.New("other")
+	if err := joined([]error{single, other}); !errors.Is(err, single) || !errors.Is(err, other) {
+		t.Fatalf("joined two errors = %v; want both", err)
+	}
+}
