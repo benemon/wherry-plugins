@@ -222,7 +222,7 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 		return nil, errors.New("namespace must be a DNS-1123 label")
 	case config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv):
 		return nil, errors.New("credential_env must be an environment variable name")
-	case reservedEnv(config.CredentialEnv):
+	case wherry.ReservedEnv(config.CredentialEnv):
 		return nil, errors.New("credential_env must not be a variable the plugin sets for the agent, such as HOME or WHERRY_MODEL")
 	case !image(config.HelperImage):
 		return nil, errors.New("helper_image must be an image")
@@ -441,7 +441,7 @@ func locked() *corev1.SecurityContext {
 
 // buildPod builds the run's pod, whose init container copies its material from the Secret name.
 func (adapter *Adapter) buildPod(run wherry.Run, name string) *corev1.Pod {
-	env := AgentEnv(adapter.runtime.Env)
+	env := wherry.AgentEnv(adapter.runtime.Env)
 	env["HOME"] = workPath
 	env["WHERRY_INPUT_DIR"] = inputPath
 	env["WHERRY_OUTPUT_DIR"] = outputPath
