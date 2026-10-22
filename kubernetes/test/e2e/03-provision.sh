@@ -14,8 +14,8 @@ export WHERRY_TRUST_BROKER=localhost:31092 WHERRY_TRUST_CA=$work/ca.crt \
 	WHERRY_TRUST_OPERATOR_USER=wherry.operator WHERRY_TRUST_OPERATOR_PASSWORD_FILE=$work/wherry.operator.password
 
 wherry admin pool create e2e --config-file "$e2e/pool.yaml"
-wherry admin tenant add e2e --pool e2e
-wherry admin host add e2e runner --bundle-file "$work/host.bundle"
+wherry admin pool entitle e2e --tenant e2e
+wherry admin host add runner --tenant e2e --bundle-file "$work/host.bundle"
 wherry admin receiver add kind-1 --pool e2e --config-dir "$e2e/receiver" --bundle-file "$work/receiver.bundle"
 for bundle in host receiver; do
 	mask "$(sed -n 's/^password: *//p' "$work/$bundle.bundle" | tr -d "\"'")"
