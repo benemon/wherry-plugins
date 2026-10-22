@@ -148,8 +148,9 @@ An adapter's `config` section in the receiver configuration:
 | `helper_image` | required | image, with no whitespace, holding `wherry-k8s-helper` at `/usr/local/libexec/wherry/`; the receiver image at the receiver's tag |
 | `runtime` | required | the agent container's definition |
 
-`credential_env` is required when the adapter sets `credential`, and
-matches `[A-Za-z_][A-Za-z0-9_]*`. `node_selector` keys and values are
+`credential_env` is required when the adapter sets `credential`, matches
+`[A-Za-z_][A-Za-z0-9_]*`, and is none of the variables the plugin sets for the
+agent. `node_selector` keys and values are
 Kubernetes label keys and values. Each toleration has `key`, `operator`
 (`Equal`, or `Exists` without a `value`), `value` and `effect`
 (`NoSchedule`, `PreferNoSchedule` or `NoExecute`). Unknown fields are
@@ -307,7 +308,10 @@ The agent sees:
 writes outputs of several GiB on a node short of disk can trigger the
 kubelet's disk-pressure eviction, which kills the pod and loses the
 outputs. Where nodes are small, set `work_limit` to the pool's output limit
-plus headroom.
+plus headroom. `/wherry` is a disk-backed `emptyDir`, so it also counts
+against `resources.ephemeral_storage` when that is set: `work_limit` bounds
+the agent's working files, `ephemeral_storage` the container's whole disk use,
+and an `ephemeral_storage` below `work_limit` evicts first.
 
 The plugin reads the agent's standard output from the logs API, which
 interleaves standard error with it. A line the agent writes to standard

@@ -113,8 +113,10 @@ An adapter's `config` section in the receiver configuration:
 | `datacenters` | every datacenter | datacenters for agent jobs |
 | `runtime` | required | the agent task's definition |
 
-`credential_env` is required when the adapter sets `credential`, and
-matches `[A-Za-z_][A-Za-z0-9_]*`. Unknown fields are errors. The plugin
+`credential_env` is required when the adapter sets `credential`, matches
+`[A-Za-z_][A-Za-z0-9_]*`, and is none of the variables the plugin sets
+for the agent. Names in `runtime.env` match the same pattern. Unknown fields
+are errors. The plugin
 checks the section when the receiver configures the adapter, and the
 receiver exits with `adapter <name>: ...` on an error.
 
@@ -125,7 +127,7 @@ receiver exits with `adapter <name>: ...` on an error.
 | `driver` | Nomad task driver, required |
 | `config` | the driver's task configuration |
 | `env` | environment variables for the agent task |
-| `resources` | `cpu` (MHz) and `memory_mb`; unset values take Nomad defaults |
+| `resources` | `cpu` (MHz, default `1000`) and `memory_mb` (default `2048`) |
 | `user` | the agent task's user; unset, the driver's default |
 
 `user` is a name matching `[a-z_][a-z0-9_-]*`, or `UID` or `UID:GID` with
@@ -140,7 +142,9 @@ for them `user` is a name. A numeric `user` fails every `exec` and
 `raw_exec` task, and on those drivers the credential files keep the
 client's owner and mode 0644 whatever `user` is set.
 
-The plugin sets `HOME` in `env`. [Agent jobs](#agent-jobs) describes the
+The plugin sets `HOME`, `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR`,
+`WHERRY_CREDENTIALS_DIR`, `WHERRY_MODEL` when the task names a model, and the
+variables of the adapter protocol's `AgentEnvironment` over `env`. [Agent jobs](#agent-jobs) describes the
 job it builds.
 
 ```yaml

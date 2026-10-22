@@ -73,7 +73,7 @@ type Runtime struct {
 	User      string            `json:"user"`
 }
 
-// Resources are the agent task's resources; unset values take Nomad's defaults.
+// Resources are the agent task's resources; unset, CPU is defaultCPU MHz and memory defaultMemoryMB.
 type Resources struct {
 	CPU      *int `json:"cpu"`
 	MemoryMB *int `json:"memory_mb"`
@@ -109,6 +109,18 @@ type metrics struct {
 	placement wherry.Histogram
 }
 
+// defaultCPU and defaultMemoryMB match the Kubernetes plugin's defaults: 2 GiB, and about half a core of a 2 GHz node.
+const (
+	defaultCPU      = 1000
+	defaultMemoryMB = 2048
+)
+
+// reservedEnv reports whether the plugin sets the variable name for the agent, so a credential under it would be lost.
+func reservedEnv(name string) bool {
+	_, set := wherry.AgentEnvironment[name]
+	return set || slices.Contains([]string{"HOME", "WHERRY_INPUT_DIR", "WHERRY_OUTPUT_DIR", "WHERRY_CREDENTIALS_DIR", "WHERRY_MODEL"}, name)
+}
+
 var (
 	envName     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	runtimeUser = regexp.MustCompile(`^(?:[a-z_][a-z0-9_-]*|([1-9][0-9]*)(?::([1-9][0-9]*))?)$`)
@@ -130,6 +142,14 @@ func newClient(config Config, token string) (*api.Client, error) {
 func New(config Config, name, pool string, client *api.Client, logger hclog.Logger) (*Adapter, error) {
 	if config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv) {
 		return nil, errors.New("credential_env must be an environment variable name")
+	}
+	if reservedEnv(config.CredentialEnv) {
+		return nil, errors.New("credential_env must not be a variable the plugin sets for the agent, such as HOME or WHERRY_MODEL")
+	}
+	for variable := range config.Runtime.Env {
+		if !envName.MatchString(variable) {
+			return nil, errors.New("runtime env names must be environment variable names")
+		}
 	}
 	if config.Runtime.Driver == "" {
 		return nil, errors.New("runtime requires a driver")
@@ -417,7 +437,7 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 	}
 	tasks := []*api.Task{{
 		Name: taskName, Driver: runtime.Driver, User: runtime.User, Config: maps.Clone(runtime.Config), Env: env,
-		Resources: &api.Resources{CPU: runtime.Resources.CPU, MemoryMB: runtime.Resources.MemoryMB},
+		Resources: &api.Resources{CPU: cmp.Or(runtime.Resources.CPU, new(defaultCPU)), MemoryMB: cmp.Or(runtime.Resources.MemoryMB, new(defaultMemoryMB))},
 		LogConfig: &api.LogConfig{MaxFiles: new(3), MaxFileSizeMB: new(10)},
 		Templates: templates, Artifacts: artifacts,
 	}}
