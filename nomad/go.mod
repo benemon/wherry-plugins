@@ -3,7 +3,7 @@ module github.com/benemon/wherry-plugins/nomad
 go 1.27
 
 require (
-	github.com/benemon/wherry/adapter v0.5.0-rc.1
+	github.com/benemon/wherry/adapter v0.5.0-rc.2
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/nomad/api v0.0.0-20261016150620-df630b26e78a
 )

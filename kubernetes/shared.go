@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -82,19 +81,6 @@ func (m *PlatformMetrics) Samples() []wherry.Sample {
 		samples = append(samples, wherry.Sample{Family: "wherry_adapter_sweep_deletions_total", Labels: map[string]string{"kind": kind}, Kind: wherry.KindCounter, Value: count})
 	}
 	return samples
-}
-
-// AgentEnv returns configured without wherry.AgentUnset and with wherry.AgentEnvironment over it.
-func AgentEnv(configured map[string]string) map[string]string {
-	env := maps.Clone(configured)
-	if env == nil {
-		env = map[string]string{}
-	}
-	for _, name := range wherry.AgentUnset {
-		delete(env, name)
-	}
-	maps.Copy(env, wherry.AgentEnvironment)
-	return env
 }
 
 // Selected is one output Select keeps, marked for reading or streaming; an output marked neither is only listed.
@@ -175,10 +161,4 @@ func (reader *LineReader) emit(ctx context.Context, data []byte, advance int64) 
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-}
-
-// reservedEnv reports whether the plugin sets the variable name for the agent, so a credential under it would be lost.
-func reservedEnv(name string) bool {
-	_, set := wherry.AgentEnvironment[name]
-	return set || slices.Contains([]string{"HOME", "WHERRY_INPUT_DIR", "WHERRY_OUTPUT_DIR", "WHERRY_CREDENTIALS_DIR", "WHERRY_MODEL"}, name)
 }

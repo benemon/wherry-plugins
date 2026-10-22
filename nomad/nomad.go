@@ -123,12 +123,6 @@ const (
 	defaultMemoryMB = 2048
 )
 
-// reservedEnv reports whether the plugin sets the variable name for the agent, so a credential under it would be lost.
-func reservedEnv(name string) bool {
-	_, set := wherry.AgentEnvironment[name]
-	return set || slices.Contains([]string{"HOME", "WHERRY_INPUT_DIR", "WHERRY_OUTPUT_DIR", "WHERRY_CREDENTIALS_DIR", "WHERRY_MODEL"}, name)
-}
-
 var (
 	envName     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	runtimeUser = regexp.MustCompile(`^(?:[a-z_][a-z0-9_-]*|([1-9][0-9]*)(?::([1-9][0-9]*))?)$`)
@@ -151,7 +145,7 @@ func New(config Config, name, pool string, client *api.Client, logger hclog.Logg
 	if config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv) {
 		return nil, errors.New("credential_env must be an environment variable name")
 	}
-	if reservedEnv(config.CredentialEnv) {
+	if wherry.ReservedEnv(config.CredentialEnv) {
 		return nil, errors.New("credential_env must not be a variable the plugin sets for the agent, such as HOME or WHERRY_MODEL")
 	}
 	for variable := range config.Runtime.Env {
@@ -389,14 +383,7 @@ func jobState(alloc *api.AllocationListStub) wherry.JobState {
 func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) {
 	runtime := adapter.runtime
 	jobID := adapter.jobID(run.ID)
-	env := maps.Clone(runtime.Env)
-	if env == nil {
-		env = make(map[string]string)
-	}
-	for _, name := range wherry.AgentUnset {
-		delete(env, name)
-	}
-	maps.Copy(env, wherry.AgentEnvironment)
+	env := wherry.AgentEnv(runtime.Env)
 	env["HOME"] = "${NOMAD_TASK_DIR}"
 	env["WHERRY_INPUT_DIR"] = "${NOMAD_TASK_DIR}/inputs"
 	env["WHERRY_OUTPUT_DIR"] = "${NOMAD_TASK_DIR}/outputs"
