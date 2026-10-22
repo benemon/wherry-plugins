@@ -176,3 +176,9 @@ func (reader *LineReader) emit(ctx context.Context, data []byte, advance int64) 
 		return ctx.Err()
 	}
 }
+
+// reservedEnv reports whether the plugin sets the variable name for the agent, so a credential under it would be lost.
+func reservedEnv(name string) bool {
+	_, set := wherry.AgentEnvironment[name]
+	return set || slices.Contains([]string{"HOME", "WHERRY_INPUT_DIR", "WHERRY_OUTPUT_DIR", "WHERRY_CREDENTIALS_DIR", "WHERRY_MODEL"}, name)
+}
