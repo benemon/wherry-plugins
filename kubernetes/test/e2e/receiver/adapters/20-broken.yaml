@@ -1,0 +1,11 @@
+name: broken
+platform: kind
+agent: fake
+output: file
+labels:
+  e2e: broken
+config:
+  runtime:
+    image: registry.invalid/none:0
+    user: "1001"
+    resources: {cpu: 100m, memory: 64Mi}

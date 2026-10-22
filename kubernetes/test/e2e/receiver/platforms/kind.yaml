@@ -1,0 +1,5 @@
+name: kind
+type: kubernetes
+config:
+  namespace: wherry
+  helper_image: wherry-receiver:e2e
