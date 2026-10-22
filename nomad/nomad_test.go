@@ -236,6 +236,7 @@ func TestNewValidatesConfig(t *testing.T) {
 		"gid not a number":  func(config *Config) { config.Runtime.User = "1001:x" },
 		"user name":         func(config *Config) { config.Runtime.User = "Bad Name" },
 		"root uid":          func(config *Config) { config.Runtime.User = "0" },
+		"root name":         func(config *Config) { config.Runtime.User = "root" },
 		"env name":          func(config *Config) { config.Runtime.Env = map[string]string{"BAD-NAME": "x"} },
 		"credential HOME":   func(config *Config) { config.CredentialEnv = "HOME" },
 		"credential WHERRY": func(config *Config) { config.CredentialEnv = "WHERRY_MODEL" },

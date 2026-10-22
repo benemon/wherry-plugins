@@ -165,7 +165,7 @@ func New(config Config, name, pool string, client *api.Client, logger hclog.Logg
 	var uid, gid *int
 	if user := config.Runtime.User; user != "" {
 		match := runtimeUser.FindStringSubmatch(user)
-		if match == nil {
+		if match == nil || user == "root" {
 			return nil, errors.New("runtime user must be a user name or UID[:GID] other than root")
 		}
 		// The client resolves a name, so the plugin can give credential files only a numeric owner.
