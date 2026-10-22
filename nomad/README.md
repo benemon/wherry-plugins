@@ -55,7 +55,8 @@ supplies `NOMAD_TOKEN` to it. The token needs the
 | `NOMAD_HTTP_AUTH` | HTTP basic auth for API requests |
 
 Other `NOMAD_*` TLS variables are not read; `ca_file` is the only TLS
-setting.
+setting. The plugin presents no client certificate, so it cannot reach a
+cluster that sets `verify_https_client`.
 
 ## ACL policy
 
