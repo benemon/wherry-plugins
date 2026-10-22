@@ -6,6 +6,13 @@ CYCLONEDX           := $(shell go env GOPATH)/bin/cyclonedx-gomod
 VERSION   ?= dev
 DIST      ?= dist
 PLATFORMS ?= linux/amd64 linux/arm64
+PLUGINS   := nomad kubernetes
+PLUGIN    ?=
+# image builds the receiver image from this checkout and the wherry release WHERRY_VERSION, such as v0.4.0, with
+# CONTAINER, podman or docker.
+WHERRY_VERSION ?=
+IMAGE          ?= wherry-receiver
+CONTAINER      ?= podman
 
 LICENCE_ALLOWLIST := MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0
 
@@ -14,8 +21,9 @@ help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "%-16s %s\n", $$1, $$2}'
 
 .PHONY: build
-build: ## Build the Nomad plugin
-	cd nomad && go build -trimpath -o ../wherry-plugin-nomad .
+build: ## Build every plugin, and the Kubernetes plugin's pod helper
+	@set -e; for p in $(PLUGINS); do (cd $$p && go build -trimpath -o ../wherry-plugin-$$p .); done
+	cd kubernetes && go build -trimpath -o ../wherry-k8s-helper ./cmd/wherry-k8s-helper
 
 .PHONY: check-fmt
 check-fmt: ## Fail on Go files gofmt would change
@@ -23,12 +31,12 @@ check-fmt: ## Fail on Go files gofmt would change
 	if [ -n "$$out" ]; then echo "$$out"; echo "FAIL: gofmt"; exit 1; fi
 
 .PHONY: vet
-vet: ## Vet the Nomad plugin
-	cd nomad && go vet ./...
+vet: ## Vet every plugin
+	@set -e; for p in $(PLUGINS); do (cd $$p && go vet ./...); done
 
 .PHONY: test
-test: ## Test the Nomad plugin
-	cd nomad && go test ./...
+test: ## Test every plugin with the race detector
+	@set -e; for p in $(PLUGINS); do (cd $$p && go test -race ./...); done
 
 $(GO_LICENSES):
 	go install github.com/google/go-licenses@$(GO_LICENSES_VERSION)
@@ -40,7 +48,7 @@ $(CYCLONEDX):
 # A failure means a dependency changed licence on upgrade: investigate the
 # module, do not widen the list to get green.
 check-licenses: $(GO_LICENSES) ## Fail on dependency licences outside the allowlist
-	cd nomad && $(GO_LICENSES) check ./... --allowed_licenses=$(LICENCE_ALLOWLIST)
+	@set -e; for p in $(PLUGINS); do (cd $$p && $(GO_LICENSES) check ./... --allowed_licenses=$(LICENCE_ALLOWLIST)); done
 
 .PHONY: check-markers
 # wherry integrates agent harnesses by name, so product names are not
@@ -61,20 +69,30 @@ check: check-fmt vet test check-licenses check-markers ## Run every CI gate
 # app mode describes what the plugin binary links, not the module graph with
 # its test-only dependencies. The tool reads tags through go-git, so run it
 # from a plain clone with tags fetched.
-sbom: $(CYCLONEDX) ## Write a CycloneDX SBOM for the Nomad plugin
+sbom: $(CYCLONEDX) ## Write a CycloneDX SBOM for PLUGIN
+	@test -n "$(PLUGIN)" || { echo "FAIL: set PLUGIN"; exit 1; }
 	mkdir -p $(DIST)
-	cd nomad && $(CYCLONEDX) app -json -licenses -main . -output ../$(DIST)/wherry-plugin-nomad.cdx.json .
+	cd $(PLUGIN) && $(CYCLONEDX) app -json -licenses -main . -output ../$(DIST)/wherry-plugin-$(PLUGIN).cdx.json .
 
 .PHONY: dist
-dist: ## Cross-compile release archives and checksums.txt into DIST
-	rm -rf $(DIST)/wherry-plugin-nomad_*
+dist: ## Cross-compile PLUGIN's release archives and checksums.txt into DIST
+	@test -n "$(PLUGIN)" || { echo "FAIL: set PLUGIN"; exit 1; }
+	rm -rf $(DIST)/wherry-plugin-$(PLUGIN)_*
 	mkdir -p $(DIST)
 	@set -e; for p in $(PLATFORMS); do \
-		os=$${p%/*}; arch=$${p#*/}; name=wherry-plugin-nomad_$(VERSION)_$${os}_$${arch}; \
+		os=$${p%/*}; arch=$${p#*/}; name=wherry-plugin-$(PLUGIN)_$(VERSION)_$${os}_$${arch}; \
 		mkdir -p $(DIST)/$$name; \
-		(cd nomad && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -o ../$(DIST)/$$name/wherry-plugin-nomad .); \
-		cp LICENSE nomad/README.md $(DIST)/$$name/; \
+		(cd $(PLUGIN) && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -o ../$(DIST)/$$name/wherry-plugin-$(PLUGIN) .); \
+		if [ $(PLUGIN) = kubernetes ]; then \
+			(cd kubernetes && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -o ../$(DIST)/$$name/wherry-k8s-helper ./cmd/wherry-k8s-helper); \
+		fi; \
+		cp LICENSE $(PLUGIN)/README.md $(DIST)/$$name/; \
 		tar -C $(DIST) -czf $(DIST)/$$name.tar.gz $$name; \
 		rm -rf $(DIST)/$$name; \
 	done
-	cd $(DIST) && sha256sum wherry-plugin-nomad_*.tar.gz > checksums.txt
+	cd $(DIST) && sha256sum wherry-plugin-$(PLUGIN)_*.tar.gz > checksums.txt
+
+.PHONY: image
+image: ## Build the receiver image (VERSION, WHERRY_VERSION, CONTAINER)
+	@test -n "$(WHERRY_VERSION)" || { echo "FAIL: set WHERRY_VERSION"; exit 1; }
+	$(CONTAINER) build -f kubernetes/Containerfile --build-arg WHERRY_VERSION=$(WHERRY_VERSION) -t $(IMAGE):$(VERSION) .

@@ -26,7 +26,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: nomad/go.mod
+          go-version-file: kubernetes/go.mod
           check-latest: true
 
       - name: Initialize CodeQL
@@ -35,8 +35,12 @@ jobs:
           languages: go
           build-mode: manual
 
-      - name: Build the plugin
+      - name: Build the Nomad plugin
         working-directory: nomad
+        run: go build ./...
+
+      - name: Build the Kubernetes plugin
+        working-directory: kubernetes
         run: go build ./...
 
       - name: Perform CodeQL analysis

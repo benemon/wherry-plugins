@@ -1,0 +1,8 @@
+# delivery_limit 2 ends a run at its first start failure, so the start-failure run fails at once.
+agents:
+  - name: fake
+default_agent: fake
+delivery_limit: 2
+lock_duration_ms: 15000
+producer_byte_rate: 1048576
+request_percentage: 10

@@ -15,15 +15,31 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [nomad, kubernetes]
+    env:
+      PLUGIN: ${{ matrix.plugin }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find changes to the plugin or the shared build files
+        id: changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: .github/changed.sh "$BASE" "^($PLUGIN/|Makefile\$|\.github/workflows/ci\.yml\$|\.github/changed\.sh\$)"
       - name: Set up Go
+        if: steps.changes.outputs.changed == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: nomad/go.mod
+          go-version-file: ${{ matrix.plugin }}/go.mod
           check-latest: true
           cache: true
-          cache-dependency-path: nomad/go.sum
-      - name: Run every gate
-        run: make check
+          cache-dependency-path: ${{ matrix.plugin }}/go.sum
+      - name: Run the plugin's gates
+        if: steps.changes.outputs.changed == 'true'
+        run: make check PLUGINS="$PLUGIN"

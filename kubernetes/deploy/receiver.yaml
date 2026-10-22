@@ -1,0 +1,61 @@
+# The in-cluster receiver. apply.sh applies this file unchanged but for the namespace and the image, on Kubernetes and
+# OpenShift alike, beside the Secret wherry-receiver-bundle. Agent pods run in the same namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: wherry-receiver}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: wherry-receiver}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
+subjects:
+  - {kind: ServiceAccount, name: wherry-receiver, namespace: wherry}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: wherry-receiver-state}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: wherry-receiver}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: wherry-receiver}}
+  template:
+    metadata: {labels: {app: wherry-receiver}}
+    spec:
+      serviceAccountName: wherry-receiver
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: receiver
+          image: wherry-receiver
+          args: [receiver, --bundle-file, /etc/wherry/bundle/bundle.yaml, --state-dir, /var/lib/wherry/state,
+                 --plugin-dir, /usr/local/libexec/wherry/plugins, --metrics-addr, "0.0.0.0:9464"]
+          env:
+            - {name: TMPDIR, value: /tmp}
+            - {name: HOME, value: /tmp}
+          ports: [{name: metrics, containerPort: 9464}]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, readOnlyRootFilesystem: true}
+          resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 512Mi}}
+          volumeMounts:
+            - {name: bundle, mountPath: /etc/wherry/bundle, readOnly: true}
+            - {name: state, mountPath: /var/lib/wherry}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: bundle, secret: {secretName: wherry-receiver-bundle, defaultMode: 0440}}
+        - {name: state, persistentVolumeClaim: {claimName: wherry-receiver-state}}
+        - {name: tmp, emptyDir: {medium: Memory, sizeLimit: 16Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: wherry-receiver-metrics, labels: {app: wherry-receiver}}
+spec:
+  selector: {app: wherry-receiver}
+  ports: [{name: metrics, port: 9464, targetPort: metrics}]

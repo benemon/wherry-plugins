@@ -1,4 +1,6 @@
 /dist/
 /wherry-plugin-nomad
+/wherry-plugin-kubernetes
+/wherry-k8s-helper
 go.work
 go.work.sum
