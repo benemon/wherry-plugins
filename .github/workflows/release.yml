@@ -69,7 +69,7 @@ jobs:
           echo "PLUGIN=${RELEASE_TAG%%/*}" >> "$GITHUB_ENV"
           echo "VERSION=${RELEASE_TAG#*/}" >> "$GITHUB_ENV"
       - name: Write the SBOM
-        run: make sbom PLUGIN="$PLUGIN"
+        run: make sbom PLUGIN="$PLUGIN" VERSION="$VERSION"
       - name: Build the release archives
         run: make dist PLUGIN="$PLUGIN" VERSION="$VERSION"
       # Verify with:
