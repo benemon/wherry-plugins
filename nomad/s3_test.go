@@ -64,7 +64,7 @@ func TestBuildJobFetchesEachInputAsAnArtifact(t *testing.T) {
 	}
 	run := testRun("fetches")
 	run.Fetches = []wherry.Fetch{{Name: "data.tar.gz", URL: "https://store.example.test/b/k?X-Amz-Signature=1", Size: 3, SHA256: strings.Repeat("a", 64)}}
-	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+	job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestAFetchThatDoesNotVerifyNeverStartsOnNomad(t *testing.T) {
 	if err != nil || terminal.Started || terminal.Class != wherry.ClassFetch {
 		t.Fatalf("terminal %+v, %v; want never started with class %s", terminal, err, wherry.ClassFetch)
 	}
-	if job, err := adapter.Lookup(ctx, run.ID, run.Turn); err != nil || job.State != wherry.JobNeverStarted {
+	if job, err := adapter.Lookup(ctx, run.ID); err != nil || job.State != wherry.JobNeverStarted {
 		t.Fatalf("lookup = %+v, %v; want never started", job, err)
 	}
 }

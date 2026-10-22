@@ -2,7 +2,7 @@
   "kind": "Pod",
   "apiVersion": "v1",
   "metadata": {
-    "name": "agent-capture-exit-1-t1",
+    "name": "agent-capture-exit-1",
     "namespace": "wherry-agents",
     "uid": "6f1c0b8e-exit-4a1d-9b7e-2c5d8f0a1b3c",
     "resourceVersion": "48211",
@@ -11,8 +11,7 @@
       "wherry.io/pool": "capture",
       "wherry.io/adapter": "openshift",
       "wherry.io/agent": "coder",
-      "wherry.io/run": "capture-exit-1",
-      "wherry.io/turn": "1"
+      "wherry.io/run": "capture-exit-1"
     },
     "annotations": {
       "wherry.io/attempt": "1",

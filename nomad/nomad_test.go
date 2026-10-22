@@ -80,7 +80,7 @@ func devAdapter(t *testing.T) (*Adapter, context.Context) {
 func testRun(name string) wherry.Run {
 	id := fmt.Sprintf("run-%s-%d", name, time.Now().UnixNano())
 	return wherry.Run{
-		ID: id, Adapter: testAdapter, Agent: "coder", Turn: 1, Attempt: 2,
+		ID: id, Adapter: testAdapter, Agent: "coder", Attempt: 2,
 		Prompt: []byte("hello-prompt"), Credential: []byte("test-credential"),
 	}
 }
@@ -90,8 +90,8 @@ func cleanupRun(t *testing.T, adapter *Adapter, run wherry.Run) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = adapter.Release(ctx, run.ID, run.Turn)
-		_, _, _ = adapter.client.Jobs().Deregister(adapter.jobID(run.ID, run.Turn), true, (&api.WriteOptions{}).WithContext(ctx))
+		_ = adapter.Release(ctx, run.ID)
+		_, _, _ = adapter.client.Jobs().Deregister(adapter.jobID(run.ID), true, (&api.WriteOptions{}).WithContext(ctx))
 	})
 }
 
@@ -167,12 +167,12 @@ func TestBuildJobFromRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("build")
-	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+	job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantMeta := map[string]string{"run_id": run.ID, "turn": "1", "attempt": "2", "adapter": "container", "agent": "coder"}
-	if *job.ID != adapter.jobID(run.ID, run.Turn) || *job.Name != adapter.jobID(run.ID, run.Turn) || *job.Namespace != "default" || *job.Type != api.JobTypeBatch ||
+	wantMeta := map[string]string{"run_id": run.ID, "attempt": "2", "adapter": "container", "agent": "coder"}
+	if *job.ID != adapter.jobID(run.ID) || *job.Name != adapter.jobID(run.ID) || *job.Namespace != "default" || *job.Type != api.JobTypeBatch ||
 		*job.NodePool != "default" || !reflect.DeepEqual(job.Datacenters, []string{"dc1"}) || !reflect.DeepEqual(job.Meta, wantMeta) {
 		t.Fatalf("unexpected job identity or placement: %#v", job)
 	}
@@ -198,7 +198,7 @@ func TestBuildJobFromRuntime(t *testing.T) {
 		t.Fatalf("templates %#v", templates)
 	}
 	run.Credential = nil
-	job, err = adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+	job, err = adapter.buildJob(run, adapter.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,27 +207,24 @@ func TestBuildJobFromRuntime(t *testing.T) {
 	}
 }
 
-func TestPerTurnJobIDs(t *testing.T) {
+func TestJobIDIsTheRunID(t *testing.T) {
 	adapter, err := build(testConfig("http://127.0.0.1:1"), testPool, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := testRun("turns")
-	run.ID = "run-turns"
-	for _, turn := range []int64{1, 2} {
-		run.Turn = turn
-		path := adapter.variablePath(run.ID, turn)
-		job, err := adapter.buildJob(run, path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		wantID := fmt.Sprintf("%s%s-t%d", poolPrefix, run.ID, turn)
-		if *job.ID != wantID || *job.Name != wantID || path != "nomad/jobs/"+wantID {
-			t.Fatalf("turn %d job=%q name=%q path=%q, want %q", turn, *job.ID, *job.Name, path, wantID)
-		}
-		if template := *job.TaskGroups[0].Tasks[0].Templates[0].EmbeddedTmpl; !strings.Contains(template, path) {
-			t.Fatalf("turn %d template %q does not use %q", turn, template, path)
-		}
+	run := testRun("ids")
+	run.ID = "run-ids"
+	path := adapter.variablePath(run.ID)
+	job, err := adapter.buildJob(run, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantID := poolPrefix + run.ID
+	if *job.ID != wantID || *job.Name != wantID || path != "nomad/jobs/"+wantID {
+		t.Fatalf("job=%q name=%q path=%q, want %q", *job.ID, *job.Name, path, wantID)
+	}
+	if template := *job.TaskGroups[0].Tasks[0].Templates[0].EmbeddedTmpl; !strings.Contains(template, path) {
+		t.Fatalf("template %q does not use %q", template, path)
 	}
 }
 
@@ -269,7 +266,7 @@ func TestBuildJobRunsAsTheRuntimeUser(t *testing.T) {
 			run := testRun("user")
 			run.Inputs = []wherry.File{{Name: "data.csv"}}
 			run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519"}, {Name: "token", File: "token"}}
-			job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+			job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -321,11 +318,11 @@ func TestDispatchRegistersPerRunJob(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("register")
 	dispatch(t, adapter, ctx, run)
-	job, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), nil)
+	job, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *job.ID != adapter.jobID(run.ID, run.Turn) || *job.Name != adapter.jobID(run.ID, run.Turn) || *job.Type != api.JobTypeBatch ||
+	if *job.ID != adapter.jobID(run.ID) || *job.Name != adapter.jobID(run.ID) || *job.Type != api.JobTypeBatch ||
 		*job.NodePool != "default" || len(job.Datacenters) != 1 || job.Datacenters[0] != "dc1" || job.Meta["run_id"] != run.ID {
 		t.Fatalf("unexpected job: %#v", job)
 	}
@@ -341,14 +338,14 @@ func TestDispatchAdoptsExistingJob(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("adopt")
 	dispatch(t, adapter, ctx, run)
-	before, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), nil)
+	before, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := adapter.Dispatch(ctx, run); err != nil {
 		t.Fatal(err)
 	}
-	after, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), nil)
+	after, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +381,7 @@ func TestDispatchWithoutCredential(t *testing.T) {
 	if got := output(t, ctx, adapter, handle); !strings.Contains(got, "prompt=hello-prompt token= env=from-runtime") {
 		t.Fatalf("task output %q", got)
 	}
-	variable, _, err := adapter.client.Variables().Peek(adapter.variablePath(run.ID, run.Turn), nil)
+	variable, _, err := adapter.client.Variables().Peek(adapter.variablePath(run.ID), nil)
 	if err != nil || variable == nil {
 		t.Fatalf("variable = %#v, %v", variable, err)
 	}
@@ -397,7 +394,7 @@ func TestLookupFindsExistingRun(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("lookup")
 	dispatched := dispatch(t, adapter, ctx, run)
-	found, err := adapter.Lookup(ctx, run.ID, run.Turn)
+	found, err := adapter.Lookup(ctx, run.ID)
 	if err != nil || found.State == wherry.JobAbsent {
 		t.Fatalf("lookup = %#v, %v", found, err)
 	}
@@ -411,7 +408,7 @@ func TestLookupFindsExistingRun(t *testing.T) {
 
 func TestLookupMissingRun(t *testing.T) {
 	adapter, ctx := devAdapter(t)
-	job, err := adapter.Lookup(ctx, fmt.Sprintf("run-missing-%d", time.Now().UnixNano()), 1)
+	job, err := adapter.Lookup(ctx, fmt.Sprintf("run-missing-%d", time.Now().UnixNano()))
 	if err != nil || job.State != wherry.JobAbsent || job.Handle.Data != nil {
 		t.Fatalf("lookup = %#v, %v", job, err)
 	}
@@ -422,7 +419,7 @@ func TestLookupWaitsForUnplacedJob(t *testing.T) {
 	run := testRun("lookup-unplaced")
 	adapter.datacenters = []string{"wherry-no-such-datacenter"}
 	cleanupRun(t, adapter, run)
-	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+	job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,10 +428,10 @@ func TestLookupWaitsForUnplacedJob(t *testing.T) {
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if job, err := adapter.Lookup(lookupCtx, run.ID, run.Turn); job.State != wherry.JobAbsent || !errors.Is(err, context.DeadlineExceeded) {
+	if job, err := adapter.Lookup(lookupCtx, run.ID); job.State != wherry.JobAbsent || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("lookup of a job without an allocation = %#v, %v; want a wait that times out", job, err)
 	}
-	if _, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), nil); !notFound(err) {
+	if _, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID), nil); !notFound(err) {
 		t.Fatalf("timed-out job still registered: %v", err)
 	}
 }
@@ -443,17 +440,17 @@ func TestReleaseDeletesVariable(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("release")
 	dispatch(t, adapter, ctx, run)
-	path := adapter.variablePath(run.ID, run.Turn)
+	path := adapter.variablePath(run.ID)
 	if variable, _, err := adapter.client.Variables().Peek(path, nil); err != nil || variable == nil {
 		t.Fatalf("variable before release = %#v, %v", variable, err)
 	}
-	if err := adapter.Release(ctx, run.ID, run.Turn); err != nil {
+	if err := adapter.Release(ctx, run.ID); err != nil {
 		t.Fatal(err)
 	}
 	if variable, _, err := adapter.client.Variables().Peek(path, nil); err != nil || variable != nil {
 		t.Fatalf("variable after release = %#v, %v", variable, err)
 	}
-	if err := adapter.Release(ctx, run.ID, run.Turn); err != nil {
+	if err := adapter.Release(ctx, run.ID); err != nil {
 		t.Fatalf("absent release failed: %v", err)
 	}
 }
@@ -607,7 +604,7 @@ func TestDispatchTimeoutDeregisters(t *testing.T) {
 	if _, _, err := adapter.Dispatch(dispatchCtx, run); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("dispatch of an unplaceable job = %v; want a wait that times out", err)
 	}
-	if _, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), nil); !notFound(err) {
+	if _, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID), nil); !notFound(err) {
 		t.Fatalf("timed-out job still registered: %v", err)
 	}
 }
@@ -845,29 +842,29 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 			return
 		}
 		switch request.Method + " " + request.URL.Path {
-		case "PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1",
-			"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls-t1/agent":
+		case "PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls",
+			"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls/agent", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls/agent":
 			_, _ = response.Write([]byte(`{}`))
 		case "GET /v1/client/fs/ls/alloc-urls":
 			fmt.Fprintf(response, `[{"Name":"report.md","IsDir":false,"Size":%d,"FileMode":"-rw-r--r--"}]`, len(outputContent))
 		case "GET /v1/client/fs/readat/alloc-urls":
 			_, _ = response.Write([]byte(outputContent))
-		case "DELETE /v1/job/agent-44575cf5b285-run-urls-t1":
+		case "DELETE /v1/job/agent-44575cf5b285-run-urls":
 			_, _ = response.Write([]byte(`{"EvalID":""}`))
 		case "GET /v1/jobs":
-			_, _ = response.Write([]byte(`[{"ID":"agent-44575cf5b285-run-urls-t1","Status":"dead","SubmitTime":0,"Meta":{"adapter":"container"}}]`))
-		case "GET /v1/job/agent-44575cf5b285-run-urls-t1":
+			_, _ = response.Write([]byte(`[{"ID":"agent-44575cf5b285-run-urls","Status":"dead","SubmitTime":0,"Meta":{"adapter":"container","run_id":"r"}}]`))
+		case "GET /v1/job/agent-44575cf5b285-run-urls":
 			if !registered {
 				http.Error(response, "job not found", http.StatusNotFound)
 				return
 			}
-			_, _ = response.Write([]byte(`{"ID":"agent-44575cf5b285-run-urls-t1","Status":"dead","Stop":false,"Meta":{"adapter":"container"},"TaskGroups":[{"Tasks":[{"Name":"agent","Driver":"raw_exec"}]}]}`))
+			_, _ = response.Write([]byte(`{"ID":"agent-44575cf5b285-run-urls","Status":"dead","Stop":false,"Meta":{"adapter":"container","run_id":"r"},"TaskGroups":[{"Tasks":[{"Name":"agent","Driver":"raw_exec"}]}]}`))
 		case "GET /v1/vars":
-			_, _ = response.Write([]byte(`[{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls-t1/agent"}]`))
+			_, _ = response.Write([]byte(`[{"Path":"nomad/jobs/agent-44575cf5b285-run-urls"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls/agent"}]`))
 		case "PUT /v1/jobs":
 			registered = true
 			_, _ = response.Write([]byte(`{}`))
-		case "GET /v1/job/agent-44575cf5b285-run-urls-t1/allocations":
+		case "GET /v1/job/agent-44575cf5b285-run-urls/allocations":
 			_, _ = response.Write([]byte(`[{"ID":"alloc-urls","ClientStatus":"complete"}]`))
 		case "GET /v1/allocation/alloc-urls":
 			_, _ = response.Write([]byte(`{"ID":"alloc-urls","ClientStatus":"complete","TaskStates":{"agent":{"State":"dead","StartedAt":"2026-01-01T00:00:00Z"}}}`))
@@ -894,7 +891,7 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch = %#v, %v", handle, err)
 	}
-	if found, err := adapter.Lookup(ctx, run.ID, run.Turn); err != nil || found.State != wherry.JobNeverStarted {
+	if found, err := adapter.Lookup(ctx, run.ID); err != nil || found.State != wherry.JobNeverStarted {
 		t.Fatalf("lookup = %#v, %v", found, err)
 	}
 	if _, err := adapter.Follow(ctx, handle, 0, make(chan wherry.Line, 1)); err != nil {
@@ -907,10 +904,10 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	if err := adapter.Collect(ctx, handle, wherry.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || string((<-outputs).Data) != outputContent {
 		t.Fatalf("collect: %v", err)
 	}
-	if err := adapter.Release(ctx, run.ID, run.Turn); err != nil {
+	if err := adapter.Release(ctx, run.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := adapter.Purge(ctx, run.ID, run.Turn); err != nil {
+	if err := adapter.Purge(ctx, run.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := adapter.Sweep(ctx); err != nil {
@@ -955,8 +952,8 @@ func TestRegisterFailureCarriesOpAndClass(t *testing.T) {
 	const signature = "X-Amz-Signature=secretsig-register"
 	infos := 0
 	adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
-		"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-register-t1": serve([]byte(`{}`)),
-		"GET /v1/job/agent-44575cf5b285-run-register-t1": func(response http.ResponseWriter, request *http.Request) {
+		"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-register": serve([]byte(`{}`)),
+		"GET /v1/job/agent-44575cf5b285-run-register": func(response http.ResponseWriter, request *http.Request) {
 			if infos++; infos == 1 {
 				jobNotFound(response, request)
 				return
@@ -973,7 +970,7 @@ func TestRegisterFailureCarriesOpAndClass(t *testing.T) {
 	run.Fetches = []wherry.Fetch{{Name: "dataset.bin", URL: "https://store.example.test/b/dataset.bin?" + signature, Size: 8, SHA256: strings.Repeat("a", 64)}}
 	_, _, err := adapter.Dispatch(context.Background(), run)
 	var failure *wherry.Error
-	if !errors.As(err, &failure) || failure.Op != "register job agent-44575cf5b285-run-register-t1" || failure.Class != "other" {
+	if !errors.As(err, &failure) || failure.Op != "register job agent-44575cf5b285-run-register" || failure.Class != "other" {
 		t.Fatalf("dispatch error %#v, want the register failure as a wherry.Error", err)
 	}
 }
@@ -986,7 +983,7 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 	run := testRun("plaintext")
 	run.Inputs = []wherry.File{{Name: "data.csv", Data: []byte("input-content-never-in-the-job")}}
 	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte("task-credential-never-in-the-job")}}
-	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+	job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1041,7 +1038,7 @@ func TestSweepDeletesVariableOfDeadJob(t *testing.T) {
 	run := testRun("sweep-dead")
 	dispatch(t, adapter, ctx, run)
 	for {
-		job, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), (&api.QueryOptions{}).WithContext(ctx))
+		job, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID), (&api.QueryOptions{}).WithContext(ctx))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1050,7 +1047,7 @@ func TestSweepDeletesVariableOfDeadJob(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	sweepLeaves(t, adapter, ctx, adapter.variablePath(run.ID, run.Turn), false)
+	sweepLeaves(t, adapter, ctx, adapter.variablePath(run.ID), false)
 }
 
 func TestSweepDeletesVariableOfStoppedJob(t *testing.T) {
@@ -1059,11 +1056,11 @@ func TestSweepDeletesVariableOfStoppedJob(t *testing.T) {
 	run := scriptRun(adapter, "sweep-stopped", `trap '' TERM; sleep 300`)
 	handle := dispatch(t, adapter, ctx, run)
 	waitRunning(t, ctx, adapter, handle)
-	if _, _, err := adapter.client.Jobs().Deregister(adapter.jobID(run.ID, run.Turn), false, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+	if _, _, err := adapter.client.Jobs().Deregister(adapter.jobID(run.ID), false, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
 		t.Fatal(err)
 	}
 	// Nomad can mark the stopped job dead while its allocation still runs, so the job's status says nothing here.
-	job, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), (&api.QueryOptions{}).WithContext(ctx))
+	job, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID), (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil || !*job.Stop {
 		t.Fatalf("job after stop = %#v, %v; want stopped", job, err)
 	}
@@ -1071,7 +1068,7 @@ func TestSweepDeletesVariableOfStoppedJob(t *testing.T) {
 	if err != nil || alloc.ClientStatus != api.AllocClientStatusRunning {
 		t.Fatalf("allocation after stop = %v, %v; want still running", alloc, err)
 	}
-	sweepLeaves(t, adapter, ctx, adapter.variablePath(run.ID, run.Turn), false)
+	sweepLeaves(t, adapter, ctx, adapter.variablePath(run.ID), false)
 }
 
 func TestSweepKeepsVariableOfRunningJob(t *testing.T) {
@@ -1079,13 +1076,13 @@ func TestSweepKeepsVariableOfRunningJob(t *testing.T) {
 	shortGrace(t)
 	run := sleepRun(adapter, "sweep-running")
 	dispatch(t, adapter, ctx, run)
-	sweepLeaves(t, adapter, ctx, adapter.variablePath(run.ID, run.Turn), true)
+	sweepLeaves(t, adapter, ctx, adapter.variablePath(run.ID), true)
 }
 
 func TestSweepKeepsRecentVariableWithoutJob(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("sweep-recent")
-	path := adapter.variablePath(run.ID, run.Turn)
+	path := adapter.variablePath(run.ID)
 	putVariable(t, adapter, ctx, path)
 	sweepLeaves(t, adapter, ctx, path, true)
 }
@@ -1094,7 +1091,7 @@ func TestSweepDeletesStaleVariableWithoutJob(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	shortGrace(t)
 	run := testRun("sweep-stale")
-	path := adapter.variablePath(run.ID, run.Turn)
+	path := adapter.variablePath(run.ID)
 	putVariable(t, adapter, ctx, path)
 	sweepLeaves(t, adapter, ctx, path, false)
 }
@@ -1102,7 +1099,7 @@ func TestSweepDeletesStaleVariableWithoutJob(t *testing.T) {
 func TestSweepIgnoresNonRunVariables(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	shortGrace(t)
-	for _, path := range []string{"nomad/jobs/agent-foo-t1/prompt", "nomad/jobs/agent-foo"} {
+	for _, path := range []string{"nomad/jobs/agent-foo/prompt", "nomad/jobs/agent-foo"} {
 		putVariable(t, adapter, ctx, path)
 		sweepLeaves(t, adapter, ctx, path, true)
 	}
@@ -1114,7 +1111,7 @@ func TestJobHoldsOnlyTheAgentTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("one-task")
-	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+	job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1152,7 +1149,7 @@ func TestBuildJobLeavesUnsetPlacementToNomad(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("defaults")
-	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+	job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1269,7 +1266,7 @@ func deletes(requests []string) []string {
 }
 
 func TestDispatchFailureOutcomes(t *testing.T) {
-	const path = "/v1/var/nomad/jobs/agent-44575cf5b285-run-outcome-t1"
+	const path = "/v1/var/nomad/jobs/agent-44575cf5b285-run-outcome"
 	variables := []string{"DELETE " + path, "DELETE " + path + "/agent"}
 	for _, test := range []struct {
 		name     string
@@ -1280,20 +1277,20 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 		failed bool
 	}{
 		{"wait fails", map[string]http.HandlerFunc{
-			"GET /v1/job/agent-44575cf5b285-run-outcome-t1": jobNotFound,
+			"GET /v1/job/agent-44575cf5b285-run-outcome": jobNotFound,
 			"PUT /v1/jobs": serve([]byte(`{"EvalID":"eval-1","EvalCreateIndex":10,"JobModifyIndex":10}`)),
-			"GET /v1/job/agent-44575cf5b285-run-outcome-t1/allocations": func(response http.ResponseWriter, _ *http.Request) {
+			"GET /v1/job/agent-44575cf5b285-run-outcome/allocations": func(response http.ResponseWriter, _ *http.Request) {
 				http.Error(response, "rpc error", http.StatusInternalServerError)
 			},
 		}, wherry.OutcomeUnknown, false, true},
 		{"register fails and no job exists", map[string]http.HandlerFunc{
-			"GET /v1/job/agent-44575cf5b285-run-outcome-t1": jobNotFound,
+			"GET /v1/job/agent-44575cf5b285-run-outcome": jobNotFound,
 			"PUT /v1/jobs": func(response http.ResponseWriter, _ *http.Request) {
 				http.Error(response, "rpc error", http.StatusInternalServerError)
 			},
 		}, wherry.OutcomeNothingCreated, true, false},
 		{"register fails and the job exists", map[string]http.HandlerFunc{
-			"GET /v1/job/agent-44575cf5b285-run-outcome-t1": func() http.HandlerFunc {
+			"GET /v1/job/agent-44575cf5b285-run-outcome": func() http.HandlerFunc {
 				infos := 0
 				return func(response http.ResponseWriter, request *http.Request) {
 					if infos++; infos == 1 {
@@ -1333,7 +1330,7 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 }
 
 func TestPurgeOfAbsentJobSucceeds(t *testing.T) {
-	const path = "/v1/var/nomad/jobs/agent-44575cf5b285-run-absent-t1"
+	const path = "/v1/var/nomad/jobs/agent-44575cf5b285-run-absent"
 	variables := []string{"DELETE " + path, "DELETE " + path + "/agent"}
 	for name, deregister := range map[string]http.HandlerFunc{
 		// Nomad 2.0.7 answers a purge of a job that does not exist with an empty evaluation.
@@ -1342,15 +1339,15 @@ func TestPurgeOfAbsentJobSucceeds(t *testing.T) {
 		"not found": jobNotFound,
 	} {
 		t.Run(name, func(t *testing.T) {
-			routes := map[string]http.HandlerFunc{"DELETE /v1/job/agent-44575cf5b285-run-absent-t1": deregister}
+			routes := map[string]http.HandlerFunc{"DELETE /v1/job/agent-44575cf5b285-run-absent": deregister}
 			for _, deleted := range variables {
 				routes[deleted] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
 			}
 			adapter, requests := nomadServer(t, routes)
-			if err := adapter.Purge(context.Background(), "run-absent", 1); err != nil {
+			if err := adapter.Purge(context.Background(), "run-absent"); err != nil {
 				t.Fatalf("purge of an absent job: %v", err)
 			}
-			if got, want := deletes(requests()), append([]string{"DELETE /v1/job/agent-44575cf5b285-run-absent-t1"}, variables...); !slices.Equal(got, want) {
+			if got, want := deletes(requests()), append([]string{"DELETE /v1/job/agent-44575cf5b285-run-absent"}, variables...); !slices.Equal(got, want) {
 				t.Fatalf("deletes %v, want %v", got, want)
 			}
 		})
@@ -1361,7 +1358,7 @@ func TestLookupReadsDispatchMetadata(t *testing.T) {
 	var mu sync.Mutex
 	var registered *api.Job
 	adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
-		"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-meta-t1": serve([]byte(`{}`)),
+		"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-meta": serve([]byte(`{}`)),
 		"PUT /v1/jobs": func(response http.ResponseWriter, request *http.Request) {
 			var body api.JobRegisterRequest
 			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
@@ -1373,7 +1370,7 @@ func TestLookupReadsDispatchMetadata(t *testing.T) {
 			mu.Unlock()
 			_, _ = response.Write([]byte(`{"EvalID":"eval-1","EvalCreateIndex":10,"JobModifyIndex":10}`))
 		},
-		"GET /v1/job/agent-44575cf5b285-run-meta-t1": func(response http.ResponseWriter, request *http.Request) {
+		"GET /v1/job/agent-44575cf5b285-run-meta": func(response http.ResponseWriter, request *http.Request) {
 			mu.Lock()
 			job := registered
 			mu.Unlock()
@@ -1383,17 +1380,17 @@ func TestLookupReadsDispatchMetadata(t *testing.T) {
 			}
 			_ = json.NewEncoder(response).Encode(job)
 		},
-		"GET /v1/job/agent-44575cf5b285-run-meta-t1/allocations": serve(captured(t, "clean.allocations.json")),
+		"GET /v1/job/agent-44575cf5b285-run-meta/allocations": serve(captured(t, "clean.allocations.json")),
 	})
 	run := testRun("meta")
 	run.ID, run.Attempt, run.Adapter, run.Agent = "run-meta", 3, "container", "coder"
 	outcome, dispatched, err := adapter.Dispatch(context.Background(), run)
-	if err != nil || outcome != wherry.OutcomeCreated || dispatched.Name != "agent-44575cf5b285-run-meta-t1" {
+	if err != nil || outcome != wherry.OutcomeCreated || dispatched.Name != "agent-44575cf5b285-run-meta" {
 		t.Fatalf("dispatch = %v, %q, %v; want created with the job ID as its name", outcome, dispatched.Name, err)
 	}
-	job, err := adapter.Lookup(context.Background(), run.ID, run.Turn)
-	if err != nil || job.State != wherry.JobEnded || job.Attempt != 3 || job.Adapter != "container" || job.Agent != "coder" || job.Handle.Name != "agent-44575cf5b285-run-meta-t1" {
-		t.Fatalf("lookup = %#v, %v; want the ended job named agent-44575cf5b285-run-meta-t1 with attempt 3, adapter container, agent coder", job, err)
+	job, err := adapter.Lookup(context.Background(), run.ID)
+	if err != nil || job.State != wherry.JobEnded || job.Attempt != 3 || job.Adapter != "container" || job.Agent != "coder" || job.Handle.Name != "agent-44575cf5b285-run-meta" {
+		t.Fatalf("lookup = %#v, %v; want the ended job named agent-44575cf5b285-run-meta with attempt 3, adapter container, agent coder", job, err)
 	}
 }
 
@@ -1407,12 +1404,12 @@ func TestLookupMapsCapturedAllocations(t *testing.T) {
 	} {
 		t.Run(test.capture, func(t *testing.T) {
 			runID := "capture-" + strings.TrimSuffix(test.capture, "-failure")
-			id := poolPrefix + runID + "-t1"
+			id := poolPrefix + runID + ""
 			adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
 				"GET /v1/job/" + id:                  serve(captured(t, test.capture+".job.json")),
 				"GET /v1/job/" + id + "/allocations": serve(captured(t, test.capture+".allocations.json")),
 			})
-			job, err := adapter.Lookup(context.Background(), runID, 1)
+			job, err := adapter.Lookup(context.Background(), runID)
 			if err != nil || job.State != test.want || job.Attempt != 1 || job.Adapter != "container" || job.Agent != "coder" {
 				t.Fatalf("lookup = %#v, %v; want state %v from the capture's metadata", job, err, test.want)
 			}
@@ -1470,16 +1467,17 @@ func TestFollowReturnsTerminal(t *testing.T) {
 
 func TestSweepPurgesJobsDeadPastTheGrace(t *testing.T) {
 	old, recent := time.Now().Add(-2*sweepGrace).UnixNano(), time.Now().UnixNano()
-	const mine, otherPool = poolPrefix + "old-t1", "agent-8934303dc131-old-t1" // pool-a's digest
-	jobs := fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"running","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}}]`,
-		mine, old, poolPrefix+"recent-t1", old, poolPrefix+"live-t1", old, poolPrefix+"other", old, otherPool, old)
+	const mine, otherPool = poolPrefix + "old", "agent-8934303dc131-old" // pool-a's digest
+	// Every agent job carries run_id meta; a job under the prefix without it is not the adapter's.
+	jobs := fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"old"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"recent"}},{"ID":%q,"Status":"running","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"live"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"old"}}]`,
+		mine, old, poolPrefix+"recent", old, poolPrefix+"live", old, poolPrefix+"other", old, otherPool, old)
 	routes := map[string]http.HandlerFunc{
 		// The server ignores the prefix query, so the adapter's own pool filter is what is tested.
-		"GET /v1/jobs":                                        serve(jobs),
-		"GET /v1/job/" + mine + "/allocations":                serve(fmt.Appendf(nil, `[{"ID":"alloc-old","ClientStatus":"complete","ModifyTime":%d}]`, old)),
-		"GET /v1/job/" + poolPrefix + "recent-t1/allocations": serve(fmt.Appendf(nil, `[{"ID":"alloc-recent","ClientStatus":"complete","ModifyTime":%d}]`, recent)),
-		"DELETE /v1/job/" + mine:                              serve([]byte(`{"EvalID":""}`)),
-		"GET /v1/vars":                                        serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d}]`, otherPool, old)),
+		"GET /v1/jobs":                                     serve(jobs),
+		"GET /v1/job/" + mine + "/allocations":             serve(fmt.Appendf(nil, `[{"ID":"alloc-old","ClientStatus":"complete","ModifyTime":%d}]`, old)),
+		"GET /v1/job/" + poolPrefix + "recent/allocations": serve(fmt.Appendf(nil, `[{"ID":"alloc-recent","ClientStatus":"complete","ModifyTime":%d}]`, recent)),
+		"DELETE /v1/job/" + mine:                           serve([]byte(`{"EvalID":""}`)),
+		"GET /v1/vars":                                     serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d}]`, otherPool, old)),
 	}
 	for _, suffix := range []string{"", "/agent"} {
 		routes["DELETE /v1/var/nomad/jobs/"+mine+suffix] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
@@ -1529,10 +1527,10 @@ func TestLookupMapsEditedCaptures(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
-				"GET /v1/job/" + poolPrefix + "capture-clean-t1":             serve(captured(t, "clean.job.json")),
-				"GET /v1/job/" + poolPrefix + "capture-clean-t1/allocations": serve(edited(t, "clean.allocations.json", test.edit)),
+				"GET /v1/job/" + poolPrefix + "capture-clean":             serve(captured(t, "clean.job.json")),
+				"GET /v1/job/" + poolPrefix + "capture-clean/allocations": serve(edited(t, "clean.allocations.json", test.edit)),
 			})
-			if job, err := adapter.Lookup(context.Background(), "capture-clean", 1); err != nil || job.State != test.want {
+			if job, err := adapter.Lookup(context.Background(), "capture-clean"); err != nil || job.State != test.want {
 				t.Fatalf("lookup = %#v, %v; want state %v", job, err, test.want)
 			}
 		})
@@ -1880,6 +1878,9 @@ func TestInputAtTheVariableLimitOnNomad(t *testing.T) {
 	if got := runToOutputs(t, adapter, ctx, run)["edge.bin"].Data; !bytes.Equal(got, data) {
 		t.Fatalf("an input filling the variable came back as %d bytes, want %d", len(got), len(data))
 	}
+	if adapter.InlineLimit() > int64(len(data)) {
+		t.Fatalf("the declared inline limit %d is over the %d bytes that fill the variable", adapter.InlineLimit(), len(data))
+	}
 	over := testRun("over")
 	over.Inputs = []wherry.File{{Name: "edge.bin", Data: append(data, 0)}}
 	cleanupRun(t, adapter, over)
@@ -1887,7 +1888,7 @@ func TestInputAtTheVariableLimitOnNomad(t *testing.T) {
 	if outcome, _, err := adapter.Dispatch(ctx, over); outcome != wherry.OutcomeNothingCreated || !errors.As(err, &tooLarge) {
 		t.Fatalf("dispatch of one byte more = %v, %v; want nothing created", outcome, err)
 	}
-	if job, err := adapter.Lookup(ctx, over.ID, over.Turn); err != nil || job.State != wherry.JobAbsent {
+	if job, err := adapter.Lookup(ctx, over.ID); err != nil || job.State != wherry.JobAbsent {
 		t.Fatalf("lookup after the refusal = %+v, %v; want absent", job, err)
 	}
 }
@@ -1908,7 +1909,7 @@ func TestDirectoriesFollowTheDriver(t *testing.T) {
 			t.Errorf("%s directories %+v, want %+v", driver, got, want)
 		}
 		run := testRun("directories")
-		job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+		job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1942,7 +1943,7 @@ func TestBuildJobDeliversFilesThroughTemplates(t *testing.T) {
 	run := testRun("files")
 	run.Inputs = []wherry.File{{Name: "data.csv"}}
 	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519"}}
-	path := adapter.variablePath(run.ID, run.Turn)
+	path := adapter.variablePath(run.ID)
 	job, err := adapter.buildJob(run, path)
 	if err != nil {
 		t.Fatal(err)
@@ -1969,7 +1970,7 @@ func TestBuildJobIsolatesTheAgentsGit(t *testing.T) {
 	adapter.runtime.Env = map[string]string{"GIT_SSH_COMMAND": "ssh -o StrictHostKeyChecking=no", "GIT_SSH": "ssh", "GIT_CURL_VERBOSE": "1",
 		"GIT_CONFIG_GLOBAL": "/etc/agent-gitconfig", "GIT_TRACE": "/tmp/trace", "KEPT": "yes"}
 	run := testRun("isolated")
-	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+	job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2100,14 +2101,14 @@ func TestUnreachableNomadIsUnavailable(t *testing.T) {
 
 func TestSweepReportsDeletionsAndPendingJobs(t *testing.T) {
 	old, recent := time.Now().Add(-2*sweepGrace).UnixNano(), time.Now().UnixNano()
-	const dead, gone = poolPrefix + "old-t1", poolPrefix + "gone-t1"
+	const dead, gone = poolPrefix + "old", poolPrefix + "gone"
 	routes := map[string]http.HandlerFunc{
-		"GET /v1/jobs":                                        serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}}]`, dead, old, poolPrefix+"recent-t1", recent)),
-		"GET /v1/job/" + dead + "/allocations":                serve([]byte(`[]`)),
-		"GET /v1/job/" + poolPrefix + "recent-t1/allocations": serve([]byte(`[]`)),
-		"DELETE /v1/job/" + dead:                              serve([]byte(`{"EvalID":""}`)),
-		"GET /v1/vars":                                        serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d}]`, gone, old)),
-		"GET /v1/job/" + gone:                                 jobNotFound,
+		"GET /v1/jobs":                                     serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"r"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"r"}}]`, dead, old, poolPrefix+"recent", recent)),
+		"GET /v1/job/" + dead + "/allocations":             serve([]byte(`[]`)),
+		"GET /v1/job/" + poolPrefix + "recent/allocations": serve([]byte(`[]`)),
+		"DELETE /v1/job/" + dead:                           serve([]byte(`{"EvalID":""}`)),
+		"GET /v1/vars":                                     serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d}]`, gone, old)),
+		"GET /v1/job/" + gone:                              jobNotFound,
 	}
 	for _, path := range []string{dead, dead + "/agent", gone} {
 		routes["DELETE /v1/var/nomad/jobs/"+path] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
@@ -2123,7 +2124,7 @@ func TestSweepReportsDeletionsAndPendingJobs(t *testing.T) {
 }
 
 func TestDispatchReportsPlacement(t *testing.T) {
-	const job = poolPrefix + "run-placed-t1"
+	const job = poolPrefix + "run-placed"
 	routes := map[string]http.HandlerFunc{
 		"PUT /v1/var/nomad/jobs/" + job:       serve([]byte(`{}`)),
 		"GET /v1/job/" + job:                  jobNotFound,
@@ -2150,7 +2151,7 @@ func TestJobEnvCarriesTheModelOnlyWhenSet(t *testing.T) {
 	for model, want := range map[string]bool{"": false, "sonnet": true} {
 		run := testRun("model")
 		run.Model = model
-		job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+		job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2167,15 +2168,15 @@ func TestJobEnvCarriesTheModelOnlyWhenSet(t *testing.T) {
 // Every adapter of a pool lists the pool's jobs; each counts and sweeps only the jobs its meta names.
 func TestSweepCountsOnlyThisAdaptersJobs(t *testing.T) {
 	old, recent := time.Now().Add(-2*sweepGrace).UnixNano(), time.Now().UnixNano()
-	const waiting, expired = poolPrefix + "waiting-t1", poolPrefix + "expired-t1"
+	const waiting, expired = poolPrefix + "waiting", poolPrefix + "expired"
 	routes := map[string]http.HandlerFunc{
-		"GET /v1/jobs": serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}}]`,
+		"GET /v1/jobs": serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"r"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"r"}}]`,
 			waiting, recent, expired, old)),
 		"GET /v1/job/" + waiting + "/allocations": serve([]byte(`[]`)),
 		"GET /v1/job/" + expired + "/allocations": serve([]byte(`[]`)),
 		"DELETE /v1/job/" + expired:               serve([]byte(`{"EvalID":""}`)),
 		"GET /v1/vars":                            serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d}]`, waiting, old)),
-		"GET /v1/job/" + waiting:                  serve([]byte(`{"ID":"` + waiting + `","Status":"dead","Stop":false,"Meta":{"adapter":"container"}}`)),
+		"GET /v1/job/" + waiting:                  serve([]byte(`{"ID":"` + waiting + `","Status":"dead","Stop":false,"Meta":{"adapter":"container","run_id":"r"}}`)),
 	}
 	for _, path := range []string{waiting, expired, expired + "/agent"} {
 		routes["DELETE /v1/var/nomad/jobs/"+path] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
@@ -2237,12 +2238,12 @@ func TestHandledPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
 // adapter's.
 func TestSweepDeletesVariablesOfAnotherAdaptersExpiredJob(t *testing.T) {
 	old := time.Now().Add(-2 * sweepGrace).UnixNano()
-	const expired = poolPrefix + "removed-t1"
+	const expired = poolPrefix + "removed"
 	routes := map[string]http.HandlerFunc{
-		"GET /v1/jobs": serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"removed"}}]`, expired, old)),
+		"GET /v1/jobs": serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"removed","run_id":"r"}}]`, expired, old)),
 		"GET /v1/job/" + expired + "/allocations": serve([]byte(`[]`)),
 		"GET /v1/vars":           serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d},{"Path":"nomad/jobs/%s/agent","ModifyTime":%d}]`, expired, old, expired, old)),
-		"GET /v1/job/" + expired: serve([]byte(`{"ID":"` + expired + `","Status":"dead","Stop":false,"Meta":{"adapter":"removed"}}`)),
+		"GET /v1/job/" + expired: serve([]byte(`{"ID":"` + expired + `","Status":"dead","Stop":false,"Meta":{"adapter":"removed","run_id":"r"}}`)),
 	}
 	for _, path := range []string{expired, expired + "/agent"} {
 		routes["DELETE /v1/var/nomad/jobs/"+path] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
@@ -2363,14 +2364,14 @@ func TestUndecodableLogStreamKeepsItsBytesOut(t *testing.T) {
 }
 
 func TestReleaseReturnsOneFailureAsItIs(t *testing.T) {
-	path := "/v1/var/nomad/jobs/" + poolPrefix + "run-release-t1"
+	path := "/v1/var/nomad/jobs/" + poolPrefix + "run-release"
 	adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
 		"DELETE " + path: func(response http.ResponseWriter, _ *http.Request) {
 			http.Error(response, "denied", http.StatusForbidden)
 		},
 		"DELETE " + path + "/agent": func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) },
 	})
-	err := adapter.Release(context.Background(), "run-release", 1)
+	err := adapter.Release(context.Background(), "run-release")
 	if failure, ok := err.(*wherry.Error); !ok || failure.Class != "denied" {
 		t.Fatalf("release = %#v; want the one failure as a wherry.Error", err)
 	}
@@ -2384,7 +2385,7 @@ func TestBuildJobDefaultsResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("resources")
-	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+	job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
