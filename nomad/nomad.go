@@ -44,7 +44,7 @@ const (
 	cleanupWait = 10 * time.Second
 )
 
-// inputsSuffix turns a run variable path into its group's variable path, which holds a turn's inputs: Nomad's
+// inputsSuffix turns a run variable path into its group's variable path, which holds a run's inputs: Nomad's
 // implicit workload policy reads the group's variable, and no deeper path, beside the job's own.
 const inputsSuffix = "/" + taskName
 
@@ -91,7 +91,8 @@ type Adapter struct {
 	datacenters   []string
 	// uid and gid own the task's credential files when the runtime's user is numeric.
 	uid, gid *int
-	// prefix starts every job ID of the adapter's pool; agentJob matches those IDs and runVariable the variables of those jobs.
+	// prefix starts every job ID of the adapter's pool; agentJob matches those IDs and runVariable the variables of those
+	// jobs. A job is an agent job only with run_id meta, since a run ID is any DNS label.
 	prefix      string
 	agentJob    *regexp.Regexp
 	runVariable *regexp.Regexp
@@ -108,6 +109,13 @@ type metrics struct {
 	pending   float64
 	placement wherry.Histogram
 }
+
+// inlineLimit is the inline input bytes Dispatch accepts: maxVariable holds the inputs' names and base64 values, so
+// raw bytes take three quarters of it, less 4 KiB for the names. Dispatch keeps its check for longer names.
+const inlineLimit = maxVariable*3/4 - 4<<10
+
+// InlineLimit reports inlineLimit.
+func (adapter *Adapter) InlineLimit() int64 { return inlineLimit }
 
 // defaultCPU and defaultMemoryMB match the Kubernetes plugin's defaults: 2 GiB, and about half a core of a 2 GHz node.
 const (
@@ -183,8 +191,8 @@ func New(config Config, name, pool string, client *api.Client, logger hclog.Logg
 		name: name, client: client, namespace: config.Namespace, credentialEnv: config.CredentialEnv, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters,
 		uid: uid, gid: gid,
 		prefix:      prefix,
-		agentJob:    regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+$`),
-		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+-t[0-9]+)(` + regexp.QuoteMeta(inputsSuffix) + `)?$`),
+		agentJob:    regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `.+$`),
+		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+?)(` + regexp.QuoteMeta(inputsSuffix) + `)?$`),
 		metrics:     metrics{errors: map[string]float64{}, deletions: map[string]float64{}, placement: wherry.Histogram{Buckets: make([]uint64, len(wherry.PlacementBuckets))}},
 		logger:      logger,
 	}, nil
@@ -230,11 +238,11 @@ func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 }
 
 // Dispatch starts one run idempotently and returns once its task has started or ended. It removes the
-// turn's material only when Info confirms that no job exists. Inputs and task credentials travel base64-encoded,
+// run's material only when Info confirms that no job exists. Inputs and task credentials travel base64-encoded,
 // which the templates decode, so binary files arrive intact.
 func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Outcome, wherry.Handle, error) {
 	began := time.Now()
-	path := adapter.variablePath(run.ID, run.Turn)
+	path := adapter.variablePath(run.ID)
 	job, err := adapter.buildJob(run, path)
 	if err != nil {
 		return wherry.OutcomeNothingCreated, wherry.Handle{}, err
@@ -289,18 +297,18 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 // otherwise OutcomeUnknown with cause and everything left in place. A failed release is an error, which
 // the core resolves with Lookup.
 func (adapter *Adapter) notStarted(ctx context.Context, run wherry.Run, cause error) (wherry.Outcome, wherry.Handle, error) {
-	if _, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID, run.Turn), (&api.QueryOptions{}).WithContext(ctx)); !notFound(err) {
+	if _, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID), (&api.QueryOptions{}).WithContext(ctx)); !notFound(err) {
 		adapter.handled("read job", err)
 		return wherry.OutcomeUnknown, wherry.Handle{}, cause
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
 	defer cancel()
-	return wherry.OutcomeNothingCreated, wherry.Handle{}, adapter.Release(cleanupCtx, run.ID, run.Turn)
+	return wherry.OutcomeNothingCreated, wherry.Handle{}, adapter.Release(cleanupCtx, run.ID)
 }
 
-// Lookup finds a turn's existing job and waits for it as Dispatch does.
-func (adapter *Adapter) Lookup(ctx context.Context, runID string, turn int64) (wherry.Job, error) {
-	job, _, err := adapter.client.Jobs().Info(adapter.jobID(runID, turn), (&api.QueryOptions{}).WithContext(ctx))
+// Lookup finds a run's existing job and waits for it as Dispatch does.
+func (adapter *Adapter) Lookup(ctx context.Context, runID string) (wherry.Job, error) {
+	job, _, err := adapter.client.Jobs().Info(adapter.jobID(runID), (&api.QueryOptions{}).WithContext(ctx))
 	if notFound(err) {
 		return wherry.Job{}, nil
 	}
@@ -377,10 +385,10 @@ func jobState(alloc *api.AllocationListStub) wherry.JobState {
 	return wherry.JobNeverStarted
 }
 
-// buildJob builds the turn's batch job, whose templates read the run's material from the variables at path.
+// buildJob builds the run's batch job, whose templates read the run's material from the variables at path.
 func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) {
 	runtime := adapter.runtime
-	jobID := adapter.jobID(run.ID, run.Turn)
+	jobID := adapter.jobID(run.ID)
 	env := maps.Clone(runtime.Env)
 	if env == nil {
 		env = make(map[string]string)
@@ -445,7 +453,7 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 		ID: new(jobID), Name: new(jobID), Namespace: new(adapter.namespace), Type: new(api.JobTypeBatch),
 		NodePool: nodePool(adapter.nodePool), Datacenters: adapter.datacenters,
 		Meta: map[string]string{
-			"run_id": run.ID, "turn": strconv.FormatInt(run.Turn, 10), "attempt": strconv.FormatInt(run.Attempt, 10),
+			"run_id": run.ID, "attempt": strconv.FormatInt(run.Attempt, 10),
 			"adapter": run.Adapter, "agent": run.Agent,
 		},
 		TaskGroups: []*api.TaskGroup{{
@@ -464,12 +472,12 @@ func nodePool(name string) *string {
 	return &name
 }
 
-func (adapter *Adapter) jobID(runID string, turn int64) string {
-	return fmt.Sprintf("%s%s-t%d", adapter.prefix, runID, turn)
+func (adapter *Adapter) jobID(runID string) string {
+	return adapter.prefix + runID
 }
 
-func (adapter *Adapter) variablePath(runID string, turn int64) string {
-	return jobVariablePrefix + adapter.jobID(runID, turn)
+func (adapter *Adapter) variablePath(runID string) string {
+	return jobVariablePrefix + adapter.jobID(runID)
 }
 
 func notFound(err error) bool {
@@ -766,9 +774,9 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 	return adapter.failed("deregister job", err)
 }
 
-// Release deletes the per-turn variables holding the credentials, the prompt and the inputs.
-func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) error {
-	return adapter.release(ctx, adapter.jobID(runID, turn))
+// Release deletes the run's variables holding the credentials, the prompt and the inputs.
+func (adapter *Adapter) Release(ctx context.Context, runID string) error {
+	return adapter.release(ctx, adapter.jobID(runID))
 }
 
 func (adapter *Adapter) release(ctx context.Context, jobID string) error {
@@ -921,9 +929,9 @@ func fileMode(text string) fs.FileMode {
 	return mode
 }
 
-// Purge deregisters the turn's job with purge, then deletes its variables.
-func (adapter *Adapter) Purge(ctx context.Context, runID string, turn int64) error {
-	return adapter.purge(ctx, adapter.jobID(runID, turn))
+// Purge deregisters the run's job with purge, then deletes its variables.
+func (adapter *Adapter) Purge(ctx context.Context, runID string) error {
+	return adapter.purge(ctx, adapter.jobID(runID))
 }
 
 func (adapter *Adapter) purge(ctx context.Context, jobID string) error {
@@ -947,7 +955,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 	// expired holds other adapters' jobs dead for the grace period.
 	expired := map[string]bool{}
 	for _, job := range jobs {
-		if job.Status != "dead" || !adapter.agentJob.MatchString(job.ID) {
+		if job.Status != "dead" || !adapter.agentJob.MatchString(job.ID) || job.Meta["run_id"] == "" {
 			continue
 		}
 		own := job.Meta["adapter"] == adapter.name

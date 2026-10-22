@@ -2,7 +2,7 @@
 
 The wherry adapter plugin for [HashiCorp Nomad](https://developer.hashicorp.com/nomad).
 A wherry receiver starts it from its plugin directory for adapters of type
-`nomad`, and runs each of the receiver's turns as one Nomad batch job. One
+`nomad`, and runs each of the receiver's runs as one Nomad batch job. One
 plugin process hosts every `nomad` adapter of a receiver.
 
 ## Build
@@ -177,12 +177,12 @@ adapters:
 
 ## Agent jobs
 
-The plugin registers one batch job per turn, `agent-<pool>-<run>-t<turn>`,
+The plugin registers one batch job per run, `agent-<pool>-<run>`,
 in its namespace, node pool and datacenters, with restarts and rescheduling
 disabled. `<pool>` is the first 12 hexadecimal digits of the SHA-256 of the
 pool name, since Nomad limits a variable path to 128 characters. The job's
 task group `agent` holds the task `agent`, built from the adapter's
-`runtime`, alone. The job's metadata holds `run_id`, `turn`, `attempt`,
+`runtime`, alone. The job's metadata holds `run_id`, `attempt`,
 `adapter` and `agent`, which the receiver reads to decide whether to adopt
 the job.
 
@@ -263,14 +263,16 @@ it reads the logs in CRI format.
 ### Variables
 
 The prompt and the credentials travel in the Nomad variable
-`nomad/jobs/agent-<pool>-<run>-t<turn>`, which the job's own workload
-identity reads. The turn's input files travel in the job's group variable,
-`nomad/jobs/agent-<pool>-<run>-t<turn>/agent`, one item per file holding
+`nomad/jobs/agent-<pool>-<run>`, which the job's own workload
+identity reads. The run's input files travel in the job's group variable,
+`nomad/jobs/agent-<pool>-<run>/agent`, one item per file holding
 its base64 encoding, since Nomad's implicit workload policy reads no deeper
 path. Nomad caps a variable at 64 KiB of item names and values together,
-so a turn's inputs hold about 48 KiB; Dispatch refuses a turn over that,
-naming the input, and creates nothing. The plugin deletes the variables
-when the turn ends.
+so a run's inputs hold about 48 KiB. The plugin declares an inline limit
+of 45056 bytes, which leaves 4 KiB for the inputs' names, so a host sends
+larger inputs through the pool's bucket; Dispatch refuses a run over the
+variable, naming the input, and creates nothing. The plugin deletes the
+variables when the run ends.
 
 ### Sweep
 
@@ -279,14 +281,14 @@ On each sweep the receiver requests
 the plugin deletes the variables of jobs that have stopped, and of jobs
 never registered within 10 minutes, and purges agent jobs that have been
 dead for 10 minutes. A receiver sweeps only its own pool's jobs and
-variables. Each adapter purges and counts only the jobs whose `adapter`
+variables, and treats as an agent job only one with `run_id` meta. Each adapter purges and counts only the jobs whose `adapter`
 meta names it, and deletes the variables of any of the pool's jobs dead
 for 10 minutes, since they hold the prompt and credentials. A dead job
 whose adapter is no longer in the receiver's configuration stays until
 Nomad's garbage collection or a manual purge; its variables are swept. The
 sweep needs a Nomad server that returns job `Meta` in list responses,
 `GET /v1/jobs?meta=true`. The 10 minutes run from a job's last allocation
-change, so a turn whose job ended while no pool member could hold it for
+change, so a run whose job ended while no pool member could hold it for
 longer than that runs again from the start on its next delivery.
 
 ### S3 inputs
@@ -327,7 +329,7 @@ undo this.
 
 ## Metrics
 
-The plugin speaks adapter protocol version 5, and a receiver of another
+The plugin speaks adapter protocol version 7, and a receiver of another
 protocol version refuses it, so upgrade it with the receiver. For each
 adapter it reports these families, which the receiver serves on its
 `/metrics` with the adapter's name as `adapter`:

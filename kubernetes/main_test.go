@@ -130,7 +130,7 @@ func conformanceSettings(t *testing.T) (wherry.Settings, wherry.Settings) {
 
 func TestConformance(t *testing.T) {
 	completes, neverStarts := conformanceSettings(t)
-	adaptertest.Run(t, newAdapter, completes, neverStarts)
+	adaptertest.Run(t, newAdapter, completes, neverStarts, inlineLimit)
 }
 
 // TestConformanceOverTheLink runs the suite against the built plugin, through the receiver's side of the link.
@@ -147,7 +147,7 @@ func TestConformanceOverTheLink(t *testing.T) {
 	defer plugin.Close()
 	adaptertest.Run(t, func(settings wherry.Settings, _ hclog.Logger) (wherry.Adapter, error) {
 		return plugin.Configure(settings)
-	}, completes, neverStarts)
+	}, completes, neverStarts, inlineLimit)
 }
 
 // admitted wraps an adapter and records the SCC each pod it dispatches was admitted under.
@@ -179,7 +179,7 @@ func TestRoleSuffices(t *testing.T) {
 			return nil, err
 		}
 		return admitted{Adapter: built, t: t, sccs: sccs}, nil
-	}, completes, neverStarts)
+	}, completes, neverStarts, inlineLimit)
 	close(sccs)
 	count := 0
 	for scc := range sccs {
