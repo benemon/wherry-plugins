@@ -165,7 +165,7 @@ func New(config Config, name, pool string, client *api.Client, logger hclog.Logg
 	var uid, gid *int
 	if user := config.Runtime.User; user != "" {
 		match := runtimeUser.FindStringSubmatch(user)
-		if match == nil {
+		if match == nil || user == "root" {
 			return nil, errors.New("runtime user must be a user name or UID[:GID] other than root")
 		}
 		// The client resolves a name, so the plugin can give credential files only a numeric owner.
@@ -781,15 +781,17 @@ func (adapter *Adapter) Release(ctx context.Context, runID string) error {
 
 func (adapter *Adapter) release(ctx context.Context, jobID string) error {
 	path := jobVariablePrefix + jobID
-	// A single error is returned as it is, so it reaches the receiver with its op and class.
-	run, inputs := adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+inputsSuffix)
-	switch {
-	case run == nil:
-		return inputs
-	case inputs == nil:
-		return run
+	return joined([]error{adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+inputsSuffix)})
+}
+
+// joined returns the one non-nil error in errs as it is, so it reaches the receiver with its op and class, and joins
+// several.
+func joined(errs []error) error {
+	errs = slices.DeleteFunc(errs, func(err error) bool { return err == nil })
+	if len(errs) == 1 {
+		return errs[0]
 	}
-	return errors.Join(run, inputs)
+	return errors.Join(errs...)
 }
 
 // Collect lists the outputs directory once the allocation is terminal. The listing's modes are lstat's, and the API's
@@ -993,7 +995,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 	prefix := jobVariablePrefix + adapter.prefix
 	variables, _, err := adapter.client.Variables().PrefixList(prefix, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return errors.Join(append(errs, adapter.failed("list variables "+prefix, err))...)
+		return joined(append(errs, adapter.failed("list variables "+prefix, err)))
 	}
 	for _, variable := range variables {
 		match := adapter.runVariable.FindStringSubmatch(variable.Path)
@@ -1029,7 +1031,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 		adapter.metrics.deletions["variable"]++
 		adapter.metrics.mu.Unlock()
 	}
-	return errors.Join(errs...)
+	return joined(errs)
 }
 
 func (adapter *Adapter) deleteVariable(ctx context.Context, path string) error {
