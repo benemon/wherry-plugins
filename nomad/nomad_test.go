@@ -233,15 +233,19 @@ func TestPerTurnJobIDs(t *testing.T) {
 
 func TestNewValidatesConfig(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
-		"driver":           func(config *Config) { config.Runtime = Runtime{} },
-		"credential env":   func(config *Config) { config.CredentialEnv = `X={{ .prompt }}` },
-		"negative uid":     func(config *Config) { config.Runtime.User = "-1" },
-		"gid not a number": func(config *Config) { config.Runtime.User = "1001:x" },
-		"user name":        func(config *Config) { config.Runtime.User = "Bad Name" },
-		"root uid":         func(config *Config) { config.Runtime.User = "0" },
-		"leading zero":     func(config *Config) { config.Runtime.User = "0001" },
-		"uid over 32 bits": func(config *Config) { config.Runtime.User = "4294967296" },
-		"uid over an int":  func(config *Config) { config.Runtime.User = "99999999999999999999" },
+		"driver":            func(config *Config) { config.Runtime = Runtime{} },
+		"credential env":    func(config *Config) { config.CredentialEnv = `X={{ .prompt }}` },
+		"negative uid":      func(config *Config) { config.Runtime.User = "-1" },
+		"gid not a number":  func(config *Config) { config.Runtime.User = "1001:x" },
+		"user name":         func(config *Config) { config.Runtime.User = "Bad Name" },
+		"root uid":          func(config *Config) { config.Runtime.User = "0" },
+		"env name":          func(config *Config) { config.Runtime.Env = map[string]string{"BAD-NAME": "x"} },
+		"credential HOME":   func(config *Config) { config.CredentialEnv = "HOME" },
+		"credential WHERRY": func(config *Config) { config.CredentialEnv = "WHERRY_MODEL" },
+		"credential git":    func(config *Config) { config.CredentialEnv = "GIT_CONFIG_GLOBAL" },
+		"leading zero":      func(config *Config) { config.Runtime.User = "0001" },
+		"uid over 32 bits":  func(config *Config) { config.Runtime.User = "4294967296" },
+		"uid over an int":   func(config *Config) { config.Runtime.User = "99999999999999999999" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := testConfig("http://127.0.0.1:1")
@@ -2369,5 +2373,22 @@ func TestReleaseReturnsOneFailureAsItIs(t *testing.T) {
 	err := adapter.Release(context.Background(), "run-release", 1)
 	if failure, ok := err.(*wherry.Error); !ok || failure.Class != "denied" {
 		t.Fatalf("release = %#v; want the one failure as a wherry.Error", err)
+	}
+}
+
+func TestBuildJobDefaultsResources(t *testing.T) {
+	config := testConfig("http://127.0.0.1:1")
+	config.Runtime.Resources = Resources{}
+	adapter, err := build(config, testPool, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := testRun("resources")
+	job, err := adapter.buildJob(run, adapter.variablePath(run.ID, run.Turn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resources := job.TaskGroups[0].Tasks[0].Resources; *resources.CPU != defaultCPU || *resources.MemoryMB != defaultMemoryMB {
+		t.Fatalf("resources %d MHz %d MiB, want the defaults", *resources.CPU, *resources.MemoryMB)
 	}
 }
