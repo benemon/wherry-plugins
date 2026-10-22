@@ -73,6 +73,13 @@ sbom: $(CYCLONEDX) ## Write a CycloneDX SBOM for PLUGIN
 	@test -n "$(PLUGIN)" || { echo "FAIL: set PLUGIN"; exit 1; }
 	mkdir -p $(DIST)
 	cd $(PLUGIN) && $(CYCLONEDX) app -json -licenses -main . -output ../$(DIST)/wherry-plugin-$(PLUGIN).cdx.json .
+	@# The tool versions the module from root v* tags only, so a PLUGIN/v* release gets a pseudo-version.
+	@if [ "$(VERSION)" != dev ]; then \
+		f=$(DIST)/wherry-plugin-$(PLUGIN).cdx.json; old=$$(jq -r .metadata.component.version $$f); \
+		jq --arg old "$$old" --arg new "$(VERSION)" \
+			'(.metadata.component.version, .metadata.component.purl, .metadata.component["bom-ref"], (.dependencies[] | select(.ref | contains($$old)) | .ref)) |= (split($$old) | join($$new))' \
+			$$f > $$f.tmp && mv $$f.tmp $$f; \
+	fi
 
 .PHONY: dist
 dist: ## Cross-compile PLUGIN's release archives and checksums.txt into DIST
