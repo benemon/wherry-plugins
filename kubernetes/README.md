@@ -43,7 +43,7 @@ On a receiver outside the cluster:
 2. Start the receiver with `--plugin-dir` naming that directory:
 
    ```sh
-   wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir /usr/local/libexec/wherry/plugins
+   wherry receiver run --bundle-file FILE --state-dir DIR --plugin-dir /usr/local/libexec/wherry/plugins
    ```
 
 Agent pods still run the helper from `helper_image`, which must be the

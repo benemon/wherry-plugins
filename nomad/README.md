@@ -30,7 +30,7 @@ archives and `checksums.txt` into `dist`.
 2. Start the receiver with `--plugin-dir` naming that directory:
 
    ```sh
-   wherry receiver --bundle-file FILE --state-dir DIR --plugin-dir /usr/local/libexec/wherry/plugins
+   wherry receiver run --bundle-file FILE --state-dir DIR --plugin-dir /usr/local/libexec/wherry/plugins
    ```
 
 The receiver checks the plugin directory and binary before it runs them;
