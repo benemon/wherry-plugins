@@ -56,7 +56,6 @@ const (
 	labelAdapter      = "wherry.io/adapter"
 	labelAgent        = "wherry.io/agent"
 	labelRun          = "wherry.io/run"
-	labelTurn         = "wherry.io/turn"
 	annotationAttempt = "wherry.io/attempt"
 
 	workPath        = "/wherry"
@@ -116,7 +115,14 @@ type Resources struct {
 	EphemeralStorage string `json:"ephemeral_storage"`
 }
 
-// Adapter runs each turn as one pod and one Secret in a namespace.
+// inlineLimit is the inline input bytes the adapter declares: the run's Secret holds them beside the prompt and
+// credentials within maxSecret, so half of it leaves the rest room. secretData keeps its check for the whole.
+const inlineLimit = maxSecret / 2
+
+// InlineLimit reports inlineLimit.
+func (adapter *Adapter) InlineLimit() int64 { return inlineLimit }
+
+// Adapter runs each run as one pod and one Secret in a namespace.
 type Adapter struct {
 	name, pool, namespace string
 	credentialEnv         string
@@ -209,7 +215,7 @@ func image(value string) bool {
 	return value != "" && !strings.ContainsFunc(value, unicode.IsSpace)
 }
 
-// New builds the adapter named name for a pool's turns through client.
+// New builds the adapter named name for a pool's runs through client.
 func New(config Config, name, pool string, client *rest.Config, logger hclog.Logger) (*Adapter, error) {
 	switch {
 	case len(validation.IsDNS1123Label(config.Namespace)) > 0:
@@ -363,14 +369,14 @@ func command(args ...string) []string {
 	return append([]string{helperPath, helper.Protocol}, args...)
 }
 
-// jobName is the name of a turn's pod and Secret.
-func jobName(pool, runID string, turn int64) string {
+// jobName is the name of a run's pod and Secret.
+func jobName(pool, runID string) string {
 	sum := sha256.Sum256([]byte(pool))
-	return fmt.Sprintf("%s%s-%s-t%d", jobPrefix, hex.EncodeToString(sum[:])[:12], runID, turn)
+	return fmt.Sprintf("%s%s-%s", jobPrefix, hex.EncodeToString(sum[:])[:12], runID)
 }
 
-func (adapter *Adapter) jobName(runID string, turn int64) string {
-	return jobName(adapter.pool, runID, turn)
+func (adapter *Adapter) jobName(runID string) string {
+	return jobName(adapter.pool, runID)
 }
 
 func (adapter *Adapter) pods() corev1client.PodInterface {
@@ -395,7 +401,7 @@ func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 	return namespace.Status.Phase == corev1.NamespaceActive, nil
 }
 
-// secretData is a turn's Secret data, refused when a key or the values together pass the API server's limits.
+// secretData is a run's Secret data, refused when a key or the values together pass the API server's limits.
 func secretData(run wherry.Run) (map[string][]byte, error) {
 	data := map[string][]byte{"prompt": run.Prompt}
 	size := len(run.Prompt) + len(run.Credential)
@@ -425,7 +431,7 @@ func secretData(run wherry.Run) (map[string][]byte, error) {
 
 func (adapter *Adapter) labels(run wherry.Run) map[string]string {
 	return map[string]string{
-		labelPool: adapter.pool, labelAdapter: run.Adapter, labelAgent: run.Agent, labelRun: run.ID, labelTurn: strconv.FormatInt(run.Turn, 10),
+		labelPool: adapter.pool, labelAdapter: run.Adapter, labelAgent: run.Agent, labelRun: run.ID,
 	}
 }
 
@@ -433,7 +439,7 @@ func locked() *corev1.SecurityContext {
 	return &corev1.SecurityContext{AllowPrivilegeEscalation: new(false), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}, ReadOnlyRootFilesystem: new(true)}
 }
 
-// buildPod builds the turn's pod, whose init container copies its material from the Secret name.
+// buildPod builds the run's pod, whose init container copies its material from the Secret name.
 func (adapter *Adapter) buildPod(run wherry.Run, name string) *corev1.Pod {
 	env := AgentEnv(adapter.runtime.Env)
 	env["HOME"] = workPath
@@ -525,7 +531,7 @@ func (adapter *Adapter) buildPod(run wherry.Run, name string) *corev1.Pod {
 // Dispatch starts a turn idempotently and returns once its agent has started or its pod has ended.
 func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Outcome, wherry.Handle, error) {
 	began := time.Now()
-	name := adapter.jobName(run.ID, run.Turn)
+	name := adapter.jobName(run.ID)
 	data, err := secretData(run)
 	if err != nil {
 		return wherry.OutcomeNothingCreated, wherry.Handle{}, err
@@ -570,7 +576,7 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 	return wherry.OutcomeCreated, handle, nil
 }
 
-// upsertSecret writes the turn's Secret over any an earlier attempt left.
+// upsertSecret writes the run's Secret over any an earlier attempt left.
 func (adapter *Adapter) upsertSecret(ctx context.Context, name string, labels map[string]string, data map[string][]byte) error {
 	existing, err := adapter.secrets().Get(ctx, name, metav1.GetOptions{})
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: adapter.namespace, Labels: labels}, Type: corev1.SecretTypeOpaque, Data: data}
@@ -809,7 +815,7 @@ func started(agent *corev1.ContainerStatus) bool {
 	return agent.State.Running != nil || agent.Started != nil && *agent.Started
 }
 
-// judge reads a turn's state and terminal from its pod; settled is false while the pod is pending.
+// judge reads a run's state and terminal from its pod; settled is false while the pod is pending.
 func judge(pod *corev1.Pod) (wherry.JobState, wherry.Terminal, bool) {
 	agent := status(pod.Status.ContainerStatuses, "agent")
 	terminal := wherry.Terminal{Started: started(agent), Node: pod.Spec.NodeName}
@@ -874,9 +880,9 @@ func neverStarted(pod *corev1.Pod, agent *corev1.ContainerStateTerminated) (stri
 	return "", ""
 }
 
-// Lookup finds a turn's existing pod and waits for it as Dispatch does.
-func (adapter *Adapter) Lookup(ctx context.Context, runID string, turn int64) (wherry.Job, error) {
-	name := adapter.jobName(runID, turn)
+// Lookup finds a run's existing pod and waits for it as Dispatch does.
+func (adapter *Adapter) Lookup(ctx context.Context, runID string) (wherry.Job, error) {
+	name := adapter.jobName(runID)
 	pod, err := adapter.pods().Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return wherry.Job{}, nil
@@ -1198,9 +1204,9 @@ func (adapter *Adapter) read(ctx context.Context, pod, name string, size int64) 
 	return data, nil
 }
 
-// Release deletes the turn's Secret and ends the outputs holder, so the pod frees its node's requests.
-func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) error {
-	name := adapter.jobName(runID, turn)
+// Release deletes the run's Secret and ends the outputs holder, so the pod frees its node's requests.
+func (adapter *Adapter) Release(ctx context.Context, runID string) error {
+	name := adapter.jobName(runID)
 	secretErr := adapter.deleteSecret(ctx, name)
 	var podErr error
 	switch pod, err := adapter.pods().Get(ctx, name, metav1.GetOptions{}); {
@@ -1224,9 +1230,9 @@ func (adapter *Adapter) Release(ctx context.Context, runID string, turn int64) e
 	return errors.Join(secretErr, podErr)
 }
 
-// Purge deletes the turn's pod at once, waits for it to go, then deletes its Secret.
-func (adapter *Adapter) Purge(ctx context.Context, runID string, turn int64) error {
-	return adapter.purge(ctx, adapter.jobName(runID, turn))
+// Purge deletes the run's pod at once, waits for it to go, then deletes its Secret.
+func (adapter *Adapter) Purge(ctx context.Context, runID string) error {
+	return adapter.purge(ctx, adapter.jobName(runID))
 }
 
 // purge waits for the pod to go, since a terminating pod still holds its name.
@@ -1269,8 +1275,7 @@ func (adapter *Adapter) deleteSecret(ctx context.Context, name string) error {
 // ownName reports whether an object's name is the job name its own labels give.
 func ownName(object metav1.Object) bool {
 	labels := object.GetLabels()
-	turn, err := strconv.ParseInt(labels[labelTurn], 10, 64)
-	return err == nil && object.GetName() == jobName(labels[labelPool], labels[labelRun], turn)
+	return labels[labelRun] != "" && object.GetName() == jobName(labels[labelPool], labels[labelRun])
 }
 
 // endOf reports whether a pod has ended, and when.
@@ -1293,7 +1298,7 @@ func endOf(pod *corev1.Pod) (bool, time.Time) {
 	return true, at
 }
 
-// Sweep purges this adapter's pods ended for the grace period and deletes the Secrets no live turn needs.
+// Sweep purges this adapter's pods ended for the grace period and deletes the Secrets no live run needs.
 func (adapter *Adapter) Sweep(ctx context.Context) error {
 	selector := metav1.ListOptions{LabelSelector: labelPool + "=" + adapter.pool}
 	pods, err := adapter.pods().List(ctx, selector)

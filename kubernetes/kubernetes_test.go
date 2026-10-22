@@ -76,7 +76,7 @@ func build(config Config, pool, token string) (*Adapter, error) {
 
 func testRun(name string) wherry.Run {
 	return wherry.Run{
-		ID: "run-" + name, Adapter: testAdapter, Agent: "coder", Turn: 1, Attempt: 2,
+		ID: "run-" + name, Adapter: testAdapter, Agent: "coder", Attempt: 2,
 		Prompt: []byte("hello-prompt"), Credential: []byte("test-credential"),
 	}
 }
@@ -474,7 +474,7 @@ func startAgent(pod *corev1.Pod) {
 func (api *fakeAPI) agentPod(t *testing.T, adapter *Adapter, name string, edit func(*corev1.Pod)) *corev1.Pod {
 	t.Helper()
 	run := testRun(name)
-	pod := adapter.buildPod(run, adapter.jobName(run.ID, run.Turn))
+	pod := adapter.buildPod(run, adapter.jobName(run.ID))
 	assignUser(pod)
 	if edit != nil {
 		edit(pod)
@@ -684,10 +684,10 @@ func plainAdapter(t *testing.T, edit func(*Config)) *Adapter {
 func TestBuildPodFromRuntime(t *testing.T) {
 	adapter := plainAdapter(t, nil)
 	run := testRun("build")
-	name := adapter.jobName(run.ID, run.Turn)
+	name := adapter.jobName(run.ID)
 	pod := adapter.buildPod(run, name)
-	wantLabels := map[string]string{labelPool: testPool, labelAdapter: testAdapter, labelAgent: "coder", labelRun: run.ID, labelTurn: "1"}
-	if pod.Name != poolPrefix+"run-build-t1" || pod.Namespace != testNamespace || !maps.Equal(pod.Labels, wantLabels) ||
+	wantLabels := map[string]string{labelPool: testPool, labelAdapter: testAdapter, labelAgent: "coder", labelRun: run.ID}
+	if pod.Name != poolPrefix+"run-build" || pod.Namespace != testNamespace || !maps.Equal(pod.Labels, wantLabels) ||
 		pod.Annotations[annotationAttempt] != "2" || pod.Spec.RestartPolicy != corev1.RestartPolicyNever || *pod.Spec.TerminationGracePeriodSeconds != 15 {
 		t.Fatalf("unexpected pod identity: %#v", pod.ObjectMeta)
 	}
@@ -790,7 +790,7 @@ func TestPodSpecHoldsNoMaterial(t *testing.T) {
 	run.Inputs = []wherry.File{{Name: "notes.md", Data: []byte("input-bytes-secret")}}
 	run.Credentials = []wherry.Secret{{Name: "deploy", File: "id_ed25519", Value: []byte("task-credential-secret")}}
 	run.Fetches = []wherry.Fetch{{Name: "data.csv", URL: "https://storage.example.com/data.csv?X-Amz-Signature=signature-secret", Size: 3, SHA256: strings.Repeat("b", 64)}}
-	pod := adapter.buildPod(run, adapter.jobName(run.ID, run.Turn))
+	pod := adapter.buildPod(run, adapter.jobName(run.ID))
 	encoded := podJSON(t, pod)
 	for _, secret := range []string{"hello-prompt", "test-credential", "input-bytes-secret", "task-credential-secret", "signature-secret", "storage.example.com"} {
 		if strings.Contains(encoded, secret) {
@@ -954,12 +954,12 @@ func TestNewValidatesConfig(t *testing.T) {
 	}
 }
 
-func TestPerTurnPodNames(t *testing.T) {
+func TestPodNamesAreTheRunID(t *testing.T) {
 	adapter := plainAdapter(t, nil)
-	if first, second := adapter.jobName("run-a", 1), adapter.jobName("run-a", 2); first != poolPrefix+"run-a-t1" || second != poolPrefix+"run-a-t2" {
-		t.Fatalf("names %q, %q", first, second)
+	if name := adapter.jobName("run-a"); name != poolPrefix+"run-a" {
+		t.Fatalf("name %q", name)
 	}
-	if long := adapter.jobName(strings.Repeat("r", 63), 1<<62); len(long) > 103 {
+	if long := adapter.jobName(strings.Repeat("r", 63)); len(long) > 103 {
 		t.Fatalf("name of %d characters; want at most 103", len(long))
 	}
 }
@@ -998,7 +998,7 @@ func TestDispatchCreatesSecretThenPod(t *testing.T) {
 	run.Inputs = []wherry.File{{Name: "notes.md", Data: []byte("notes")}}
 	run.Credentials = []wherry.Secret{{Name: "deploy", File: "id_ed25519", Value: []byte("key")}}
 	handle := dispatch(t, adapter, run)
-	name := poolPrefix + "run-create-t1"
+	name := poolPrefix + "run-create"
 	base := "/api/v1/namespaces/agents/"
 	want := []string{"GET " + base + "pods/" + name, "GET " + base + "secrets/" + name, "POST " + base + "secrets", "POST " + base + "pods", "GET " + base + "pods/" + name}
 	if got := paths(api.recorded(), ""); !slices.Equal(got, want) {
@@ -1067,11 +1067,11 @@ func TestDispatchLeavesTheSecretOfAnExistingPod(t *testing.T) {
 func TestDispatchRefusesAForeignPod(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter, execer := api.adapter(t)
-	api.put(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: poolPrefix + "run-foreign-t1"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent"}}}})
+	api.put(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: poolPrefix + "run-foreign"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent"}}}})
 	if outcome, _, err := adapter.Dispatch(context.Background(), testRun("foreign")); outcome != wherry.OutcomeUnknown || err == nil || err.Error() != "existing pod is not an agent pod" {
 		t.Fatalf("dispatch onto a foreign pod = %v, %v", outcome, err)
 	}
-	if len(execer.recorded()) != 0 || api.secret(poolPrefix+"run-foreign-t1") != nil {
+	if len(execer.recorded()) != 0 || api.secret(poolPrefix+"run-foreign") != nil {
 		t.Fatalf("execs %v or a Secret for a foreign pod", execer.recorded())
 	}
 }
@@ -1079,7 +1079,7 @@ func TestDispatchRefusesAForeignPod(t *testing.T) {
 func TestDispatchOverwritesStaleSecret(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter, _ := api.adapter(t)
-	name := poolPrefix + "run-stale-t1"
+	name := poolPrefix + "run-stale"
 	api.set(func() {
 		api.secrets[name] = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, ResourceVersion: "41"}, Data: map[string][]byte{"prompt": []byte("stale"), "inputs.old": []byte("old")}}
 	})
@@ -1104,7 +1104,7 @@ func failing(code int, method, suffix string) func(http.ResponseWriter, *http.Re
 }
 
 func TestDispatchFailureOutcomes(t *testing.T) {
-	name := poolPrefix + "run-outcome-t1"
+	name := poolPrefix + "run-outcome"
 	for _, test := range []struct {
 		test      string
 		intercept func(*fakeAPI) func(http.ResponseWriter, *http.Request) bool
@@ -1267,7 +1267,7 @@ func TestDispatchRefusesPodsOfMixedUsers(t *testing.T) {
 			if outcome != wherry.OutcomeNothingCreated || err == nil || err.Error() != "agent pod containers run as different users; set runtime.user" {
 				t.Fatalf("dispatch = %v, %v; want mixed users refused", outcome, err)
 			}
-			if api.pod(poolPrefix+"run-mixed-t1") != nil || api.secret(poolPrefix+"run-mixed-t1") != nil {
+			if api.pod(poolPrefix+"run-mixed") != nil || api.secret(poolPrefix+"run-mixed") != nil {
 				t.Fatal("the refused pod or its Secret remains")
 			}
 		})
@@ -1288,7 +1288,7 @@ func TestDispatchTimeoutDeletesThePod(t *testing.T) {
 	if outcome, _, err := adapter.Dispatch(ctx, testRun("timeout")); outcome != wherry.OutcomeUnknown || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("dispatch = %v, %v; want the deadline", outcome, err)
 	}
-	name := poolPrefix + "run-timeout-t1"
+	name := poolPrefix + "run-timeout"
 	if api.pod(name) != nil {
 		t.Fatal("the timed-out pod remains")
 	}
@@ -1422,7 +1422,7 @@ func TestDispatchDeliversFetches(t *testing.T) {
 	files := map[string][]byte{"data.csv": []byte("a,b\n1,2\n"), "model.bin": {0, 1, 2, 255}}
 	store := newObjects(t, serveFiles(files))
 	run := fetchRun("fetch", store, files)
-	name := adapter.jobName(run.ID, run.Turn)
+	name := adapter.jobName(run.ID)
 	startInit(t, api, execer, name, run.Fetches, nil)
 	dispatch(t, adapter, run)
 	for file, data := range files {
@@ -1443,7 +1443,7 @@ func TestDispatchWaitsForTheInitContainer(t *testing.T) {
 	run := fetchRun("init", newObjects(t, serveFiles(files)), files)
 	var mu sync.Mutex
 	initRunning := false
-	startInit(t, api, execer, adapter.jobName(run.ID, run.Turn), run.Fetches, func(reads int) bool {
+	startInit(t, api, execer, adapter.jobName(run.ID), run.Fetches, func(reads int) bool {
 		mu.Lock()
 		defer mu.Unlock()
 		initRunning = reads > 3
@@ -1486,7 +1486,7 @@ func TestDispatchRetriesAFailedPut(t *testing.T) {
 			adapter, execer := api.adapter(t)
 			store := newObjects(t, serveFiles(files))
 			run := fetchRun("retry", store, files)
-			startInit(t, api, execer, adapter.jobName(run.ID, run.Turn), run.Fetches, nil)
+			startInit(t, api, execer, adapter.jobName(run.ID), run.Fetches, nil)
 			puts := 0
 			execer.set(func() {
 				execer.fail = func(_ string, args []string) error {
@@ -1514,7 +1514,7 @@ func TestDispatchRetriesAFailedPut(t *testing.T) {
 			if err != nil || outcome != wherry.OutcomeCreated {
 				t.Fatalf("dispatch = %v, %v", outcome, err)
 			}
-			job, err := adapter.Lookup(context.Background(), run.ID, run.Turn)
+			job, err := adapter.Lookup(context.Background(), run.ID)
 			if err != nil || job.State != test.state || job.Handle.Name != handle.Name {
 				t.Fatalf("lookup = %+v, %v; want state %v", job, err, test.state)
 			}
@@ -1528,7 +1528,7 @@ func TestDispatchStopsDeliveringToAnEndedInitContainer(t *testing.T) {
 	adapter, execer := api.adapter(t)
 	files := map[string][]byte{"a.csv": []byte("a"), "b.csv": []byte("b")}
 	run := fetchRun("ended", newObjects(t, serveFiles(files)), files)
-	name := adapter.jobName(run.ID, run.Turn)
+	name := adapter.jobName(run.ID)
 	init := startInit(t, api, execer, name, run.Fetches, nil)
 	execer.set(func() {
 		execer.fail = func(_ string, args []string) error {
@@ -1573,7 +1573,7 @@ func TestFetchRefusesRedirects(t *testing.T) {
 		_, _ = response.Write(files["data.csv"])
 	})
 	run := fetchRun("redirect", store, files)
-	startInit(t, api, execer, adapter.jobName(run.ID, run.Turn), run.Fetches, nil)
+	startInit(t, api, execer, adapter.jobName(run.ID), run.Fetches, nil)
 	dispatch(t, adapter, run)
 	if store.count("/elsewhere/data.csv") != 0 {
 		t.Fatal("the fetch followed a redirect")
@@ -1592,7 +1592,7 @@ func TestFetchBoundsTheBody(t *testing.T) {
 		_, _ = response.Write(bytes.Repeat([]byte("x"), 8<<20))
 	})
 	run := fetchRun("bounded", store, files)
-	startInit(t, api, execer, adapter.jobName(run.ID, run.Turn), run.Fetches, nil)
+	startInit(t, api, execer, adapter.jobName(run.ID), run.Fetches, nil)
 	dispatch(t, adapter, run)
 	execer.mu.Lock()
 	defer execer.mu.Unlock()
@@ -1610,9 +1610,9 @@ func TestFetchFailureNeverStartsTheAgent(t *testing.T) {
 		http.Error(response, "AccessDenied", http.StatusForbidden)
 	})
 	run := fetchRun("denied", store, files)
-	startInit(t, api, execer, adapter.jobName(run.ID, run.Turn), run.Fetches, nil)
+	startInit(t, api, execer, adapter.jobName(run.ID), run.Fetches, nil)
 	handle := dispatch(t, adapter, run)
-	job, err := adapter.Lookup(context.Background(), run.ID, run.Turn)
+	job, err := adapter.Lookup(context.Background(), run.ID)
 	if err != nil || job.State != wherry.JobNeverStarted {
 		t.Fatalf("lookup = %+v, %v; want never started", job, err)
 	}
@@ -1625,7 +1625,7 @@ func TestFetchFailureNeverStartsTheAgent(t *testing.T) {
 func TestLookupMissingPod(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter, _ := api.adapter(t)
-	if job, err := adapter.Lookup(context.Background(), "run-missing", 1); err != nil || job.State != wherry.JobAbsent {
+	if job, err := adapter.Lookup(context.Background(), "run-missing"); err != nil || job.State != wherry.JobAbsent {
 		t.Fatalf("lookup = %+v, %v; want absent", job, err)
 	}
 }
@@ -1635,12 +1635,12 @@ func TestLookupReadsDispatchMetadata(t *testing.T) {
 	adapter, _ := api.adapter(t)
 	run := testRun("meta")
 	handle := dispatch(t, adapter, run)
-	job, err := adapter.Lookup(context.Background(), run.ID, run.Turn)
+	job, err := adapter.Lookup(context.Background(), run.ID)
 	if err != nil || job.State != wherry.JobRunning || job.Attempt != 2 || job.Adapter != testAdapter || job.Agent != "coder" || job.Handle.Name != handle.Name {
 		t.Fatalf("lookup = %+v, %v", job, err)
 	}
 	api.agentPod(t, adapter, "unannotated", func(pod *corev1.Pod) { pod.Annotations = nil })
-	if job, err := adapter.Lookup(context.Background(), "run-unannotated", 1); err != nil || job.Attempt != 0 {
+	if job, err := adapter.Lookup(context.Background(), "run-unannotated"); err != nil || job.Attempt != 0 {
 		t.Fatalf("lookup without the annotation = %+v, %v; want attempt 0", job, err)
 	}
 }
@@ -1673,7 +1673,7 @@ var capturedStates = []struct {
 	{"sigterm", wherry.JobEnded, true, "", ""},
 	{"oom", wherry.JobEnded, true, "", ""},
 	{"image-pull-backoff", wherry.JobNeverStarted, true, "image", `Back-off pulling image "registry.invalid/wherry-conformance:0": ErrImagePull: initializing source docker://registry.invalid/wherry-conformance:0: pinging container registry registry.invalid: Get "https://registry.invalid/v2/": dial tcp: lookup registry.invalid: no such host`},
-	{"create-container-config-error", wherry.JobNeverStarted, true, "config", `container has runAsNonRoot and image will run as root (pod: "agent-44575cf5b285-capture-create-container-config-error-t1_wherry-agents(6f1c0b8e)", container: agent)`},
+	{"create-container-config-error", wherry.JobNeverStarted, true, "config", `container has runAsNonRoot and image will run as root (pod: "agent-44575cf5b285-capture-create-container-config-error_wherry-agents(6f1c0b8e)", container: agent)`},
 	{"start-error", wherry.JobNeverStarted, true, "start", `failed to create containerd task: exec: "/bin/agent-run": stat /bin/agent-run: no such file or directory`},
 	{"fetch-failure", wherry.JobNeverStarted, true, wherry.ClassFetch, "input data.csv: not fetched"},
 	{"setup-failure", wherry.JobNeverStarted, true, "setup", "cannot create files"},
@@ -1702,7 +1702,7 @@ func TestLookupMapsCapturedPods(t *testing.T) {
 				ctx, cancel = context.WithTimeout(ctx, 500*time.Millisecond)
 			}
 			defer cancel()
-			job, err := adapter.Lookup(ctx, "capture-"+test.file, 1)
+			job, err := adapter.Lookup(ctx, "capture-"+test.file)
 			if !test.settled {
 				if !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("lookup of a pending pod = %+v, %v; want the wait cut short", job, err)
@@ -1722,7 +1722,7 @@ func TestLookupTreatsADeletingPodAsEnded(t *testing.T) {
 	api.set(func() { api.kubelet = nil })
 	for file, want := range map[string]wherry.JobState{"lost-node-running": wherry.JobEnded, "lost-node-pending": wherry.JobNeverStarted} {
 		api.put(captured(t, file))
-		job, err := adapter.Lookup(context.Background(), "capture-"+file, 1)
+		job, err := adapter.Lookup(context.Background(), "capture-"+file)
 		if err != nil || job.State != want {
 			t.Fatalf("%s: lookup = %+v, %v; want %v", file, job, err, want)
 		}
@@ -1736,8 +1736,8 @@ func TestLookupTreatsADeletingPodAsEnded(t *testing.T) {
 func TestLookupRefusesAForeignPod(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter, _ := api.adapter(t)
-	api.put(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: poolPrefix + "run-foreign-t1"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent"}}}})
-	if _, err := adapter.Lookup(context.Background(), "run-foreign", 1); err == nil || err.Error() != "existing pod is not an agent pod" {
+	api.put(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: poolPrefix + "run-foreign"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent"}}}})
+	if _, err := adapter.Lookup(context.Background(), "run-foreign"); err == nil || err.Error() != "existing pod is not an agent pod" {
 		t.Fatalf("lookup of a foreign pod: %v", err)
 	}
 }
@@ -1757,7 +1757,7 @@ func TestLookupWaitsForAPendingPod(t *testing.T) {
 		}
 	})
 	api.agentPod(t, adapter, "pending", nil)
-	if job, err := adapter.Lookup(context.Background(), "run-pending", 1); err != nil || job.State != wherry.JobRunning {
+	if job, err := adapter.Lookup(context.Background(), "run-pending"); err != nil || job.State != wherry.JobRunning {
 		t.Fatalf("lookup = %+v, %v; want running once the agent started", job, err)
 	}
 }
@@ -1770,7 +1770,7 @@ func TestLookupTimeoutDeletesThePod(t *testing.T) {
 	pod := api.agentPod(t, adapter, "stuck", nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	if _, err := adapter.Lookup(ctx, "run-stuck", 1); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := adapter.Lookup(ctx, "run-stuck"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("lookup = %v; want the deadline", err)
 	}
 	if api.pod(pod.Name) != nil {
@@ -1796,7 +1796,7 @@ func TestRateLimitedWaitPastTheDeadlineIsTheDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	var failure *wherry.Error
-	if _, err := adapter.Lookup(ctx, "run-limited", 1); !errors.Is(err, context.DeadlineExceeded) || errors.As(err, &failure) && failure.Class != "timeout" {
+	if _, err := adapter.Lookup(ctx, "run-limited"); !errors.Is(err, context.DeadlineExceeded) || errors.As(err, &failure) && failure.Class != "timeout" {
 		t.Fatalf("lookup = %v; want the deadline", err)
 	}
 	if api.pod(pod.Name) != nil {
@@ -2297,7 +2297,7 @@ func TestStopOfAnEndedAgentDoesNotSignal(t *testing.T) {
 	if err := adapter.Stop(context.Background(), handleOf(pod)); err != nil || len(execer.recorded()) != 0 {
 		t.Fatalf("stop = %v with execs %v; want nil and none", err, execer.recorded())
 	}
-	absent := handleOf(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: poolPrefix + "run-gone-t1", UID: "uid-gone"}})
+	absent := handleOf(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: poolPrefix + "run-gone", UID: "uid-gone"}})
 	if err := adapter.Stop(context.Background(), absent); err != nil {
 		t.Fatalf("stop of an absent pod = %v", err)
 	}
@@ -2520,8 +2520,8 @@ func TestReleaseDeletesSecretAndEndsTheHolder(t *testing.T) {
 	api.set(func() { api.kubelet = endsAfter(0, 0) })
 	run := testRun("release")
 	dispatch(t, adapter, run)
-	name := adapter.jobName(run.ID, run.Turn)
-	if err := adapter.Release(context.Background(), run.ID, run.Turn); err != nil {
+	name := adapter.jobName(run.ID)
+	if err := adapter.Release(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
 	}
 	if api.secret(name) != nil {
@@ -2542,7 +2542,7 @@ func TestReleaseExecsNothingIntoADeletingPod(t *testing.T) {
 	adapter, execer := api.adapter(t)
 	api.set(func() { api.kubelet = nil })
 	api.put(captured(t, "lost-node-running"))
-	if err := adapter.Release(context.Background(), "capture-lost-node-running", 1); err != nil || len(execer.recorded()) != 0 {
+	if err := adapter.Release(context.Background(), "capture-lost-node-running"); err != nil || len(execer.recorded()) != 0 {
 		t.Fatalf("release = %v with execs %v; want nil and none into a deleting pod", err, execer.recorded())
 	}
 }
@@ -2551,7 +2551,7 @@ func TestPurgeDeletesWithGraceZero(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter, _ := api.adapter(t)
 	api.agentPod(t, adapter, "purge", nil)
-	if err := adapter.Purge(context.Background(), "run-purge", 1); err != nil {
+	if err := adapter.Purge(context.Background(), "run-purge"); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range api.recorded() {
@@ -2568,10 +2568,10 @@ func TestPurgeWaitsForThePodToGo(t *testing.T) {
 	run := testRun("linger")
 	dispatch(t, adapter, run)
 	api.set(func() { api.linger = 3 })
-	if err := adapter.Purge(context.Background(), run.ID, run.Turn); err != nil {
+	if err := adapter.Purge(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
 	}
-	name := adapter.jobName(run.ID, run.Turn)
+	name := adapter.jobName(run.ID)
 	if api.pod(name) != nil || api.secret(name) != nil {
 		t.Fatal("purge returned with the pod or its Secret left")
 	}
@@ -2584,7 +2584,7 @@ func TestPurgeWaitsForThePodToGo(t *testing.T) {
 func TestPurgeOfAbsentPodSucceeds(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter, _ := api.adapter(t)
-	if err := adapter.Purge(context.Background(), "run-absent", 1); err != nil {
+	if err := adapter.Purge(context.Background(), "run-absent"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -2610,9 +2610,9 @@ func (api *fakeAPI) sweepPod(t *testing.T, adapter *Adapter, name, owner string,
 func (api *fakeAPI) secretFor(name, owner string, ago time.Duration) {
 	api.mu.Lock()
 	defer api.mu.Unlock()
-	_, run, _ := strings.Cut(strings.TrimSuffix(name, "-t1"), poolPrefix)
+	_, run, _ := strings.Cut(name, poolPrefix)
 	api.secrets[name] = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace, ResourceVersion: "1", CreationTimestamp: metav1.NewTime(time.Now().Add(-ago)),
-		Labels: map[string]string{labelPool: testPool, labelAdapter: owner, labelAgent: "coder", labelRun: run, labelTurn: "1"}}, Data: map[string][]byte{"prompt": []byte("p")}}
+		Labels: map[string]string{labelPool: testPool, labelAdapter: owner, labelAgent: "coder", labelRun: run}}, Data: map[string][]byte{"prompt": []byte("p")}}
 }
 
 func sweep(t *testing.T, api *fakeAPI) *Adapter {
@@ -2652,7 +2652,7 @@ func TestSweepPurgesADeletingPodPastTheGrace(t *testing.T) {
 		adapter := sweep(t, api)
 		pod := captured(t, "lost-node-running")
 		pod.Labels = adapter.labels(testRun("lost"))
-		pod.Name = adapter.jobName("run-lost", 1)
+		pod.Name = adapter.jobName("run-lost")
 		pod.Labels[labelAdapter] = testAdapter
 		pod.DeletionTimestamp = new(metav1.NewTime(time.Now().Add(-ago)))
 		api.put(pod)
@@ -2739,11 +2739,11 @@ func TestSweepKeepsSecretOfRunningPod(t *testing.T) {
 func TestSweepDeletesStaleSecretWithoutPod(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter := sweep(t, api)
-	api.secretFor(poolPrefix+"run-orphan-t1", testAdapter, 11*time.Minute)
+	api.secretFor(poolPrefix+"run-orphan", testAdapter, 11*time.Minute)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if api.secret(poolPrefix+"run-orphan-t1") != nil {
+	if api.secret(poolPrefix+"run-orphan") != nil {
 		t.Fatal("the orphaned Secret remains")
 	}
 }
@@ -2751,11 +2751,11 @@ func TestSweepDeletesStaleSecretWithoutPod(t *testing.T) {
 func TestSweepKeepsRecentSecretWithoutPod(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter := sweep(t, api)
-	api.secretFor(poolPrefix+"run-new-t1", testAdapter, time.Minute)
+	api.secretFor(poolPrefix+"run-new", testAdapter, time.Minute)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if api.secret(poolPrefix+"run-new-t1") == nil {
+	if api.secret(poolPrefix+"run-new") == nil {
 		t.Fatal("a Secret inside the grace was deleted")
 	}
 }
@@ -2802,7 +2802,7 @@ func TestSweepReportsDeletionsAndPendingPods(t *testing.T) {
 	adapter := sweep(t, api)
 	api.sweepPod(t, adapter, "old", testAdapter, 11*time.Minute)
 	api.sweepPod(t, adapter, "recent", testAdapter, time.Minute)
-	api.secretFor(poolPrefix+"run-gone-t1", testAdapter, time.Hour)
+	api.secretFor(poolPrefix+"run-gone", testAdapter, time.Hour)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -2927,11 +2927,11 @@ func TestHandledPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
 	if logs.Len() != 0 {
 		t.Fatalf("returned error logged by the adapter: %q", logs.String())
 	}
-	if outcome, _, err := adapter.notStarted(context.Background(), poolPrefix+"run-x-t1", errors.New("cause")); outcome != wherry.OutcomeUnknown || err == nil {
+	if outcome, _, err := adapter.notStarted(context.Background(), poolPrefix+"run-x", errors.New("cause")); outcome != wherry.OutcomeUnknown || err == nil {
 		t.Fatalf("notStarted = %v, %v", outcome, err)
 	}
 	lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
-	if len(lines) != 1 || !strings.Contains(lines[0], `"class":"unavailable"`) || !strings.Contains(lines[0], `"op":"read pod `+poolPrefix+`run-x-t1"`) || !strings.Contains(lines[0], `"@level":"warn"`) {
+	if len(lines) != 1 || !strings.Contains(lines[0], `"class":"unavailable"`) || !strings.Contains(lines[0], `"op":"read pod `+poolPrefix+`run-x"`) || !strings.Contains(lines[0], `"@level":"warn"`) {
 		t.Fatalf("logs %q; want one warning naming the operation and class unavailable", logs.String())
 	}
 	for _, forbidden := range []string{testToken, body, strings.TrimPrefix(api.server.URL, "https://"), "/api/v1"} {
@@ -2986,7 +2986,7 @@ func turn(t *testing.T) (string, []string) {
 	run.Model = "sonnet"
 	run.Inputs = []wherry.File{{Name: "notes.md", Data: []byte("input-bytes-secret")}}
 	run.Credentials = []wherry.Secret{{Name: "deploy", File: "id_ed25519", Value: []byte("task-credential-secret")}}
-	name := adapter.jobName(run.ID, run.Turn)
+	name := adapter.jobName(run.ID)
 	startInit(t, api, execer, name, run.Fetches, nil)
 	var errs []error
 	handle := dispatch(t, adapter, run)
@@ -3001,26 +3001,26 @@ func turn(t *testing.T) (string, []string) {
 	if len(collected) != 1 || string(collected[0].Data) != "output-bytes-secret" {
 		t.Fatalf("collected %v, %v", collected, err)
 	}
-	errs = append(errs, err, adapter.Release(context.Background(), run.ID, run.Turn), adapter.Purge(context.Background(), run.ID, run.Turn), adapter.Sweep(context.Background()))
+	errs = append(errs, err, adapter.Release(context.Background(), run.ID), adapter.Purge(context.Background(), run.ID), adapter.Sweep(context.Background()))
 	// A second turn whose fetches fail, by status and by connection, and a third whose put the helper refuses.
 	failed := fetchRun("failed", newObjects(t, func(response http.ResponseWriter, _ *http.Request) {
 		http.Error(response, "SignatureDoesNotMatch", http.StatusForbidden)
 	}), files)
-	startInit(t, api, execer, adapter.jobName(failed.ID, failed.Turn), failed.Fetches, nil)
+	startInit(t, api, execer, adapter.jobName(failed.ID), failed.Fetches, nil)
 	dispatch(t, adapter, failed)
 	unreachable := fetchRun("unreachable", store, files)
 	unreachable.Fetches[0].URL = "https://unreachable.invalid/data.csv?X-Amz-Signature=signature-secret"
-	startInit(t, api, execer, adapter.jobName(unreachable.ID, unreachable.Turn), unreachable.Fetches, nil)
+	startInit(t, api, execer, adapter.jobName(unreachable.ID), unreachable.Fetches, nil)
 	dispatch(t, adapter, unreachable)
 	untrusted := httptest.NewTLSServer(http.NotFoundHandler())
 	t.Cleanup(untrusted.Close)
 	certificate := fetchRun("certificate", store, files)
 	certificate.Fetches[0].URL = untrusted.URL + "/data.csv?X-Amz-Signature=signature-secret"
-	startInit(t, api, execer, adapter.jobName(certificate.ID, certificate.Turn), certificate.Fetches, nil)
+	startInit(t, api, execer, adapter.jobName(certificate.ID), certificate.Fetches, nil)
 	dispatch(t, adapter, certificate)
 	refused := fetchRun("refused", store, files)
 	refused.Fetches[0].SHA256 = strings.Repeat("0", 64)
-	startInit(t, api, execer, adapter.jobName(refused.ID, refused.Turn), refused.Fetches, nil)
+	startInit(t, api, execer, adapter.jobName(refused.ID), refused.Fetches, nil)
 	dispatch(t, adapter, refused)
 	if !strings.Contains(logs.String(), "fetch data.csv: 403") || !strings.Contains(logs.String(), "fetch data.csv: unreachable") ||
 		!strings.Contains(logs.String(), "fetch data.csv: certificate") || !strings.Contains(logs.String(), "does not match its digest") {
@@ -3133,8 +3133,8 @@ func devRun(t *testing.T, adapter *Adapter, name string) wherry.Run {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		_ = adapter.Release(ctx, run.ID, run.Turn)
-		if err := adapter.Purge(ctx, run.ID, run.Turn); err != nil {
+		_ = adapter.Release(ctx, run.ID)
+		if err := adapter.Purge(ctx, run.ID); err != nil {
 			t.Errorf("purge %s: %v", run.ID, err)
 		}
 	})
@@ -3215,7 +3215,7 @@ func TestInputAtTheSecretLimitOnKubernetes(t *testing.T) {
 		t.Fatalf("dispatch one byte over = %v, %v", outcome, err)
 	}
 	data, _ := secretData(over)
-	name := adapter.jobName(over.ID, over.Turn)
+	name := adapter.jobName(over.ID)
 	if _, err := adapter.secrets().Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name}, Data: data}, metav1.CreateOptions{}); err == nil {
 		t.Fatal("the API server accepted a Secret one byte over 1 MiB")
 	}
@@ -3312,7 +3312,7 @@ func TestAdoptionOnKubernetes(t *testing.T) {
 	}
 	cancel()
 	second, _ := devAdapter(t, script, nil)
-	job, err := second.Lookup(ctx, run.ID, run.Turn)
+	job, err := second.Lookup(ctx, run.ID)
 	if err != nil || job.State != wherry.JobRunning || job.Adapter != testAdapter {
 		t.Fatalf("lookup = %+v, %v", job, err)
 	}
@@ -3410,11 +3410,11 @@ func TestDeletingPodOnKubernetes(t *testing.T) {
 	if err != nil || outcome != wherry.OutcomeCreated {
 		t.Fatalf("dispatch = %v, %v", outcome, err)
 	}
-	name := adapter.jobName(run.ID, run.Turn)
+	name := adapter.jobName(run.ID)
 	if err := adapter.pods().Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: new(int64(600))}); err != nil {
 		t.Fatal(err)
 	}
-	if job, err := adapter.Lookup(ctx, run.ID, run.Turn); err != nil || job.State != wherry.JobEnded {
+	if job, err := adapter.Lookup(ctx, run.ID); err != nil || job.State != wherry.JobEnded {
 		t.Fatalf("lookup = %+v, %v; want ended", job, err)
 	}
 	followCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -3426,7 +3426,7 @@ func TestDeletingPodOnKubernetes(t *testing.T) {
 		t.Fatalf("collect = %v", err)
 	}
 	began := time.Now()
-	if err := adapter.Purge(ctx, run.ID, run.Turn); err != nil || time.Since(began) > 5*time.Second {
+	if err := adapter.Purge(ctx, run.ID); err != nil || time.Since(began) > 5*time.Second {
 		t.Fatalf("purge = %v after %v", err, time.Since(began))
 	}
 }

@@ -2,7 +2,7 @@
 
 The wherry adapter plugin for Kubernetes. A wherry receiver starts it from
 its plugin directory for adapters of type `kubernetes`, and runs each of the
-receiver's turns as one pod and one Secret in a namespace. One plugin
+receiver's runs as one pod and one Secret in a namespace. One plugin
 process hosts every `kubernetes` adapter of a receiver.
 
 Kubernetes 1.31 or later is the platform. The plugin, the receiver image
@@ -85,7 +85,7 @@ outside it.
 
 The plugin's calls, all in that namespace, need:
 
-- `pods` create, get, list, delete: create a turn's pod, read it for
+- `pods` create, get, list, delete: create a run's pod, read it for
   lookups and polls, list it for the sweep, and delete it for a stop's last
   resort, a dispatch or lookup cut short, a pod whose containers run as
   different users, and a purge.
@@ -94,15 +94,15 @@ The plugin's calls, all in that namespace, need:
   end the outputs holder, and deliver S3 inputs. A WebSocket exec is an
   upgraded GET that Kubernetes 1.31 also authorises as `create`, and the
   SPDY fallback is a POST, so both verbs are needed.
-- `secrets` create, get, update, list, delete: write a turn's material,
-  delete it when the turn ends, and list its metadata for the sweep.
+- `secrets` create, get, update, list, delete: write a run's material,
+  delete it when the run ends, and list its metadata for the sweep.
 - `namespaces` get on the namespace: readiness.
 
 `admin` grants these and more. In the namespace, the receiver, or anyone
 holding its token, can:
 
 - read and write every Secret: the bundle Secret, which holds the
-  receiver's Kafka password, and every turn's prompt and material;
+  receiver's Kafka password, and every run's prompt and material;
 - run commands in every pod, the receiver's own and each agent's, read an
   agent's environment (the model credential) and its credentials
   directory, and use that pod's egress;
@@ -184,7 +184,7 @@ Readiness checks nothing else:
 - Nodes. Nodes are cluster-scoped, and the plugin does not read the
   cluster's topology. A pod no node can take, such as one whose
   `node_selector` no node matches, waits until the run's deadline, holding
-  one of the receiver's `capacity` slots, and the turn then fails
+  one of the receiver's `capacity` slots, and the run then fails
   `timeout`.
 - Quota. A ResourceQuota in the namespace that is full refuses pod
   creation with 403. Each refusal counts a `dispatch` start failure, and
@@ -225,20 +225,19 @@ config:
 
 ## Agent pods
 
-The plugin creates one Secret and one pod per turn, both named
-`agent-<pool>-<run>-t<turn>` in the adapter's namespace. `<pool>` is the
+The plugin creates one Secret and one pod per run, both named
+`agent-<pool>-<run>` in the adapter's namespace. `<pool>` is the
 first 12 hexadecimal digits of the SHA-256 of the pool name, as the Nomad
 plugin names its jobs. Both carry the labels `wherry.io/pool`,
-`wherry.io/adapter`, `wherry.io/agent`, `wherry.io/run` and
-`wherry.io/turn`, and the pod carries the annotation `wherry.io/attempt`
+`wherry.io/adapter`, `wherry.io/agent` and `wherry.io/run`, and the pod carries the annotation `wherry.io/attempt`
 with the attempt that created it. The receiver reads the labels to decide
 whether to adopt the pod.
 
-The pod is a bare pod with `restartPolicy: Never`, so a turn runs exactly
+The pod is a bare pod with `restartPolicy: Never`, so a run executes exactly
 once and nothing replaces its pod. It has three containers:
 
 - `inputs`, an init container running `wherry-k8s-helper`, copies the
-  turn's material from its Secret into the pod's volumes, and takes the S3
+  run's material from its Secret into the pod's volumes, and takes the S3
   inputs the plugin streams in.
 - `agent` runs the adapter's `runtime`.
 - `outputs` runs `wherry-k8s-helper` as a holder that stays up after the
@@ -316,7 +315,7 @@ and an `ephemeral_storage` below `work_limit` evicts first.
 The plugin reads the agent's standard output from the logs API, which
 interleaves standard error with it. A line the agent writes to standard
 error in the middle of a standard output line corrupts the JSON result
-line, and the turn ends `agent ended without a result`. Send standard
+line, and the run ends `agent ended without a result`. Send standard
 error elsewhere in the agent's command, such as `2>"$HOME/agent.err"`.
 Kubernetes 1.32 adds `PodLogOptions.Stream` to read standard output alone,
 which removes this trap on a later minimum platform.
@@ -325,7 +324,7 @@ The plugin follows the agent's log while it runs, and the kubelet's follow
 stream carries every byte across log rotation. A follow that starts from
 an offset, after a receiver restart or an adoption, reads the current log
 file only. If the kubelet has rotated the log past that offset, the follow
-fails with `the agent's log is shorter than the offset`, and the turn
+fails with `the agent's log is shorter than the offset`, and the run
 fails. Agents whose standard output can pass the kubelet's
 `containerLogMaxSize`, 10 MiB by default, are exposed to this. An offset inside the rotated part that is
 still below the current file's length is not detected: the follow discards
@@ -337,7 +336,7 @@ pod but the holder, through the holder, and waiting up to 15 seconds for
 the agent container to end; then `SIGKILL` and 15 seconds more. A signal
 whose exec fails in transport may still have been delivered, so the plugin
 waits for it as for a delivered one. If the agent still runs, or the holder
-refuses to signal it, the plugin deletes the pod at once, logs `agent outlived SIGKILL; pod deleted`, and the turn ends
+refuses to signal it, the plugin deletes the pod at once, logs `agent outlived SIGKILL; pod deleted`, and the run ends
 with `outputs not collected`. The agent can see and signal the holder too;
 an agent that kills the holder loses its outputs, and collection fails with
 `the outputs container has ended`.
@@ -353,9 +352,9 @@ type and never read. An output the receiver streams, an S3 output, it
 streams as the receiver reads it. The agent creates the outputs directory;
 without one there are no outputs.
 
-When a turn ends, the plugin deletes its Secret and ends the holder, so the
+When a run ends, the plugin deletes its Secret and ends the holder, so the
 pod goes terminal and frees its node's requests. The pod and its log stay
-until the [sweep](#sweep). Purging a turn deletes its pod with grace 0,
+until the [sweep](#sweep). Purging a run deletes its pod with grace 0,
 which the API server removes at once, waits until the pod is gone, then
 deletes its Secret.
 
@@ -365,27 +364,28 @@ recorded end, and does not collect from it.
 
 ### Secrets
 
-A turn's Secret holds its prompt (`prompt`), its credential (`credential`),
+A run's Secret holds its prompt (`prompt`), its credential (`credential`),
 each task credential (`credentials.<file>`) and each input file
 (`inputs.<name>`), as raw bytes, so binary files arrive intact. Only the
 `inputs` init container mounts it.
 
 The API server limits a Secret's values together to 1 MiB, and a key to
 253 characters. Dispatch adds up the prompt, the credential, the task
-credentials and then the inputs, and refuses a turn over either limit,
+credentials and then the inputs, and refuses a run over either limit,
 creating nothing:
 
 - An input that takes the total past 1 MiB, or whose name is over 246
   characters, fails the run naming the input.
 - A task credential file name over 241 characters fails the run the same
   way; the receiver calls it an input.
-- A prompt and credentials over 1 MiB without any input fail the turn with
-  `the prompt and credentials exceed the 1 MiB Secret limit`. A long
-  multi-turn prompt is the usual cause.
+- A prompt and credentials over 1 MiB without any input fail the run with
+  `the prompt and credentials exceed the 1 MiB Secret limit`.
 
-Under the default pool terms, inputs fit.
+The plugin declares an inline limit of 512 KiB, half the Secret, which
+leaves the prompt and credentials the rest, so a host sends larger inputs
+through the pool's bucket. Under the default pool terms, inputs fit.
 
-The plugin writes the Secret only when the turn's pod does not exist yet,
+The plugin writes the Secret only when the run's pod does not exist yet,
 over any Secret an earlier attempt left, and never rewrites it under a
 running pod.
 
@@ -459,7 +459,7 @@ agent that runs commands of its own can undo this.
 
 ## Metrics
 
-The plugin speaks adapter protocol version 5, and a receiver of another
+The plugin speaks adapter protocol version 7, and a receiver of another
 protocol version refuses it, so upgrade it with the receiver. For each
 adapter it reports these families, which the receiver serves on its
 `/metrics` with the adapter's name as `adapter`:
@@ -487,7 +487,7 @@ response body. API warnings, such as PodSecurity notices, are logged as
 `kubernetes warning`.
 
 The plugin's client allows 50 requests a second with bursts of 100. Each
-turn polls its pod every second or two, besides its log stream, execs and
+run polls its pod every second or two, besides its log stream, execs and
 the sweep; the API server's priority and fairness protects the server.
 
 ## Agent network reach
