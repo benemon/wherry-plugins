@@ -749,10 +749,11 @@ requires pods admitted under restricted-v2, so they run on OpenShift.
 [`test/e2e`](test/e2e) runs a receiver from the receiver image and the
 plugin together on a kind cluster, as the `e2e` workflow does for every
 change to `kubernetes/`, the root `Makefile` or the workflow. Each step is
-a script; with Docker, kind and kubectl on a Linux machine:
+a script; with Docker, kind and kubectl on a Linux machine, and the wherry
+release the workflow pins:
 
 ```sh
-export WHERRY_VERSION=v0.1.0-rc.6
+export WHERRY_VERSION=$(sed -n 's/^  WHERRY_VERSION: //p' .github/workflows/e2e.yml)
 for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/collect.sh; break; }; done
 ```
 
