@@ -1,0 +1,74 @@
+capacity: 4
+platforms:
+  # Every adapter on this platform takes these keys into its config, and
+  # repeats none of them.
+  - name: nomad
+    type: nomad
+    config:
+      # Unset, NOMAD_ADDR, else http://127.0.0.1:4646.
+      address: https://nomad.example.com:4646
+      # A path on the receiver.
+      ca_file: /etc/wherry/nomad-ca.pem
+      # Holds the agent jobs and their variables; the ACL policy names it.
+      namespace: agents
+      # Required while any adapter on the platform sets a credential.
+      credential_env: MODEL_API_KEY
+      # Unset, every datacenter.
+      datacenters:
+        - dc1
+        - dc2
+adapters:
+  # A container agent that takes a credential and writes its reply to a file.
+  - name: container
+    platform: nomad
+    agent: coder
+    credential: model-api-key
+    output: file
+    reply_file: reply.md
+    labels:
+      isolation: container
+    config:
+      # The ACL policy grants node_pool read on this pool.
+      node_pool: agents
+      runtime:
+        driver: docker
+        # Numeric, so the credential files belong to UID 1001 and GID 1001
+        # with mode 0600.
+        user: "1001:1001"
+        config:
+          image: registry.example.com/agent:1.0
+          command: /bin/sh
+          args:
+            - -c
+            - >-
+              test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
+              exec agent-run --model "$WHERRY_MODEL" < "$NOMAD_TASK_DIR/prompt.txt" 2>"$HOME/agent.err"
+        env:
+          AGENT_LOG_LEVEL: info
+        resources:
+          cpu: 2000
+          memory_mb: 4096
+  # A host agent under exec, which looks the user up by name on the client.
+  - name: host
+    platform: nomad
+    agent: reviewer
+    output: claude
+    labels:
+      isolation: host
+    config:
+      node_pool: agents-host
+      runtime:
+        driver: exec
+        # A name, so the credential files keep the client's owner and mode
+        # 0644.
+        user: agent
+        config:
+          command: /bin/sh
+          args:
+            - -c
+            - exec agent-run < "$NOMAD_TASK_DIR/prompt.txt" 2>"$HOME/agent.err"
+        env:
+          AGENT_LOG_LEVEL: warn
+        resources:
+          cpu: 1000
+          memory_mb: 2048
