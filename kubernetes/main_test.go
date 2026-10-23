@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -15,6 +16,7 @@ import (
 	wherry "github.com/benemon/wherry/adapter"
 	"github.com/benemon/wherry/adapter/adaptertest"
 	"github.com/hashicorp/go-hclog"
+	"go.yaml.in/yaml/v3"
 )
 
 func settings(t *testing.T, name string, config map[string]any) wherry.Settings {
@@ -53,6 +55,70 @@ func TestFactoryDecodesStrictly(t *testing.T) {
 	}
 	if _, err := newAdapter(settings(t, "lab", valid), hclog.NewNullLogger()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestReadmeReceiverConfigures configures each adapter of the README's receiver configuration as the receiver does,
+// with the platform's config keys merged into the adapter's and a platform credential in the bundle.
+func TestReadmeReceiverConfigures(t *testing.T) {
+	example, err := os.ReadFile("testdata/receiver.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(readme, example) {
+		t.Fatal("README.md does not hold testdata/receiver.yaml")
+	}
+	var receiver struct {
+		Capacity  int64 `yaml:"capacity"`
+		Platforms []struct {
+			Name   string         `yaml:"name"`
+			Type   string         `yaml:"type"`
+			Config map[string]any `yaml:"config"`
+		} `yaml:"platforms"`
+		Adapters []struct {
+			Name       string            `yaml:"name"`
+			Platform   string            `yaml:"platform"`
+			Agent      string            `yaml:"agent"`
+			Output     string            `yaml:"output"`
+			ReplyFile  string            `yaml:"reply_file"`
+			Credential string            `yaml:"credential"`
+			Labels     map[string]string `yaml:"labels"`
+			Config     map[string]any    `yaml:"config"`
+		} `yaml:"adapters"`
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(example))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&receiver); err != nil {
+		t.Fatal(err)
+	}
+	if len(receiver.Platforms) != 1 || receiver.Platforms[0].Type != "kubernetes" || len(receiver.Adapters) < 2 {
+		t.Fatal("want one kubernetes platform and at least two adapters")
+	}
+	platform := receiver.Platforms[0]
+	// ca_file names a path on the receiver; the client reads the CA when the adapter is built.
+	platform.Config["ca_file"] = newFakeAPI(t).caFile
+	for _, adapter := range receiver.Adapters {
+		if adapter.Platform != platform.Name {
+			t.Fatalf("adapter %s: platform %q, want %q", adapter.Name, adapter.Platform, platform.Name)
+		}
+		for key, value := range platform.Config {
+			if _, ok := adapter.Config[key]; ok {
+				t.Fatalf("adapter %s: config key %q is also set by the platform", adapter.Name, key)
+			}
+			adapter.Config[key] = value
+		}
+		encoded, err := json.Marshal(adapter.Config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := wherry.Settings{Name: adapter.Name, Pool: testPool, Agent: adapter.Agent, Credential: adapter.Credential, Config: encoded, Platform: testToken}
+		if _, err := newAdapter(s, hclog.NewNullLogger()); err != nil {
+			t.Fatalf("adapter %s: %v", adapter.Name, err)
+		}
 	}
 }
 

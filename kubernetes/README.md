@@ -223,6 +223,99 @@ config:
   helper_image: registry.example.com/wherry-receiver:<version>
 ```
 
+### Receiver configuration
+
+This receiver configuration file holds one platform and two adapters.
+Each adapter's `config` takes the platform's `config` keys at the top level,
+and an adapter that sets one of them again is an error. With `address`
+set, the bundle holds a platform credential for the platform, which
+`wherry admin receiver add --platform-credential-file kubernetes=FILE`
+writes.
+[`testdata/receiver.yaml`](testdata/receiver.yaml) holds this file, and
+`TestReadmeReceiverConfigures` configures each adapter from it through
+the plugin's decoding and checks.
+
+```yaml
+capacity: 4
+platforms:
+  # Every adapter on this platform takes these keys into its config, and
+  # repeats none of them.
+  - name: kubernetes
+    type: kubernetes
+    config:
+      # Set, the bundle holds a platform credential for this platform. Unset,
+      # the receiver pod's service account applies.
+      address: https://kubernetes.example.com:6443
+      # A path on the receiver.
+      ca_file: /etc/wherry/kubernetes-ca.pem
+      # Holds the agent pods and their Secrets; the token holds admin here alone.
+      namespace: agents
+      # Required while any adapter on the platform sets a credential.
+      credential_env: MODEL_API_KEY
+      # The receiver image at the receiver's tag.
+      helper_image: registry.example.com/wherry-receiver:1.0.0
+adapters:
+  # An agent on dedicated nodes that takes a credential and writes its reply
+  # to a file.
+  - name: dedicated
+    platform: kubernetes
+    agent: coder
+    credential: model-api-key
+    output: file
+    reply_file: reply.md
+    labels:
+      nodes: dedicated
+    config:
+      node_selector:
+        example.com/pool: agents
+      tolerations:
+        - key: example.com/agents
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      runtime:
+        image: registry.example.com/agent:1.0
+        # Every container of the pod runs as this UID; quoted, since it is a
+        # string.
+        user: "1001:1001"
+        command: [/bin/sh, -c]
+        args:
+          - >-
+            test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
+            exec agent-run --model "$WHERRY_MODEL" < /wherry/prompt.txt 2>"$HOME/agent.err"
+        env:
+          AGENT_LOG_LEVEL: info
+        # Each is both request and limit.
+        resources:
+          cpu: "2"
+          memory: 4Gi
+          ephemeral_storage: 8Gi
+        # Below ephemeral_storage, so the volume limit applies first.
+        work_limit: 6Gi
+  # An agent on any node that tolerates the taint, with the image's
+  # entrypoint.
+  - name: shared
+    platform: kubernetes
+    agent: reviewer
+    output: claude
+    labels:
+      nodes: shared
+    config:
+      tolerations:
+        - key: example.com/agents
+          operator: Exists
+          effect: NoSchedule
+      runtime:
+        image: registry.example.com/reviewer:1.0
+        user: "1002"
+        args: [--prompt-file, /wherry/prompt.txt]
+        env:
+          AGENT_LOG_LEVEL: warn
+        resources:
+          cpu: 500m
+          memory: 2Gi
+```
+
 ## Agent pods
 
 The plugin creates one Secret and one pod per run, both named
