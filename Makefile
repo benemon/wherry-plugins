@@ -22,7 +22,10 @@ help: ## List targets
 
 .PHONY: build
 build: ## Build every plugin, and the Kubernetes plugin's pod helper
-	@set -e; for p in $(PLUGINS); do (cd $$p && go build -trimpath -o ../wherry-plugin-$$p .); done
+	@set -e; for p in $(PLUGINS); do \
+		goos=; [ $$p = systemd ] && goos=linux; \
+		(cd $$p && GOOS=$$goos go build -trimpath -o ../wherry-plugin-$$p .); \
+	done
 	cd kubernetes && go build -trimpath -o ../wherry-k8s-helper ./cmd/wherry-k8s-helper
 
 .PHONY: check-fmt
