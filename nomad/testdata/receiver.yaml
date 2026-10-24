@@ -32,9 +32,12 @@ adapters:
       node_pool: agents
       runtime:
         driver: docker
-        # Numeric, so the credential files belong to UID 1001 and GID 1001
+        # Numeric, so the credential files belong to UID 1001 and GID 1002
         # with mode 0600.
-        user: "1001:1001"
+        user: "1001"
+        group: "1002"
+        # The docker driver's group_add carries these.
+        supplementary_groups: [video]
         config:
           image: registry.example.com/agent:1.0
           command: /bin/sh

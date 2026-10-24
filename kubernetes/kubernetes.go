@@ -67,6 +67,7 @@ const (
 var (
 	envName     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	runtimeUser = regexp.MustCompile(`^([1-9][0-9]*)(?::([1-9][0-9]*))?$`)
+	runtimeGID  = regexp.MustCompile(`^[1-9][0-9]*$`)
 	// serviceAccountDir holds the token and CA the kubelet projects into the receiver's pod.
 	serviceAccountDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 	sweepGrace        = 10 * time.Minute
@@ -99,13 +100,15 @@ type Toleration struct {
 
 // Runtime defines the agent container the adapter launches.
 type Runtime struct {
-	Image     string            `json:"image"`
-	Command   []string          `json:"command"`
-	Args      []string          `json:"args"`
-	Env       map[string]string `json:"env"`
-	Resources Resources         `json:"resources"`
-	WorkLimit string            `json:"work_limit"`
-	User      string            `json:"user"`
+	Image               string            `json:"image"`
+	Command             []string          `json:"command"`
+	Args                []string          `json:"args"`
+	Env                 map[string]string `json:"env"`
+	Resources           Resources         `json:"resources"`
+	WorkLimit           string            `json:"work_limit"`
+	User                string            `json:"user"`
+	Group               string            `json:"group"`
+	SupplementaryGroups []string          `json:"supplementary_groups"`
 }
 
 // Resources are the agent container's requests and limits, as Kubernetes quantities.
@@ -133,6 +136,7 @@ type Adapter struct {
 	resources             corev1.ResourceList
 	workLimit             *resource.Quantity
 	uid, gid              *int64
+	groups                []int64
 	core                  corev1client.CoreV1Interface
 	meta                  metadata.Interface
 	exec                  execer
@@ -292,6 +296,24 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 			gid = &group
 		}
 	}
+	if group := config.Runtime.Group; group != "" {
+		if gid != nil {
+			return nil, errors.New("runtime group must be unset when runtime user names a GID")
+		}
+		id, err := strconv.ParseInt(group, 10, 32)
+		if !runtimeGID.MatchString(group) || err != nil {
+			return nil, errors.New("runtime group must be a GID below 2^31 other than root")
+		}
+		gid = &id
+	}
+	var groups []int64
+	for _, group := range config.Runtime.SupplementaryGroups {
+		id, err := strconv.ParseInt(group, 10, 32)
+		if !runtimeGID.MatchString(group) || err != nil {
+			return nil, errors.New("runtime supplementary_groups must be GIDs below 2^31 other than root")
+		}
+		groups = append(groups, id)
+	}
 	client = rest.CopyConfig(client)
 	client.WarningHandler = warnings{logger: logger, adapter: name}
 	httpClient, err := rest.HTTPClientFor(client)
@@ -309,7 +331,7 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 	return &Adapter{
 		name: name, pool: pool, namespace: config.Namespace, credentialEnv: config.CredentialEnv, helperImage: config.HelperImage,
 		runtime: config.Runtime, nodeSelector: config.NodeSelector, tolerations: tolerations, resources: resources, workLimit: workLimit,
-		uid: uid, gid: gid,
+		uid: uid, gid: gid, groups: groups,
 		core: core, meta: meta,
 		exec: remote{config: client, client: core.RESTClient(), namespace: config.Namespace},
 		fetcher: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -490,7 +512,7 @@ func (adapter *Adapter) buildPod(run wherry.Run, name string) *corev1.Pod {
 			Tolerations:                   adapter.tolerations,
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot: new(true), SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-				RunAsUser: adapter.uid, RunAsGroup: adapter.gid,
+				RunAsUser: adapter.uid, RunAsGroup: adapter.gid, SupplementalGroups: adapter.groups,
 			},
 			InitContainers: []corev1.Container{{
 				Name: "inputs", Image: adapter.helperImage, Command: command("inputs"), Args: args,

@@ -295,6 +295,100 @@ func TestBuildJobRunsAsTheRuntimeUser(t *testing.T) {
 	}
 }
 
+func TestNewAcceptsGroupsTheDriverSets(t *testing.T) {
+	for name, runtime := range map[string]Runtime{
+		"docker group and supplementary groups": {Driver: "docker", User: "1001", Group: "1002", SupplementaryGroups: []string{"video", "1003"}},
+		"docker group name":                     {Driver: "docker", User: "agent", Group: "agents"},
+		"podman group":                          {Driver: "podman", User: "1001", Group: "1002"},
+		"exec without groups":                   {Driver: "exec", User: "agent"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := testConfig("http://127.0.0.1:1")
+			config.Runtime = runtime
+			if _, err := build(config, testPool, ""); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestNewRefusesGroupsTheDriverCannotSet(t *testing.T) {
+	for name, test := range map[string]struct {
+		runtime Runtime
+		want    string
+	}{
+		"exec group":                  {Runtime{Driver: "exec", User: "agent", Group: "agents"}, "runtime group cannot be set on the exec driver"},
+		"java group":                  {Runtime{Driver: "java", User: "agent", Group: "agents"}, "runtime group cannot be set on the java driver"},
+		"raw_exec group":              {Runtime{Driver: "raw_exec", User: "agent", Group: "agents"}, "runtime group cannot be set on the raw_exec driver"},
+		"exec supplementary groups":   {Runtime{Driver: "exec", User: "agent", SupplementaryGroups: []string{"video"}}, "runtime supplementary_groups cannot be set on the exec driver"},
+		"java supplementary groups":   {Runtime{Driver: "java", User: "agent", SupplementaryGroups: []string{"video"}}, "runtime supplementary_groups cannot be set on the java driver"},
+		"podman supplementary groups": {Runtime{Driver: "podman", User: "1001", SupplementaryGroups: []string{"video"}}, "runtime supplementary_groups cannot be set on the podman driver"},
+		"docker group without user":   {Runtime{Driver: "docker", Group: "1002"}, "runtime group needs runtime user on the docker driver"},
+		"podman group without user":   {Runtime{Driver: "podman", Group: "1002"}, "runtime group needs runtime user on the podman driver"},
+		"docker group beside a GID":   {Runtime{Driver: "docker", User: "1001:1001", Group: "1002"}, "runtime group must be unset when runtime user names a GID"},
+		"docker group_add beside supplementary groups": {
+			Runtime{Driver: "docker", Config: map[string]any{"group_add": []any{"audio"}}, SupplementaryGroups: []string{"video"}},
+			"runtime supplementary_groups must be unset when the docker config sets group_add",
+		},
+		"root group":                       {Runtime{Driver: "docker", User: "1001", Group: "0"}, "runtime group and supplementary_groups must be group names or GIDs other than root"},
+		"root group name":                  {Runtime{Driver: "docker", User: "1001", Group: "root"}, "runtime group and supplementary_groups must be group names or GIDs other than root"},
+		"root supplementary group":         {Runtime{Driver: "docker", User: "1001", SupplementaryGroups: []string{"video", "0"}}, "runtime group and supplementary_groups must be group names or GIDs other than root"},
+		"group leading zero":               {Runtime{Driver: "docker", User: "1001", Group: "01002"}, "runtime group and supplementary_groups must be group names or GIDs other than root"},
+		"group over 32 bits":               {Runtime{Driver: "docker", User: "1001", Group: "4294967296"}, "runtime group and supplementary_groups must be group names or GIDs other than root"},
+		"supplementary group with a space": {Runtime{Driver: "docker", User: "1001", SupplementaryGroups: []string{"Bad Name"}}, "runtime group and supplementary_groups must be group names or GIDs other than root"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := testConfig("http://127.0.0.1:1")
+			config.Runtime = test.runtime
+			if _, err := build(config, testPool, ""); err == nil || err.Error() != test.want {
+				t.Fatalf("error %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildJobCarriesTheRuntimeGroups(t *testing.T) {
+	for name, test := range map[string]struct {
+		runtime Runtime
+		user    string
+		gid     int
+	}{
+		"numeric":    {Runtime{Driver: "docker", User: "1001", Group: "1002", SupplementaryGroups: []string{"video", "1003"}}, "1001:1002", 1002},
+		"group name": {Runtime{Driver: "docker", User: "1001", Group: "agents"}, "1001:agents", 1001},
+		"podman":     {Runtime{Driver: "podman", User: "1001", Group: "1002"}, "1001:1002", 1002},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := testConfig("http://127.0.0.1:1")
+			test.runtime.Config = map[string]any{"image": "agent:1"}
+			config.Runtime = test.runtime
+			adapter, err := build(config, testPool, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := testRun("groups")
+			run.Credentials = []wherry.Secret{{Name: "token", File: "token"}}
+			job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			task := job.TaskGroups[0].Tasks[0]
+			if task.User != test.user {
+				t.Fatalf("task user %q, want %q", task.User, test.user)
+			}
+			if groups, set := task.Config["group_add"]; set != (test.runtime.SupplementaryGroups != nil) || set && !reflect.DeepEqual(groups, test.runtime.SupplementaryGroups) {
+				t.Fatalf("group_add %v, want %v", groups, test.runtime.SupplementaryGroups)
+			}
+			if task.Config["image"] != "agent:1" || len(test.runtime.Config) != 1 {
+				t.Fatalf("task config %v from runtime config %v", task.Config, test.runtime.Config)
+			}
+			template := task.Templates[len(task.Templates)-1]
+			if *template.DestPath != "${NOMAD_SECRETS_DIR}/credentials/token" || template.Gid == nil || *template.Gid != test.gid {
+				t.Fatalf("credential template %s gid %s, want %d", *template.DestPath, show(template.Gid), test.gid)
+			}
+		})
+	}
+}
+
 // The alloc fs API refuses the secrets directory, so the task lists its credential, with ls's trailing attribute mark.
 // raw_exec resolves the task user by name, so the task runs as the client's user.
 func TestCredentialFileOwnerAndModeOnNomad(t *testing.T) {

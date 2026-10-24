@@ -168,11 +168,19 @@ adapter, and the receiver exits with `adapter <name>: ...` on an error.
 | `resources` | `cpu` (default `500m`), `memory` (default `2Gi`) and `ephemeral_storage` (default unset), Kubernetes quantities, each set as both request and limit |
 | `work_limit` | a quantity, the size limit of the agent's `/wherry` volume; unset, no limit |
 | `user` | `UID` or `UID:GID`, a string; unset, the platform assigns one |
+| `group` | the primary group of every container of the pod, a GID |
+| `supplementary_groups` | a list of GIDs every container of the pod also holds |
 
 `user` takes positive integers below 2^31 with no leading zeros; root (0)
 is refused. Quote it in YAML, such as `user: "1001"`. Kubernetes assigns no
 UID, so set it. The resource defaults are starting points; set them for the
 agent.
+
+`group` and `supplementary_groups` take GIDs below 2^31 with no leading
+zeros, quoted in YAML; Kubernetes resolves no group names, so a name is
+refused, and so is root (0). `group` is refused beside a `user` that names
+a GID. They set the pod's `securityContext.runAsGroup` and
+`securityContext.supplementalGroups`.
 
 The plugin sets `HOME`, the `WHERRY_*` variables and the credential
 variable over `env`, so a variable of these names in `env` is overwritten.
@@ -277,7 +285,10 @@ adapters:
         image: registry.example.com/agent:1.0
         # Every container of the pod runs as this UID; quoted, since it is a
         # string.
-        user: "1001:1001"
+        user: "1001"
+        # The pod's runAsGroup and supplementalGroups.
+        group: "1001"
+        supplementary_groups: ["2001"]
         command: [/bin/sh, -c]
         args:
           - >-
