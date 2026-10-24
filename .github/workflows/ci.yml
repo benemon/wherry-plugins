@@ -44,8 +44,7 @@ jobs:
         if: steps.changes.outputs.changed == 'true'
         run: make check PLUGINS="$PLUGIN"
 
-  # The systemd plugin's real-host suite, as root on the runner's systemd. The runner's systemd is newer than 252, so
-  # this proves the D-Bus API; RHEL 9's systemd 252 is the gated platform.
+  # The systemd plugin's real-host suite, as root on the runner's systemd.
   systemd-host:
     runs-on: ubuntu-24.04
     steps:

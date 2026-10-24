@@ -6,7 +6,7 @@ receiver's runs as one transient service on the receiver's own host. One
 plugin process hosts every `systemd` adapter of a receiver.
 
 systemd 252 or later with the unified cgroup v2 hierarchy, on Linux, is the
-platform. RHEL 9 is the gated target. The plugin connects to systemd's
+platform. The plugin connects to systemd's
 private socket, `/run/systemd/private`, and runs as root.
 
 ## Build
@@ -496,14 +496,16 @@ says what an agent job's egress policy denies and allows.
 Agents have the host's network: everything the host reaches. On loopback
 and the host's addresses that includes:
 
-- the Nomad agent's HTTP API, which needs an ACL token no agent holds;
 - the receiver's `/metrics`, which has no authentication and shows what
   any pool tenant's metrics reader sees;
 - any other service listening on the host.
 
 Beside the network, an agent reaches the system bus, where it reads every
-unit's properties. The journal's sockets are hidden from agents.
-Restricting egress is deferred, as on Kubernetes. The knobs are
+unit's properties. The journal's sockets are hidden from agents. Agents
+run as dynamic users, so files on the host are closed to them by mode,
+but a world-readable file is readable.
+
+The plugin does not restrict agents' egress. The knobs are
 `IPAddressDeny=` and `IPAddressAllow=` on `wherry.slice`, which match
 addresses only, or an `nftables` rule matching the dynamic UID range,
 61184 to 65519, with `meta skuid`.
@@ -515,7 +517,9 @@ The receiver runs as root under its own unit,
 its agent units run in [`deploy/wherry.slice`](deploy/wherry.slice),
 outside the receiver's cgroup. Restarting or stopping the receiver never
 touches them: the receiver exits on `SIGTERM` without stopping its jobs,
-and the restarted receiver adopts them.
+and the restarted receiver adopts them. A run is adopted only by a
+receiver with the same adapter on the same host, so give each systemd
+receiver a pool of its own.
 
 ### Install
 
@@ -556,8 +560,7 @@ and the restarted receiver adopts them.
    systemctl daemon-reload && systemctl enable --now wherry-receiver
    ```
 
-The receiver's metrics listen on port 9465, beside a Nomad receiver's
-9464. The endpoint has no authentication; admit only Prometheus to it
+The receiver's metrics listen on port 9465. The endpoint has no authentication; admit only Prometheus to it
 with a `firewalld` rule.
 
 ### SELinux
@@ -588,19 +591,6 @@ semanage fcontext -a -t init_var_lib_t '/var/lib/wherry/systemd(/.*)?'
 semanage fcontext -a -t init_var_lib_t '/var/lib/private/wherry-agents(/.*)?'
 restorecon -Rv /var/lib/wherry/systemd /var/lib/private/wherry-agents
 ```
-
-### Systemd and Nomad on one host
-
-Agent units run outside Nomad's cgroups, and Nomad's scheduler does not
-see their use. The Nomad client's `reserved` block must hold the systemd
-receiver's `capacity` times each agent's `cpu_quota` and `memory_mb`, or
-the two oversubscribe the host. `wherry.slice` carries no limit. Put the
-systemd receiver in a pool of its own: a run is adopted only by a receiver
-with the same adapter, on the same host.
-
-Agents run as dynamic users, so the Nomad client's files and podman's root
-socket are closed to them by mode. A world-readable file under the Nomad
-client's data or configuration directories is readable by agents.
 
 ## Tests
 
@@ -653,5 +643,5 @@ WHERRY_SYSTEMD_DEV=1 WHERRY_SYSTEMD_PLUGIN=/usr/local/libexec/wherry/test/wherry
 They include the protocol's conformance suite,
 `github.com/benemon/wherry/adapter/adaptertest`, in process, against the
 plugin binary, and under the receiver unit's capability bounding set. CI
-builds both binaries and runs them on the GitHub runner's systemd; RHEL
-9's systemd 252 is the gated platform.
+builds both binaries and runs them on the GitHub runner's systemd, 255
+on Ubuntu 24.04.
