@@ -1,3 +1,5 @@
+//go:build linux
+
 // Command wherry-plugin-systemd is the wherry adapter plugin for systemd, which runs each run's agent as a transient
 // unit on the receiver's host. The receiver starts it from its plugin directory; it is not run by hand.
 package main
