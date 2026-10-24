@@ -6,7 +6,7 @@ receiver's runs as one transient service on the receiver's own host. One
 plugin process hosts every `systemd` adapter of a receiver.
 
 systemd 252 or later with the unified cgroup v2 hierarchy, on Linux, is the
-platform. RHEL 9 is the gated target. The plugin connects to systemd's
+platform. The plugin connects to systemd's
 private socket, `/run/systemd/private`, and runs as root.
 
 ## Build
@@ -19,7 +19,8 @@ make build
 ```
 
 This writes `wherry-plugin-systemd` at the repository root. The plugin
-builds with `CGO_ENABLED=0`. `make check` runs the CI gates, and
+builds for Linux alone; on another OS, set `GOOS=linux GOARCH=amd64`.
+`make check` runs the CI gates, and
 `make dist PLUGIN=systemd VERSION=<version>` writes release archives for
 linux amd64 and arm64, and `checksums.txt`, into `dist`.
 
@@ -95,12 +96,12 @@ exits with `adapter <name>: ...` on an error.
 | `command` | required; the agent's command, its first element an absolute path; each element UTF-8 without NUL |
 | `args` | appended to `command`; each UTF-8 without NUL |
 | `env` | environment variables for the agent; names match `[A-Za-z_][A-Za-z0-9_]*` and are none of `CREDENTIALS_DIRECTORY`, `STATE_DIRECTORY` and `INVOCATION_ID`; values UTF-8 without NUL |
-| `resources` | `cpu_quota`, percent of one CPU (default 50), from 1 to 100 times the online CPUs; `memory_mb`, MiB (default 2048), from 64 to 2^31 - 1 |
+| `resources` | `cpu_quota`, percent of one CPU (default 50), from 1 to 100 times the CPUs the receiver may use; `memory_mb`, MiB (default 2048), from 64 to 2^31 - 1 |
 | `user` | a user name or `UID[:GID]`, a string; unset, each run gets a dynamic user of its own |
 | `group` | the agent's primary group, a group name or GID; unset, the user's own |
 | `supplementary_groups` | a list of group names or GIDs the agent also holds |
 
-`user`, `group` and `supplementary_groups` refuse root (0). Numeric IDs
+`user`, `group` and `supplementary_groups` refuse root (`root` or 0). Numeric IDs
 are positive integers below 2^32 with no leading zeros; quote them in
 YAML, such as `user: "1001"`. `group` is refused beside a `user` that
 names a GID. They set the unit's `User=`, `Group=` and
@@ -125,7 +126,7 @@ An adapter is ready while the manager's `SystemState` is `running`,
 `degraded` or `starting`. Any failed unit on the host sets `degraded`, a
 failed agent unit included until its run is released. `starting` holds
 while a boot job is still queued after `basic.target` is active, which an
-agent unit's default dependencies wait for, as on GitHub's runners. Readiness does not check the
+agent unit's default dependencies wait for. Readiness does not check the
 runtime command: a missing command shows at dispatch as a unit that never
 started with class `exec`, or, for a run with a credential, as an agent
 that exits 127.
@@ -495,14 +496,16 @@ says what an agent job's egress policy denies and allows.
 Agents have the host's network: everything the host reaches. On loopback
 and the host's addresses that includes:
 
-- the Nomad agent's HTTP API, which needs an ACL token no agent holds;
 - the receiver's `/metrics`, which has no authentication and shows what
   any pool tenant's metrics reader sees;
 - any other service listening on the host.
 
 Beside the network, an agent reaches the system bus, where it reads every
-unit's properties. The journal's sockets are hidden from agents.
-Restricting egress is deferred, as on Kubernetes. The knobs are
+unit's properties. The journal's sockets are hidden from agents. Agents
+run as dynamic users, so files on the host are closed to them by mode,
+but a world-readable file is readable.
+
+The plugin does not restrict agents' egress. The knobs are
 `IPAddressDeny=` and `IPAddressAllow=` on `wherry.slice`, which match
 addresses only, or an `nftables` rule matching the dynamic UID range,
 61184 to 65519, with `meta skuid`.
@@ -514,7 +517,9 @@ The receiver runs as root under its own unit,
 its agent units run in [`deploy/wherry.slice`](deploy/wherry.slice),
 outside the receiver's cgroup. Restarting or stopping the receiver never
 touches them: the receiver exits on `SIGTERM` without stopping its jobs,
-and the restarted receiver adopts them.
+and the restarted receiver adopts them. A run is adopted only by a
+receiver with the same adapter on the same host, so give each systemd
+receiver a pool of its own.
 
 ### Install
 
@@ -555,32 +560,31 @@ and the restarted receiver adopts them.
    systemctl daemon-reload && systemctl enable --now wherry-receiver
    ```
 
-The receiver's metrics listen on port 9465, beside a Nomad receiver's
-9464. The endpoint has no authentication; admit only Prometheus to it
+The receiver's metrics listen on port 9465. The endpoint has no authentication; admit only Prometheus to it
 with a `firewalld` rule.
 
 ### SELinux
 
-On RHEL 9's targeted policy, the receiver and the plugin, both `bin_t`
-under `/usr/local`, run as `unconfined_service_t`. An agent unit whose
-command starts with `/bin/sh`, as every run with a credential does, runs
-as `initrc_t`; one whose command is a `bin_t` binary runs as
-`unconfined_service_t`. Both are unconfined domains, so DAC and the unit's
-sandbox confine the agent.
-
-`/var/lib/wherry`, `/var/lib/private/wherry-agents` and
-`/var/lib/wherry-agents` are `var_lib_t`. Before each agent starts, PID 1's
-child, as `init_t`, opens the run's `stdout` and `stderr` for append and
-chowns and bind-mounts its work directory. Check for denials after the
-first runs:
+Before each agent starts, a child of PID 1 opens the run's `stdout` and
+`stderr` for append and chowns and bind-mounts its work directory, in
+PID 1's domain. The policy must let that domain manage the run
+directories, `/var/lib/wherry/systemd` and
+`/var/lib/private/wherry-agents`. A denial shows as runs that never start
+with class `setup`, such as `systemd exit status 209/STDOUT`. Check for
+denials after the first runs:
 
 ```sh
 ausearch -m AVC,USER_AVC,SELINUX_ERR -ts recent
 ```
 
-A denial there shows as runs that never start with class `setup`, such as
-`systemd exit status 209/STDOUT`. Label the run directories
-`init_var_lib_t`, which `init_t` manages:
+The type names below are those of the targeted policy that Fedora and
+RHEL-family distributions ship, as observed on RHEL 9. Other policies may
+name the types differently.
+
+PID 1 runs as `init_t`, and `/var/lib/wherry`,
+`/var/lib/private/wherry-agents` and `/var/lib/wherry-agents` are
+`var_lib_t`. Label the run directories `init_var_lib_t`, which `init_t`
+manages:
 
 ```sh
 semanage fcontext -a -t init_var_lib_t '/var/lib/wherry/systemd(/.*)?'
@@ -588,18 +592,11 @@ semanage fcontext -a -t init_var_lib_t '/var/lib/private/wherry-agents(/.*)?'
 restorecon -Rv /var/lib/wherry/systemd /var/lib/private/wherry-agents
 ```
 
-### Systemd and Nomad on one host
-
-Agent units run outside Nomad's cgroups, and Nomad's scheduler does not
-see their use. The Nomad client's `reserved` block must hold the systemd
-receiver's `capacity` times each agent's `cpu_quota` and `memory_mb`, or
-the two oversubscribe the host. `wherry.slice` carries no limit. Put the
-systemd receiver in a pool of its own: a run is adopted only by a receiver
-with the same adapter, on the same host.
-
-Agents run as dynamic users, so the Nomad client's files and podman's root
-socket are closed to them by mode. A world-readable file under the Nomad
-client's data or configuration directories is readable by agents.
+The receiver and the plugin, both `bin_t` under `/usr/local`, run as
+`unconfined_service_t`. An agent unit whose command starts with `/bin/sh`,
+as every run with a credential does, runs as `initrc_t`; one whose command
+is a `bin_t` binary runs as `unconfined_service_t`. Both are unconfined
+domains, so DAC and the unit's sandbox confine the agent.
 
 ## Tests
 
@@ -637,7 +634,7 @@ transient unit, so PID 1 must be able to execute it: on SELinux, install
 both binaries under `/usr/local/libexec` and restore their labels, as
 [Install](#install-1) does for the plugin. The tests use the plugin's own
 host paths, with a pool of their own per test, so prepare the host as
-[Install](#install) does, then run the suite as root:
+[Install](#install-1) does, then run the suite as root:
 
 ```sh
 install -d -m 0700 /run/wherry-systemd /var/lib/private
@@ -652,5 +649,5 @@ WHERRY_SYSTEMD_DEV=1 WHERRY_SYSTEMD_PLUGIN=/usr/local/libexec/wherry/test/wherry
 They include the protocol's conformance suite,
 `github.com/benemon/wherry/adapter/adaptertest`, in process, against the
 plugin binary, and under the receiver unit's capability bounding set. CI
-builds both binaries and runs them on the GitHub runner's systemd; RHEL
-9's systemd 252 is the gated platform.
+builds both binaries and runs them on the GitHub runner's systemd, 255
+on Ubuntu 24.04.

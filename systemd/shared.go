@@ -2,7 +2,7 @@
 
 package main
 
-// The pieces of this file are the Nomad plugin's too, and move into the adapter module once both plugins are green.
+// The pieces of this file are the Kubernetes plugin's too.
 
 import (
 	"bytes"

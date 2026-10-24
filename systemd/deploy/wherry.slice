@@ -1,5 +1,4 @@
-# The slice of every wherry agent unit, outside the receiver's cgroup. It sets no limit; the Nomad client's reserved
-# block holds the systemd receiver's capacity times each agent's resources.
+# The slice of every wherry agent unit, outside the receiver's cgroup. It sets no limit; each agent unit carries its own.
 [Unit]
 Description=wherry agent units
 
