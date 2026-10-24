@@ -6,7 +6,7 @@ CYCLONEDX           := $(shell go env GOPATH)/bin/cyclonedx-gomod
 VERSION   ?= dev
 DIST      ?= dist
 PLATFORMS ?= linux/amd64 linux/arm64
-PLUGINS   := nomad kubernetes
+PLUGINS   := nomad kubernetes systemd
 PLUGIN    ?=
 # image builds the receiver image from this checkout and the wherry release WHERRY_VERSION, such as v0.4.0, with
 # CONTAINER, podman or docker.

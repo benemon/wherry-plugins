@@ -43,6 +43,10 @@ jobs:
         working-directory: kubernetes
         run: go build ./...
 
+      - name: Build the systemd plugin
+        working-directory: systemd
+        run: go build ./...
+
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
         with:
