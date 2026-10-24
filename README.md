@@ -19,7 +19,7 @@ The plugins name shared settings alike; units follow each platform:
 | Agent environment | `runtime.env` | `runtime.env` | `runtime.env` |
 | CPU | `runtime.resources.cpu`, MHz, default 1000 | `runtime.resources.cpu`, quantity, default `500m` | `runtime.resources.cpu_quota`, percent of one CPU, default 50 |
 | Memory | `runtime.resources.memory_mb`, MiB, default 2048 | `runtime.resources.memory`, quantity, default `2Gi` | `runtime.resources.memory_mb`, MiB, default 2048 |
-| User | `runtime.user`, a name or `UID[:GID]`; the GID defaults to the UID for credential files | `runtime.user`, `UID[:GID]`; the GID defaults to the image's | `runtime.user`, a name or `UID[:GID]`, with `group` and `supplementary_groups`; unset, a dynamic user per run |
+| User | `runtime.user`, a name or `UID[:GID]`, with `group` on `docker` and `podman` and `supplementary_groups` on `docker`; the GID defaults to the UID for credential files | `runtime.user`, `UID[:GID]`, with `group` and `supplementary_groups` as GIDs; the GID defaults to the image's | `runtime.user`, a name or `UID[:GID]`, with `group` and `supplementary_groups`; unset, a dynamic user per run |
 | Placement | `node_pool`, `datacenters` | `node_selector`, `tolerations` | the receiver's host |
 
 Each plugin is its own Go module and builds against the tagged adapter

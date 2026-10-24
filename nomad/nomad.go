@@ -66,11 +66,13 @@ type Config struct {
 
 // Runtime defines the agent task the adapter launches.
 type Runtime struct {
-	Driver    string            `json:"driver"`
-	Config    map[string]any    `json:"config"`
-	Env       map[string]string `json:"env"`
-	Resources Resources         `json:"resources"`
-	User      string            `json:"user"`
+	Driver              string            `json:"driver"`
+	Config              map[string]any    `json:"config"`
+	Env                 map[string]string `json:"env"`
+	Resources           Resources         `json:"resources"`
+	User                string            `json:"user"`
+	Group               string            `json:"group"`
+	SupplementaryGroups []string          `json:"supplementary_groups"`
 }
 
 // Resources are the agent task's resources; unset, CPU is defaultCPU MHz and memory defaultMemoryMB.
@@ -126,9 +128,16 @@ const (
 var (
 	envName     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	runtimeUser = regexp.MustCompile(`^(?:[a-z_][a-z0-9_-]*|([1-9][0-9]*)(?::([1-9][0-9]*))?)$`)
+	groupName   = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 	// sweepGrace covers Dispatch's window between writing the variable and registering the job.
 	sweepGrace = 10 * time.Minute
 )
+
+// validGroup reports whether value is a group name or a positive 32-bit GID, other than root.
+func validGroup(value string) bool {
+	_, err := strconv.ParseUint(value, 10, 32)
+	return groupName.MatchString(value) && value != "root" || err == nil && value[0] != '0'
+}
 
 // newClient builds a Nomad client for config's address, CA and namespace with token.
 func newClient(config Config, token string) (*api.Client, error) {
@@ -172,6 +181,30 @@ func New(config Config, name, pool string, client *api.Client, logger hclog.Logg
 			u, g := int(id), int(group)
 			uid, gid = &u, &g
 		}
+	}
+	group, groups := config.Runtime.Group, config.Runtime.SupplementaryGroups
+	if group != "" && !validGroup(group) || slices.ContainsFunc(groups, func(g string) bool { return !validGroup(g) }) {
+		return nil, errors.New("runtime group and supplementary_groups must be group names or GIDs other than root")
+	}
+	// docker and podman take the primary group as the GID part of the task user, where a group without a user runs as
+	// UID 0; docker alone sets supplementary groups, through group_add. exec and java set no group.
+	switch driver := config.Runtime.Driver; {
+	case group != "" && driver != "docker" && driver != "podman":
+		return nil, errors.New("runtime group cannot be set on the " + driver + " driver")
+	case len(groups) > 0 && driver != "docker":
+		return nil, errors.New("runtime supplementary_groups cannot be set on the " + driver + " driver")
+	case len(groups) > 0 && config.Runtime.Config["group_add"] != nil:
+		return nil, errors.New("runtime supplementary_groups must be unset when the docker config sets group_add")
+	case group == "":
+	case config.Runtime.User == "":
+		return nil, errors.New("runtime group needs runtime user on the " + driver + " driver")
+	case strings.Contains(config.Runtime.User, ":"):
+		return nil, errors.New("runtime group must be unset when runtime user names a GID")
+	default:
+		if id, err := strconv.Atoi(group); err == nil && gid != nil {
+			gid = &id
+		}
+		config.Runtime.User += ":" + group
 	}
 	datacenters := config.Datacenters
 	if len(datacenters) == 0 {
@@ -430,8 +463,13 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 			GetterMode: new("file"), RelativeDest: new("local/inputs/" + fetch.Name),
 		})
 	}
+	taskConfig := maps.Clone(runtime.Config)
+	if groups := runtime.SupplementaryGroups; len(groups) > 0 {
+		taskConfig = map[string]any{"group_add": groups}
+		maps.Copy(taskConfig, runtime.Config)
+	}
 	tasks := []*api.Task{{
-		Name: taskName, Driver: runtime.Driver, User: runtime.User, Config: maps.Clone(runtime.Config), Env: env,
+		Name: taskName, Driver: runtime.Driver, User: runtime.User, Config: taskConfig, Env: env,
 		Resources: &api.Resources{CPU: cmp.Or(runtime.Resources.CPU, new(defaultCPU)), MemoryMB: cmp.Or(runtime.Resources.MemoryMB, new(defaultMemoryMB))},
 		LogConfig: &api.LogConfig{MaxFiles: new(3), MaxFileSizeMB: new(10)},
 		Templates: templates, Artifacts: artifacts,

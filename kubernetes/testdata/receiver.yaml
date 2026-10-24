@@ -39,7 +39,10 @@ adapters:
         image: registry.example.com/agent:1.0
         # Every container of the pod runs as this UID; quoted, since it is a
         # string.
-        user: "1001:1001"
+        user: "1001"
+        # The pod's runAsGroup and supplementalGroups.
+        group: "1001"
+        supplementary_groups: ["2001"]
         command: [/bin/sh, -c]
         args:
           - >-

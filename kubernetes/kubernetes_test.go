@@ -954,6 +954,59 @@ func TestNewValidatesConfig(t *testing.T) {
 	}
 }
 
+func TestNewRefusesGroupsKubernetesCannotTake(t *testing.T) {
+	groupErr := "runtime group must be a GID below 2^31 other than root"
+	supplementaryErr := "runtime supplementary_groups must be GIDs below 2^31 other than root"
+	for name, test := range map[string]struct {
+		edit func(*Runtime)
+		want string
+	}{
+		"group name":                {func(r *Runtime) { r.Group = "agents" }, groupErr},
+		"root group":                {func(r *Runtime) { r.Group = "0" }, groupErr},
+		"group leading zero":        {func(r *Runtime) { r.Group = "01002" }, groupErr},
+		"group past 2^31":           {func(r *Runtime) { r.Group = "2147483648" }, groupErr},
+		"supplementary group name":  {func(r *Runtime) { r.SupplementaryGroups = []string{"1003", "video"} }, supplementaryErr},
+		"root supplementary group":  {func(r *Runtime) { r.SupplementaryGroups = []string{"0"} }, supplementaryErr},
+		"supplementary past 2^31":   {func(r *Runtime) { r.SupplementaryGroups = []string{"2147483648"} }, supplementaryErr},
+		"group beside a user's GID": {func(r *Runtime) { r.User, r.Group = "1001:1001", "1002" }, "runtime group must be unset when runtime user names a GID"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := testConfig("https://127.0.0.1:6443", "")
+			config.Runtime.User = "1001"
+			test.edit(&config.Runtime)
+			if _, err := build(config, testPool, testToken); err == nil || err.Error() != test.want {
+				t.Fatalf("error %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildPodCarriesTheRuntimeGroups(t *testing.T) {
+	for name, test := range map[string]struct {
+		edit   func(*Runtime)
+		gid    *int64
+		groups []int64
+	}{
+		"unset":                 {func(r *Runtime) {}, nil, nil},
+		"group":                 {func(r *Runtime) { r.User, r.Group = "1001", "1002" }, new(int64(1002)), nil},
+		"group without a user":  {func(r *Runtime) { r.Group = "1002" }, new(int64(1002)), nil},
+		"supplementary groups":  {func(r *Runtime) { r.User, r.SupplementaryGroups = "1001", []string{"1003", "1004"} }, nil, []int64{1003, 1004}},
+		"user's GID and groups": {func(r *Runtime) { r.User, r.SupplementaryGroups = "1001:1002", []string{"1003"} }, new(int64(1002)), []int64{1003}},
+	} {
+		config := testConfig("https://127.0.0.1:6443", "")
+		test.edit(&config.Runtime)
+		adapter, err := build(config, testPool, testToken)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		security := adapter.buildPod(testRun("groups"), "agent-x").Spec.SecurityContext
+		gid := security.RunAsGroup
+		if (gid == nil) != (test.gid == nil) || gid != nil && *gid != *test.gid || !slices.Equal(security.SupplementalGroups, test.groups) {
+			t.Fatalf("%s: runAsGroup %v supplementalGroups %v, want %v %v", name, gid, security.SupplementalGroups, test.gid, test.groups)
+		}
+	}
+}
+
 func TestPodNamesAreTheRunID(t *testing.T) {
 	adapter := plainAdapter(t, nil)
 	if name := adapter.jobName("run-a"); name != poolPrefix+"run-a" {

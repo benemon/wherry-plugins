@@ -130,6 +130,8 @@ receiver exits with `adapter <name>: ...` on an error.
 | `env` | environment variables for the agent task |
 | `resources` | `cpu` (MHz, default `1000`) and `memory_mb` (default `2048`) |
 | `user` | the agent task's user; unset, the driver's default |
+| `group` | the agent task's primary group, a group name or GID; `docker` and `podman` only |
+| `supplementary_groups` | a list of group names or GIDs the agent also holds; `docker` only |
 
 `user` is a name matching `[a-z_][a-z0-9_-]*`, or `UID` or `UID:GID` with
 positive integers below 2^32 and no leading zeros; root (0) is refused. A numeric `user` also owns the task's credential
@@ -142,6 +144,20 @@ by name on the client and fail a task whose user has no account there, so
 for them `user` is a name. A numeric `user` fails every `exec` and
 `raw_exec` task, and on those drivers the credential files keep the
 client's owner and mode 0644 whatever `user` is set.
+
+`group` and `supplementary_groups` take names matching
+`[a-z_][a-z0-9_-]*` or GIDs below 2^32 with no leading zeros, quoted in
+YAML; root (`root` or 0) is refused. `group` needs `user`, since a
+container whose task user names a group alone runs as UID 0, and is
+refused beside a `user` that names a GID. The plugin sets the task's
+`user` to `USER:GROUP`, which the container runtime resolves; a numeric
+`group` beside a numeric `user` also owns the credential files. The
+plugin passes `supplementary_groups` to the `docker` driver as
+`group_add`, and refuses them beside a driver `config` that sets
+`group_add` itself. The `podman` driver sets no supplementary groups, and
+the `exec`, `java` and `raw_exec` drivers set no group, so the plugin
+refuses either field on a driver that cannot set it, with an error naming
+the field and the driver.
 
 The plugin sets `HOME`, `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR`,
 `WHERRY_CREDENTIALS_DIR`, `WHERRY_MODEL` when the task names a model, and the
@@ -219,9 +235,12 @@ adapters:
       node_pool: agents
       runtime:
         driver: docker
-        # Numeric, so the credential files belong to UID 1001 and GID 1001
+        # Numeric, so the credential files belong to UID 1001 and GID 1002
         # with mode 0600.
-        user: "1001:1001"
+        user: "1001"
+        group: "1002"
+        # The docker driver's group_add carries these.
+        supplementary_groups: [video]
         config:
           image: registry.example.com/agent:1.0
           command: /bin/sh
