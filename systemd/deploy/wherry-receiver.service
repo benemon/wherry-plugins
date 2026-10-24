@@ -1,0 +1,42 @@
+# The wherry receiver systemd-1 as a root system service. Its plugin starts each run's agent as a transient unit in
+# wherry.slice, so restarting or stopping the receiver leaves every agent running for the restarted receiver to adopt.
+# A compromised receiver is host root: any uid-0 process starts root units through systemd's private socket, whatever
+# its capabilities. The settings below bound accidents and partial exploits.
+[Unit]
+Description=wherry receiver systemd-1
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/wherry receiver run --bundle-file /etc/wherry/systemd-1.bundle \
+  --state-dir /var/lib/wherry/state --plugin-dir /usr/local/libexec/wherry/plugins \
+  --metrics-addr 0.0.0.0:9465
+Restart=on-failure
+RestartSec=5s
+StateDirectory=wherry
+StateDirectoryMode=0700
+RuntimeDirectory=wherry-systemd
+RuntimeDirectoryMode=0700
+ReadWritePaths=/var/lib/private/wherry-agents /var/lib/wherry-agents
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+# CAP_DAC_READ_SEARCH reads outputs at any mode, CAP_DAC_OVERRIDE removes a run's tree and its material from a work
+# directory the agent owns, and CAP_FOWNER removes entries of a sticky directory an agent made.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

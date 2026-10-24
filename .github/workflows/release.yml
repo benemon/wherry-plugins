@@ -7,7 +7,7 @@ name: release
 # Makefile; CI only picks targets, so a release reproduces locally.
 on:
   push:
-    tags: ['nomad/v*', 'kubernetes/v*']
+    tags: ['nomad/v*', 'kubernetes/v*', 'systemd/v*']
 
 permissions:
   contents: read
@@ -64,7 +64,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           case "$RELEASE_TAG" in (*[!A-Za-z0-9._/-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
-          case "$RELEASE_TAG" in (nomad/v*|kubernetes/v*) ;; (*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
+          case "$RELEASE_TAG" in (nomad/v*|kubernetes/v*|systemd/v*) ;; (*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
           case "${RELEASE_TAG#*/}" in (*/*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
           echo "PLUGIN=${RELEASE_TAG%%/*}" >> "$GITHUB_ENV"
           echo "VERSION=${RELEASE_TAG#*/}" >> "$GITHUB_ENV"

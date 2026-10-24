@@ -31,3 +31,7 @@ jobs:
       - name: Run govulncheck on the Kubernetes plugin
         working-directory: kubernetes
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Run govulncheck on the systemd plugin
+        working-directory: systemd
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

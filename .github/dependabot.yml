@@ -28,6 +28,14 @@ updates:
       go-kubernetes:
         patterns: ["*"]
 
+  - package-ecosystem: gomod
+    directory: /systemd
+    schedule:
+      interval: weekly
+    groups:
+      go-systemd:
+        patterns: ["*"]
+
   - package-ecosystem: docker
     directories: [/kubernetes, /kubernetes/test/e2e/agent]
     schedule:

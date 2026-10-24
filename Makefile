@@ -6,7 +6,7 @@ CYCLONEDX           := $(shell go env GOPATH)/bin/cyclonedx-gomod
 VERSION   ?= dev
 DIST      ?= dist
 PLATFORMS ?= linux/amd64 linux/arm64
-PLUGINS   := nomad kubernetes
+PLUGINS   := nomad kubernetes systemd
 PLUGIN    ?=
 # image builds the receiver image from this checkout and the wherry release WHERRY_VERSION, such as v0.4.0, with
 # CONTAINER, podman or docker.
@@ -31,12 +31,13 @@ check-fmt: ## Fail on Go files gofmt would change
 	if [ -n "$$out" ]; then echo "$$out"; echo "FAIL: gofmt"; exit 1; fi
 
 .PHONY: vet
+# The plugins ship for Linux alone, and systemd builds nowhere else, so vet and the licence check read them as Linux.
 vet: ## Vet every plugin
-	@set -e; for p in $(PLUGINS); do (cd $$p && go vet ./...); done
+	@set -e; for p in $(PLUGINS); do (cd $$p && GOOS=linux go vet ./...); done
 
 .PHONY: test
-test: ## Test every plugin with the race detector
-	@set -e; for p in $(PLUGINS); do (cd $$p && go test -race ./...); done
+test: ## Test every plugin with the race detector; one with no package for this OS is skipped
+	@set -e; for p in $(PLUGINS); do (cd $$p && if [ -n "$$(go list ./... 2>/dev/null)" ]; then go test -race ./...; else echo "$$p: skipped, no package for $$(go env GOOS)"; fi); done
 
 $(GO_LICENSES):
 	go install github.com/google/go-licenses@$(GO_LICENSES_VERSION)
@@ -48,7 +49,7 @@ $(CYCLONEDX):
 # A failure means a dependency changed licence on upgrade: investigate the
 # module, do not widen the list to get green.
 check-licenses: $(GO_LICENSES) ## Fail on dependency licences outside the allowlist
-	@set -e; for p in $(PLUGINS); do (cd $$p && $(GO_LICENSES) check ./... --allowed_licenses=$(LICENCE_ALLOWLIST)); done
+	@set -e; for p in $(PLUGINS); do (cd $$p && GOOS=linux $(GO_LICENSES) check ./... --allowed_licenses=$(LICENCE_ALLOWLIST)); done
 
 .PHONY: check-markers
 # wherry integrates agent harnesses by name, so product names are not

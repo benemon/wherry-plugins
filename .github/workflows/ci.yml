@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [nomad, kubernetes]
+        plugin: [nomad, kubernetes, systemd]
     env:
       PLUGIN: ${{ matrix.plugin }}
     steps:
@@ -43,3 +43,46 @@ jobs:
       - name: Run the plugin's gates
         if: steps.changes.outputs.changed == 'true'
         run: make check PLUGINS="$PLUGIN"
+
+  # The systemd plugin's real-host suite, as root on the runner's systemd. The runner's systemd is newer than 252, so
+  # this proves the D-Bus API; RHEL 9's systemd 252 is the gated platform.
+  systemd-host:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find changes to the plugin or the shared build files
+        id: changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: .github/changed.sh "$BASE" "^(systemd/|Makefile\$|\.github/workflows/ci\.yml\$|\.github/changed\.sh\$)"
+      - name: Set up Go
+        if: steps.changes.outputs.changed == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: systemd/go.mod
+          check-latest: true
+          cache: true
+          cache-dependency-path: systemd/go.sum
+      - name: Prepare the host as the plugin's README installs it
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          systemctl --version
+          systemctl is-system-running || true
+          sudo install -d -m 0700 /run/wherry-systemd /var/lib/private
+          sudo install -d -m 0755 /var/lib/private/wherry-agents /var/lib/wherry-agents /run/wherry/credentials /wherry
+      - name: Build the real-host suite and the plugin
+        if: steps.changes.outputs.changed == 'true'
+        working-directory: systemd
+        run: |
+          GOOS=linux go test -c -o "$RUNNER_TEMP/systemd.test" .
+          GOOS=linux go build -trimpath -o "$RUNNER_TEMP/wherry-plugin-systemd" .
+      - name: Run the real-host suite as root
+        if: steps.changes.outputs.changed == 'true'
+        working-directory: systemd
+        run: >-
+          sudo env WHERRY_SYSTEMD_DEV=1 WHERRY_SYSTEMD_PLUGIN="$RUNNER_TEMP/wherry-plugin-systemd"
+          "$RUNNER_TEMP/systemd.test" -test.count=1 -test.v -test.run 'OnSystemd|Conformance|Transient|DaemonReload|TwoRuns|UnitPropertiesOn'
