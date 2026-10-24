@@ -19,7 +19,8 @@ make build
 ```
 
 This writes `wherry-plugin-systemd` at the repository root. The plugin
-builds with `CGO_ENABLED=0`. `make check` runs the CI gates, and
+builds for Linux alone; on another OS, set `GOOS=linux GOARCH=amd64`.
+`make check` runs the CI gates, and
 `make dist PLUGIN=systemd VERSION=<version>` writes release archives for
 linux amd64 and arm64, and `checksums.txt`, into `dist`.
 
@@ -95,12 +96,12 @@ exits with `adapter <name>: ...` on an error.
 | `command` | required; the agent's command, its first element an absolute path; each element UTF-8 without NUL |
 | `args` | appended to `command`; each UTF-8 without NUL |
 | `env` | environment variables for the agent; names match `[A-Za-z_][A-Za-z0-9_]*` and are none of `CREDENTIALS_DIRECTORY`, `STATE_DIRECTORY` and `INVOCATION_ID`; values UTF-8 without NUL |
-| `resources` | `cpu_quota`, percent of one CPU (default 50), from 1 to 100 times the online CPUs; `memory_mb`, MiB (default 2048), from 64 to 2^31 - 1 |
+| `resources` | `cpu_quota`, percent of one CPU (default 50), from 1 to 100 times the CPUs the receiver may use; `memory_mb`, MiB (default 2048), from 64 to 2^31 - 1 |
 | `user` | a user name or `UID[:GID]`, a string; unset, each run gets a dynamic user of its own |
 | `group` | the agent's primary group, a group name or GID; unset, the user's own |
 | `supplementary_groups` | a list of group names or GIDs the agent also holds |
 
-`user`, `group` and `supplementary_groups` refuse root (0). Numeric IDs
+`user`, `group` and `supplementary_groups` refuse root (`root` or 0). Numeric IDs
 are positive integers below 2^32 with no leading zeros; quote them in
 YAML, such as `user: "1001"`. `group` is refused beside a `user` that
 names a GID. They set the unit's `User=`, `Group=` and
@@ -125,7 +126,7 @@ An adapter is ready while the manager's `SystemState` is `running`,
 `degraded` or `starting`. Any failed unit on the host sets `degraded`, a
 failed agent unit included until its run is released. `starting` holds
 while a boot job is still queued after `basic.target` is active, which an
-agent unit's default dependencies wait for, as on GitHub's runners. Readiness does not check the
+agent unit's default dependencies wait for. Readiness does not check the
 runtime command: a missing command shows at dispatch as a unit that never
 started with class `exec`, or, for a run with a credential, as an agent
 that exits 127.
@@ -637,7 +638,7 @@ transient unit, so PID 1 must be able to execute it: on SELinux, install
 both binaries under `/usr/local/libexec` and restore their labels, as
 [Install](#install-1) does for the plugin. The tests use the plugin's own
 host paths, with a pool of their own per test, so prepare the host as
-[Install](#install) does, then run the suite as root:
+[Install](#install-1) does, then run the suite as root:
 
 ```sh
 install -d -m 0700 /run/wherry-systemd /var/lib/private

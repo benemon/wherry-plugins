@@ -187,7 +187,7 @@ func New(config Config, name, pool string, client *api.Client, logger hclog.Logg
 		return nil, errors.New("runtime group and supplementary_groups must be group names or GIDs other than root")
 	}
 	// docker and podman take the primary group as the GID part of the task user, where a group without a user runs as
-	// UID 0; docker alone sets supplementary groups, through group_add. exec and java set no group.
+	// UID 0; docker alone sets supplementary groups, through group_add. exec, raw_exec and java set no group.
 	switch driver := config.Runtime.Driver; {
 	case group != "" && driver != "docker" && driver != "podman":
 		return nil, errors.New("runtime group cannot be set on the " + driver + " driver")
