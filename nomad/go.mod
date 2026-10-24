@@ -6,7 +6,7 @@ require (
 	github.com/benemon/wherry/adapter v0.5.0-rc.2
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/nomad/api v0.0.0-20261016150620-df630b26e78a
-	go.yaml.in/yaml/v3 v3.0.4
+	go.yaml.in/yaml/v3 v3.0.5
 )
 
 require (
