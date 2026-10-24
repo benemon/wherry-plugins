@@ -831,11 +831,23 @@ otherwise. They read:
 | `WHERRY_KUBERNETES_DEV_CA_FILE` | the API server's CA bundle |
 | `WHERRY_KUBERNETES_DEV_NAMESPACE` | the namespace for agent pods |
 | `WHERRY_KUBERNETES_DEV_HELPER_IMAGE` | the receiver image to run as `helper_image` |
+| `WHERRY_KUBERNETES_DEV_USER` | optional; the conformance tests' `runtime.user`, for a cluster that assigns no UID |
 
 They include the protocol's conformance suite,
 `github.com/benemon/wherry/adapter/adaptertest`, in process and against
-the built plugin. They set no `runtime.user`, and `TestRoleSuffices`
-requires pods admitted under restricted-v2, so they run on OpenShift.
+the built plugin, and `TestRoleSuffices`, which runs the suite and checks
+each pod it dispatches. They set `runtime.user` from
+`WHERRY_KUBERNETES_DEV_USER` and leave it unset without it, so they run on
+OpenShift without it and on other clusters with it, such as
+`WHERRY_KUBERNETES_DEV_USER=1001`. The other tests that need a cluster set
+no `runtime.user` and run on OpenShift.
+
+`TestRoleSuffices` checks each pod by where it runs:
+
+| Cluster | A pod carries | The test requires |
+| --- | --- | --- |
+| OpenShift | the annotation `openshift.io/scc` | the annotation's value is `restricted-v2` |
+| Kubernetes | no `openshift.io/scc` annotation | the namespace's label `pod-security.kubernetes.io/enforce` is `restricted`, and the pod was admitted |
 
 ### End to end on kind
 
