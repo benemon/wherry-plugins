@@ -39,7 +39,8 @@ const (
 	jobPrefix  = "agent-"
 	unitPrefix = "wherry-"
 	unitSuffix = ".service"
-	// maxCredentials is systemd's CREDENTIALS_TOTAL_SIZE_MAX, over IDs and values together.
+	// maxCredentials is systemd's CREDENTIALS_TOTAL_SIZE_MAX, over IDs and values together, and the size of the tmpfs
+	// systemd mounts as a unit's credential store.
 	maxCredentials = 1 << 20
 	// maxName is NAME_MAX, the longest delivered input name.
 	maxName         = 255
@@ -471,15 +472,24 @@ func wrapper(variable string) string {
 func (adapter *Adapter) properties(run wherry.Run, job string, credentials []loadCredential) []sd.Property {
 	name := unitName(job)
 	env := wherry.AgentEnv(adapter.runtime.Env)
-	// SHELL comes first so the runtime's env may override it; the plugin's own variables come last and win.
-	vars := []string{"SHELL=/bin/sh"}
+	own := []string{"HOME=" + workPath, "WHERRY_INPUT_DIR=" + inputPath, "WHERRY_OUTPUT_DIR=" + outputPath, "WHERRY_CREDENTIALS_DIR=" + credentialsPath}
+	if run.Model != "" {
+		own = append(own, "WHERRY_MODEL="+run.Model)
+	}
+	// systemd refuses an Environment= that sets a variable twice, so SHELL is set only where the runtime's env leaves it
+	// unset, and the plugin's own variables replace the runtime's.
+	var vars []string
+	if _, set := env["SHELL"]; !set {
+		vars = append(vars, "SHELL=/bin/sh")
+	}
+	for _, entry := range own {
+		variable, _, _ := strings.Cut(entry, "=")
+		delete(env, variable)
+	}
 	for _, variable := range slices.Sorted(maps.Keys(env)) {
 		vars = append(vars, variable+"="+env[variable])
 	}
-	vars = append(vars, "HOME="+workPath, "WHERRY_INPUT_DIR="+inputPath, "WHERRY_OUTPUT_DIR="+outputPath, "WHERRY_CREDENTIALS_DIR="+credentialsPath)
-	if run.Model != "" {
-		vars = append(vars, "WHERRY_MODEL="+run.Model)
-	}
+	vars = append(vars, own...)
 	argv := slices.Concat(adapter.runtime.Command, adapter.runtime.Args)
 	if run.Credential != nil {
 		argv = slices.Concat([]string{"/bin/sh", "-c", wrapper(adapter.credentialEnv), "wherry-agent"}, argv)
@@ -550,7 +560,8 @@ func (adapter *Adapter) properties(run wherry.Run, job string, credentials []loa
 	return properties
 }
 
-// Ready reports whether the manager is running, degraded included.
+// Ready reports whether the manager is running, degraded included, or starting: basic.target is active, which an
+// agent unit's default dependencies wait for, though the boot's other jobs have not all ended.
 func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 	bus, err := adapter.bus(ctx)
 	if err != nil {
@@ -561,7 +572,7 @@ func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 		return false, adapter.failed("read system state", err)
 	}
 	value, _ := state.Value.Value().(string)
-	return value == "running" || value == "degraded", nil
+	return value == "running" || value == "degraded" || value == "starting", nil
 }
 
 // deliverable refuses a run systemd cannot deliver: an input name over NAME_MAX, credentials over systemd's limit, and
@@ -933,7 +944,8 @@ func (adapter *Adapter) removeRun(job string) error {
 	return nil
 }
 
-// unit reads a unit's state; a unit systemd does not know reads as not loaded.
+// unit reads a unit's state; a unit systemd does not know reads as not loaded. A unit that failed to load again, as
+// systemd before 254 leaves an agent unit after daemon-reload, still holds its name and its running agent.
 func (adapter *Adapter) unit(ctx context.Context, name string) (unit, error) {
 	bus, err := adapter.bus(ctx)
 	if err != nil {
@@ -943,7 +955,7 @@ func (adapter *Adapter) unit(ctx context.Context, name string) (unit, error) {
 	if err != nil {
 		return unit{}, adapter.failed("read unit "+name, err)
 	}
-	u := unit{loaded: props["LoadState"] == "loaded"}
+	u := unit{loaded: props["LoadState"] != "not-found"}
 	if !u.loaded {
 		return u, nil
 	}

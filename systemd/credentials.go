@@ -11,16 +11,21 @@ import (
 	wherry "github.com/benemon/wherry/adapter"
 )
 
-// credentialTotal adds the run's credential IDs and values as systemd counts them against maxCredentials.
+// credentialTotal returns the larger of the run's credential IDs and values as systemd counts them against
+// maxCredentials, and the pages their files take in a store that is a tmpfs of maxCredentials, as systemd 255 mounts.
 func credentialTotal(run wherry.Run) int {
-	total := 0
+	total, pages, page := 0, 0, os.Getpagesize()
+	add := func(id string, value []byte) {
+		total += len(id) + len(value)
+		pages += (len(value) + page - 1) / page * page
+	}
 	if run.Credential != nil {
-		total += len(agentCredential) + len(run.Credential)
+		add(agentCredential, run.Credential)
 	}
 	for _, secret := range run.Credentials {
-		total += len(secret.File) + len(secret.Value)
+		add(secret.File, secret.Value)
 	}
-	return total
+	return max(total, pages)
 }
 
 // writeCredentials writes each of the run's credentials to a root 0600 file in the unit's root 0700 directory, from

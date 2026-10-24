@@ -220,6 +220,18 @@ func (f *fakeManager) StartTransientUnitContext(_ context.Context, name, _ strin
 	if err := f.call("start", name); err != nil {
 		return 0, err
 	}
+	for _, p := range properties {
+		if env, ok := p.Value.Value().([]string); ok && p.Name == "Environment" {
+			names := map[string]bool{}
+			for _, entry := range env {
+				variable, _, _ := strings.Cut(entry, "=")
+				if names[variable] {
+					return 0, dbus.Error{Name: "org.freedesktop.DBus.Error.InvalidArgs", Body: []any{"Invalid environment block."}}
+				}
+				names[variable] = true
+			}
+		}
+	}
 	f.mu.Lock()
 	if u := f.units[name]; u != nil && u.LoadState == "loaded" {
 		f.mu.Unlock()
@@ -420,7 +432,7 @@ func (f *fakeManager) KillUnitWithTarget(_ context.Context, name string, target 
 	defer f.mu.Unlock()
 	u := f.units[name]
 	switch {
-	case u == nil || u.LoadState != "loaded":
+	case u == nil || u.LoadState == "not-found":
 		return dbus.Error{Name: busNoSuchUnit, Body: []any{"Unit " + name + " not loaded."}}
 	case !u.populated():
 		return dbus.Error{Name: "org.freedesktop.systemd1.NoSuchProcess", Body: []any{"No matching processes to kill"}}
@@ -440,7 +452,7 @@ func (f *fakeManager) StopUnitContext(_ context.Context, name, _ string, ch chan
 	}
 	f.mu.Lock()
 	u := f.units[name]
-	if u == nil || u.LoadState != "loaded" {
+	if u == nil || u.LoadState == "not-found" {
 		f.mu.Unlock()
 		return 0, dbus.Error{Name: busNoSuchUnit, Body: []any{"Unit " + name + " not loaded."}}
 	}
@@ -470,7 +482,7 @@ func (f *fakeManager) ResetFailedUnitContext(_ context.Context, name string) err
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	u := f.units[name]
-	if u == nil || u.LoadState != "loaded" {
+	if u == nil || u.LoadState == "not-found" {
 		return dbus.Error{Name: busNoSuchUnit, Body: []any{"Unit " + name + " not loaded."}}
 	}
 	if u.ActiveState == "failed" {
@@ -981,13 +993,25 @@ func TestUnitEnvSetsAnOverridableShell(t *testing.T) {
 		want    string
 	}{{plain, testRun("shell"), "/bin/sh"}, {bash, testRun("shell-bash"), "/bin/bash"}} {
 		handle := dispatch(t, c.adapter, c.run)
-		if env := envOf(f, c.run); env[0] != "SHELL=/bin/sh" {
-			t.Errorf("%s: Environment starts %q; want SHELL=/bin/sh first", c.run.ID, env[0])
+		if env := envOf(f, c.run); !slices.Equal(slices.DeleteFunc(env, func(e string) bool { return !strings.HasPrefix(e, "SHELL=") }), []string{"SHELL=" + c.want}) {
+			t.Errorf("%s: Environment sets SHELL as %q; want SHELL=%s once", c.run.ID, env, c.want)
 		}
 		lines, _, err := followAll(t, c.adapter, handle, 0)
 		if err != nil || !slices.Equal(texts(lines), []string{c.want}) {
 			t.Errorf("%s: the agent's SHELL %q, %v; want %s", c.run.ID, texts(lines), err, c.want)
 		}
+	}
+}
+
+func TestUnitEnvSetsThePluginsVariablesOnce(t *testing.T) {
+	newHost(t)
+	config := agentConfig(`printf '%s %s\n' "$HOME" "$WHERRY_INPUT_DIR"`)
+	config.Runtime.Env["HOME"] = "/elsewhere"
+	config.Runtime.Env["WHERRY_INPUT_DIR"] = "/elsewhere/inputs"
+	adapter := newAgent(t, config)
+	lines, _, err := followAll(t, adapter, dispatch(t, adapter, testRun("home")), 0)
+	if err != nil || !slices.Equal(texts(lines), []string{"/wherry /wherry/inputs"}) {
+		t.Fatalf("the agent's HOME and WHERRY_INPUT_DIR %q, %v; want the plugin's", texts(lines), err)
 	}
 }
 
@@ -1391,20 +1415,30 @@ func TestDispatchRefusesANameOverNameMax(t *testing.T) {
 func TestDispatchRefusesCredentialsOverTheLimit(t *testing.T) {
 	f := newHost(t)
 	adapter := newAgent(t, agentConfig("exit 0"))
-	run := testRun("at-limit")
-	run.Credential = []byte("model-key")
-	value := maxCredentials - len(agentCredential) - len(run.Credential) - len("deploy-key")
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), value)}}
-	dispatch(t, adapter, run)
-	over := testRun("over-limit")
-	over.Credential = run.Credential
-	over.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), value+1)}}
-	outcome, _, err := adapter.Dispatch(context.Background(), over)
-	if outcome != wherry.OutcomeNothingCreated || err == nil || err.Error() != "the credentials exceed systemd's 1 MiB credential limit" {
-		t.Fatalf("one byte over: outcome %d, %v", outcome, err)
-	}
-	if exists(filepath.Join(controlRoot, jobOf(over))) || len(f.recorded("start")) != 1 {
-		t.Fatal("a run over the limit created something")
+	// The store's pages bind a run whose agent credential takes a page of its own; the IDs and values bind one key.
+	for _, c := range []struct {
+		name       string
+		credential []byte
+		value      int
+	}{
+		{"pages", []byte("model-key"), maxCredentials - os.Getpagesize()},
+		{"bytes", nil, maxCredentials - len("deploy-key")},
+	} {
+		run := testRun("at-limit-" + c.name)
+		run.Credential = c.credential
+		run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), c.value)}}
+		dispatch(t, adapter, run)
+		over := testRun("over-limit-" + c.name)
+		over.Credential = c.credential
+		over.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), c.value+1)}}
+		starts := len(f.recorded("start"))
+		outcome, _, err := adapter.Dispatch(context.Background(), over)
+		if outcome != wherry.OutcomeNothingCreated || err == nil || err.Error() != "the credentials exceed systemd's 1 MiB credential limit" {
+			t.Fatalf("%s: one byte over: outcome %d, %v", c.name, outcome, err)
+		}
+		if exists(filepath.Join(controlRoot, jobOf(over))) || len(f.recorded("start")) != starts {
+			t.Fatalf("%s: a run over the limit created something", c.name)
+		}
 	}
 }
 
@@ -1731,6 +1765,24 @@ func TestLookupMapsCapturedUnits(t *testing.T) {
 				t.Errorf("%s in phase %s: terminal %+v; want class %s, reason %q", c.file, c.phase, terminal, c.class, c.reason)
 			}
 		}
+	}
+}
+
+// systemd before 254 reloads an agent unit as bad-setting, its ExecStartEx= lost, while its agent runs on.
+func TestAUnitReloadedAsBadSettingStaysTheRun(t *testing.T) {
+	f := newHost(t)
+	adapter := newAgent(t, agentConfig("sleep 30"))
+	run := testRun("bad-setting")
+	handle := dispatch(t, adapter, run)
+	f.edit(unitOf(run), func(u *captured) { u.LoadState = "bad-setting" })
+	if job, err := adapter.Lookup(context.Background(), run.ID); err != nil || job.State != wherry.JobRunning {
+		t.Fatalf("lookup %+v, %v; want running", job, err)
+	}
+	if err := adapter.Stop(context.Background(), handle); err != nil {
+		t.Fatal(err)
+	}
+	if _, terminal, err := followAll(t, adapter, handle, 0); err != nil || terminal.Signal != "15" {
+		t.Fatalf("terminal %+v, %v; want the agent ended by SIGTERM", terminal, err)
 	}
 }
 
@@ -2671,7 +2723,7 @@ func TestSweepReportsDeletionsAndPendingRuns(t *testing.T) {
 func TestReadyFromSystemState(t *testing.T) {
 	f := newHost(t)
 	adapter := newAgent(t, agentConfig("exit 0"))
-	for state, want := range map[string]bool{"running": true, "degraded": true, "initializing": false, "starting": false, "maintenance": false, "stopping": false} {
+	for state, want := range map[string]bool{"running": true, "degraded": true, "initializing": false, "starting": true, "maintenance": false, "stopping": false} {
 		f.set(func() { f.state = state })
 		if ready, err := adapter.Ready(context.Background()); err != nil || ready != want {
 			t.Errorf("%s: ready %v, %v; want %v", state, ready, err, want)

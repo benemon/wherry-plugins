@@ -6,17 +6,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -124,12 +128,13 @@ func TestConformance(t *testing.T) {
 	adaptertest.Run(t, newAdapter, completes, neverStarts, 0)
 }
 
-// TestConformanceOverTheLink runs the suite against the built plugin, through the receiver's side of the link.
+// TestConformanceOverTheLink runs the suite against the plugin binary WHERRY_SYSTEMD_PLUGIN names, through the
+// receiver's side of the link.
 func TestConformanceOverTheLink(t *testing.T) {
 	completes, neverStarts := conformanceSettings(t)
-	binary := filepath.Join(t.TempDir(), "wherry-plugin-systemd")
-	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, output)
+	binary := os.Getenv("WHERRY_SYSTEMD_PLUGIN")
+	if binary == "" {
+		t.Fatal("WHERRY_SYSTEMD_PLUGIN names no plugin binary")
 	}
 	plugin, err := wherry.Launch(func() (string, error) { return binary, nil }, io.Discard)
 	if err != nil {
@@ -237,12 +242,33 @@ func TestDaemonReloadKeepsTheUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reloaded, err := conn.GetUnitPropertiesContext(context.Background(), handle.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := conn.GetManagerProperty("Version")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"Environment", "InaccessiblePaths", "BindPaths", "BindReadOnlyPaths", "DynamicUser", "LimitCORE", "StateDirectory"} {
 		if fmt.Sprint(before[name]) != fmt.Sprint(after[name]) {
 			t.Errorf("%s: %v before the reload, %v after", name, before[name], after[name])
 		}
 	}
-	if fmt.Sprint(before["ExecStartEx"].([][]any)[0][:3]) != fmt.Sprint(after["ExecStartEx"].([][]any)[0][:3]) {
+	// systemd before 254 writes ExecStartEx= into the transient file, a key its unit file parser does not know, so the
+	// reload drops the command and the unit loads as bad-setting while its agent runs on.
+	load, commands := "loaded", 1
+	if release, _ := strconv.Atoi(leading.FindString(strings.Trim(version, `"`))); release < 254 {
+		load, commands = "bad-setting", 0
+	}
+	execBefore, _ := before["ExecStartEx"].([][]any)
+	execAfter, _ := after["ExecStartEx"].([][]any)
+	switch {
+	case len(execBefore) != 1:
+		t.Fatalf("ExecStartEx before the reload %v; want one command", before["ExecStartEx"])
+	case reloaded["LoadState"] != load || len(execAfter) != commands:
+		t.Errorf("systemd %s: LoadState %v and ExecStartEx %v after the reload; want %s and %d commands", version, reloaded["LoadState"], execAfter, load, commands)
+	case commands == 1 && fmt.Sprint(execBefore[0][:3]) != fmt.Sprint(execAfter[0][:3]):
 		t.Errorf("ExecStartEx changed across the reload")
 	}
 	lines, terminal, err := followAll(t, adapter, handle, 0)
@@ -339,7 +365,16 @@ func TestAgentViewOnSystemd(t *testing.T) {
 
 func TestFixedUserOnSystemd(t *testing.T) {
 	config := shConfig(`mkdir outputs; id -u > outputs/uid; id -G > outputs/groups; stat -c '%u' /wherry > outputs/owner`)
-	config.Runtime.User, config.Runtime.Group, config.Runtime.SupplementaryGroups = "nobody", "nobody", []string{"adm"}
+	// nobody's group is nogroup on Debian and Ubuntu, and nobody on RHEL.
+	nobody, err := user.Lookup("nobody")
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, err := user.LookupGroupId(nobody.Gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Runtime.User, config.Runtime.Group, config.Runtime.SupplementaryGroups = "nobody", group.Name, []string{"adm"}
 	adapter := hostAdapter(t, config)
 	_, terminal, outputs := hostTurn(t, adapter, testRun("fixed"))
 	if terminal.ExitCode != 0 || strings.TrimSpace(string(outputs["uid"].Data)) != "65534" || strings.TrimSpace(string(outputs["owner"].Data)) != "65534" {
@@ -363,16 +398,50 @@ func TestCredentialFileOwnerAndModeOnSystemd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := hostAdapter(t, shConfig(`mkdir outputs; stat -c '%a %u' "$WHERRY_CREDENTIALS_DIR/deploy-key" > outputs/file; stat -c '%a' "$WHERRY_CREDENTIALS_DIR" > outputs/dir; id -u > outputs/uid; ssh-keygen -y -f "$WHERRY_CREDENTIALS_DIR/deploy-key" > outputs/public`))
+	adapter := hostAdapter(t, shConfig(`mkdir outputs; stat -c '%a %u' "$WHERRY_CREDENTIALS_DIR/deploy-key" > outputs/file; stat -c '%a %u' "$WHERRY_CREDENTIALS_DIR" > outputs/directory; id -u > outputs/uid; ssh-keygen -y -f "$WHERRY_CREDENTIALS_DIR/deploy-key" > outputs/public`))
 	run := testRun("key")
 	run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: private}}
-	_, _, outputs := hostTurn(t, adapter, run)
-	uid := strings.TrimSpace(string(outputs["uid"].Data))
-	if got := strings.TrimSpace(string(outputs["file"].Data)); got != "400 "+uid {
-		t.Errorf("credential file %q; want 400 %s", got, uid)
+	handle := dispatch(t, adapter, run)
+	if _, _, err := followAll(t, adapter, handle, 0); err != nil {
+		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(string(outputs["dir"].Data)); got != "500" {
-		t.Errorf("credential directory %q; want 500", got)
+	outputs := hostOutputs(t, adapter, handle)
+	uid, err := strconv.ParseUint(strings.TrimSpace(string(outputs["uid"].Data)), 10, 32)
+	if err != nil {
+		t.Fatalf("uid %q", outputs["uid"].Data)
+	}
+	// systemd gives the run's user its credentials by an ACL entry on a store that takes ACLs, a tmpfs, and by
+	// ownership on one that does not, a ramfs: 252 mounts a ramfs first, 255 a tmpfs with noswap (Linux 6.3 and later).
+	// With an ACL the group bits stat shows are the ACL's mask, and the owning group's entry grants nothing.
+	store := filepath.Join("/run/credentials", handle.Name)
+	for _, c := range []struct {
+		name, path string
+		perm       uint16
+	}{{"file", filepath.Join(store, "deploy-key"), 4}, {"directory", store, 5}} {
+		got := strings.TrimSpace(string(outputs[c.name].Data))
+		acl := make([]byte, 256)
+		n, err := syscall.Getxattr(c.path, "system.posix_acl_access", acl)
+		switch {
+		case errors.Is(err, syscall.ENODATA) || errors.Is(err, syscall.EOPNOTSUPP):
+			if want := fmt.Sprintf("%o %d", c.perm<<6, uid); got != want {
+				t.Errorf("credential %s %q without an ACL; want %s", c.name, got, want)
+			}
+		case err != nil:
+			t.Fatalf("read the ACL of %s: %v", c.path, err)
+		default:
+			// The entries are the owner, the run's user, the owning group, the mask and others, in the kernel's order.
+			want := binary.LittleEndian.AppendUint32(nil, 2)
+			for _, e := range []struct {
+				tag, perm uint16
+				id        uint32
+			}{{0x01, c.perm, 1<<32 - 1}, {0x02, c.perm, uint32(uid)}, {0x04, 0, 1<<32 - 1}, {0x10, c.perm, 1<<32 - 1}, {0x20, 0, 1<<32 - 1}} {
+				want = binary.LittleEndian.AppendUint16(binary.LittleEndian.AppendUint16(want, e.tag), e.perm)
+				want = binary.LittleEndian.AppendUint32(want, e.id)
+			}
+			if mode := fmt.Sprintf("%o 0", c.perm<<6|c.perm<<3); got != mode || !bytes.Equal(acl[:n], want) {
+				t.Errorf("credential %s %q with ACL %x; want %s with ACL %x", c.name, got, acl[:n], mode, want)
+			}
+		}
 	}
 	if !bytes.HasPrefix(outputs["public"].Data, []byte("ssh-ed25519 ")) {
 		t.Errorf("public key %q", outputs["public"].Data)
@@ -393,7 +462,8 @@ func TestCredentialsAtTheLimitOnSystemd(t *testing.T) {
 	adapter := hostAdapter(t, shConfig("exit 0"))
 	run := testRun("limit")
 	run.Credential = []byte("model-key")
-	value := maxCredentials - len(agentCredential) - len(run.Credential) - len("deploy-key")
+	// The agent credential takes one page of the store.
+	value := maxCredentials - os.Getpagesize()
 	run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), value)}}
 	if _, terminal, _ := hostTurn(t, adapter, run); !terminal.Started || terminal.ExitCode != 0 {
 		t.Fatalf("at the limit: terminal %+v; want the run started", terminal)
@@ -501,7 +571,8 @@ func TestStopKillsLeftoversOnSystemd(t *testing.T) {
 }
 
 func TestCollectAfterAgentOOMOnSystemd(t *testing.T) {
-	config := shConfig(`mkdir outputs; echo before > outputs/before; head -c 1g /dev/zero | tail > /dev/null`)
+	// tail keeps a line that never ends in memory, and exec makes it the unit's main process.
+	config := shConfig(`mkdir outputs; echo before > outputs/before; exec tail /dev/zero`)
 	config.Runtime.Resources.MemoryMB = new(64)
 	adapter := hostAdapter(t, config)
 	_, terminal, outputs := hostTurn(t, adapter, testRun("oom"))

@@ -121,9 +121,11 @@ Configure also fails when:
 - `/run/wherry-systemd` is not a directory owned by root with mode 0700:
   `/run/wherry-systemd must be root 0700`.
 
-An adapter is ready while the manager's `SystemState` is `running` or
-`degraded`. Any failed unit on the host sets `degraded`, a failed agent
-unit included until its run is released. Readiness does not check the
+An adapter is ready while the manager's `SystemState` is `running`,
+`degraded` or `starting`. Any failed unit on the host sets `degraded`, a
+failed agent unit included until its run is released. `starting` holds
+while a boot job is still queued after `basic.target` is active, which an
+agent unit's default dependencies wait for, as on GitHub's runners. Readiness does not check the
 runtime command: a missing command shows at dispatch as a unit that never
 started with class `exec`, or, for a run with a credential, as an agent
 that exits 127.
@@ -299,6 +301,12 @@ unit starts whatever the runtime command is, and a missing command ends the
 agent with exit code 127. The journal holds systemd's own account of a
 failed start; read it with `journalctl -u <unit>`.
 
+On systemd 252 and 253, `systemctl daemon-reload` loads a running agent
+unit again as `bad-setting`, without its command: those releases write
+`ExecStartEx=` into the transient unit file, a key their unit file parser
+does not know. The agent runs on, and the plugin follows, stops and
+collects the run as before.
+
 A run whose marker reached `starting` while its unit never appeared, as
 after a receiver crash in that window, is never started with class `start`
 when its standard output is empty, and ended otherwise.
@@ -360,9 +368,16 @@ properties and its transient unit file.
 systemd copies the credentials into the unit's store,
 `/run/credentials/<unit>/` on the host, readable by root and the run's
 user, until the unit stops. The agent sees the store read-only at
-`/run/wherry/credentials`: each file 0400 owned by the agent's UID in a
-0500 directory, on a separate filesystem from `/wherry`, so the agent
-cannot hard-link a credential into its outputs. `ssh` accepts a 0400 key.
+`/run/wherry/credentials`, on a separate filesystem from `/wherry`, so the
+agent cannot hard-link a credential into its outputs. Where the store is a
+ramfs, as systemd 252 mounts it first, each file is 0400 owned by the
+agent's UID in a 0500 directory it owns. Where the store is a tmpfs, as
+systemd 255 mounts it first on Linux 6.3 and later, each file is root
+0400 in a root 0500 directory, and an ACL entry gives the agent's UID
+read access, and search on the directory; `stat` shows them as 0440 and
+0550, since the group bits of a file with an ACL are its mask, and the
+owning group's entry grants nothing. Either way only root and the agent's
+UID read the credentials. `ssh` accepts the key in both.
 A run without credentials sees `/run/wherry/credentials` empty.
 
 The credential variable is set by a shell wrapper over the runtime command,
@@ -371,7 +386,9 @@ newlines, then execs the command; the agent keeps the unit's main PID.
 Without a credential the unit runs the runtime command alone.
 
 The credential IDs and values of a run together hold at most 1 MiB, as
-systemd allows. Dispatch refuses a run over it with
+systemd allows, and so do their files counted in whole pages, as the
+1 MiB tmpfs systemd 255 mounts for the store holds them. Dispatch refuses
+a run over either with
 `the credentials exceed systemd's 1 MiB credential limit`, and a run whose
 credential holds a NUL byte, creating nothing. Inputs are files and are not
 bounded by it. The plugin declares no inline limit; the pool's inline limit
@@ -598,17 +615,42 @@ sets of each state the plugin reads.
 
 The tests that need systemd run when `WHERRY_SYSTEMD_DEV=1` and the test
 process is root on a host with systemd 252 or later and cgroup v2, and
-skip otherwise. They use the plugin's own host paths, with a pool of their
-own per test, so prepare the host as [Install](#install) does:
+skip otherwise. They need no Go toolchain on the host: build the test
+binary and the plugin for the host's architecture beforehand, into
+`dist/test`, and copy them to the host:
+
+```sh
+cd systemd
+GOOS=linux GOARCH=amd64 go test -c -o ../dist/test/systemd.test .
+GOOS=linux GOARCH=amd64 go build -trimpath -o ../dist/test/wherry-plugin-systemd .
+```
+
+The suite reads two variables:
+
+| Variable | Value |
+| --- | --- |
+| `WHERRY_SYSTEMD_DEV` | `1` runs the tests that need systemd |
+| `WHERRY_SYSTEMD_PLUGIN` | the path of the plugin binary `TestConformanceOverTheLink` launches |
+
+`TestReceiverBoundingSetOnSystemd` runs the test binary again as a
+transient unit, so PID 1 must be able to execute it: on SELinux, install
+both binaries under `/usr/local/libexec` and restore their labels, as
+[Install](#install-1) does for the plugin. The tests use the plugin's own
+host paths, with a pool of their own per test, so prepare the host as
+[Install](#install) does, then run the suite as root:
 
 ```sh
 install -d -m 0700 /run/wherry-systemd /var/lib/private
 install -d -m 0755 /var/lib/private/wherry-agents /var/lib/wherry-agents /run/wherry/credentials /wherry
-cd systemd && WHERRY_SYSTEMD_DEV=1 go test -count=1 -run 'OnSystemd|Conformance|Transient|DaemonReload|TwoRuns|UnitPropertiesOn' .
+install -D -m 0755 -t /usr/local/libexec/wherry/test dist/test/systemd.test dist/test/wherry-plugin-systemd
+restorecon -Rv /usr/local/libexec/wherry
+cd /usr/local/libexec/wherry/test
+WHERRY_SYSTEMD_DEV=1 WHERRY_SYSTEMD_PLUGIN=/usr/local/libexec/wherry/test/wherry-plugin-systemd \
+  ./systemd.test -test.count=1 -test.v -test.run 'OnSystemd|Conformance|Transient|DaemonReload|TwoRuns|UnitPropertiesOn'
 ```
 
 They include the protocol's conformance suite,
 `github.com/benemon/wherry/adapter/adaptertest`, in process, against the
-built plugin, and under the receiver unit's capability bounding set. CI
-runs them on the GitHub runner's systemd; RHEL 9's systemd 252 is the
-gated platform.
+plugin binary, and under the receiver unit's capability bounding set. CI
+builds both binaries and runs them on the GitHub runner's systemd; RHEL
+9's systemd 252 is the gated platform.
