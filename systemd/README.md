@@ -565,32 +565,38 @@ with a `firewalld` rule.
 
 ### SELinux
 
-On RHEL 9's targeted policy, the receiver and the plugin, both `bin_t`
-under `/usr/local`, run as `unconfined_service_t`. An agent unit whose
-command starts with `/bin/sh`, as every run with a credential does, runs
-as `initrc_t`; one whose command is a `bin_t` binary runs as
-`unconfined_service_t`. Both are unconfined domains, so DAC and the unit's
-sandbox confine the agent.
-
-`/var/lib/wherry`, `/var/lib/private/wherry-agents` and
-`/var/lib/wherry-agents` are `var_lib_t`. Before each agent starts, PID 1's
-child, as `init_t`, opens the run's `stdout` and `stderr` for append and
-chowns and bind-mounts its work directory. Check for denials after the
-first runs:
+Before each agent starts, a child of PID 1 opens the run's `stdout` and
+`stderr` for append and chowns and bind-mounts its work directory, in
+PID 1's domain. The policy must let that domain manage the run
+directories, `/var/lib/wherry/systemd` and
+`/var/lib/private/wherry-agents`. A denial shows as runs that never start
+with class `setup`, such as `systemd exit status 209/STDOUT`. Check for
+denials after the first runs:
 
 ```sh
 ausearch -m AVC,USER_AVC,SELINUX_ERR -ts recent
 ```
 
-A denial there shows as runs that never start with class `setup`, such as
-`systemd exit status 209/STDOUT`. Label the run directories
-`init_var_lib_t`, which `init_t` manages:
+The type names below are those of the targeted policy that Fedora and
+RHEL-family distributions ship, as observed on RHEL 9. Other policies may
+name the types differently.
+
+PID 1 runs as `init_t`, and `/var/lib/wherry`,
+`/var/lib/private/wherry-agents` and `/var/lib/wherry-agents` are
+`var_lib_t`. Label the run directories `init_var_lib_t`, which `init_t`
+manages:
 
 ```sh
 semanage fcontext -a -t init_var_lib_t '/var/lib/wherry/systemd(/.*)?'
 semanage fcontext -a -t init_var_lib_t '/var/lib/private/wherry-agents(/.*)?'
 restorecon -Rv /var/lib/wherry/systemd /var/lib/private/wherry-agents
 ```
+
+The receiver and the plugin, both `bin_t` under `/usr/local`, run as
+`unconfined_service_t`. An agent unit whose command starts with `/bin/sh`,
+as every run with a credential does, runs as `initrc_t`; one whose command
+is a `bin_t` binary runs as `unconfined_service_t`. Both are unconfined
+domains, so DAC and the unit's sandbox confine the agent.
 
 ## Tests
 
