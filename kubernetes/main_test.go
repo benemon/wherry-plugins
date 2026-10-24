@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -17,6 +19,8 @@ import (
 	"github.com/benemon/wherry/adapter/adaptertest"
 	"github.com/hashicorp/go-hclog"
 	"go.yaml.in/yaml/v3"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func settings(t *testing.T, name string, config map[string]any) wherry.Settings {
@@ -188,6 +192,9 @@ func conformanceSettings(t *testing.T) (wherry.Settings, wherry.Settings) {
 		var config map[string]any
 		_ = json.Unmarshal(s.Config, &config)
 		config["namespace"] = dev.Namespace
+		if user := os.Getenv("WHERRY_KUBERNETES_DEV_USER"); user != "" {
+			config["runtime"].(map[string]any)["user"] = user
+		}
 		s.Config, _ = json.Marshal(config)
 		s.Platform = devToken(t)
 	}
@@ -216,41 +223,87 @@ func TestConformanceOverTheLink(t *testing.T) {
 	}, completes, neverStarts, inlineLimit)
 }
 
-// admitted wraps an adapter and records the SCC each pod it dispatches was admitted under.
+// admitted wraps an adapter and records, for each pod it dispatches, whether the pod was admitted as restricted.
 type admitted struct {
 	wherry.Adapter
-	t    *testing.T
-	sccs chan string
+	t      *testing.T
+	checks chan error
 }
 
 func (a admitted) Dispatch(ctx context.Context, run wherry.Run) (wherry.Outcome, wherry.Handle, error) {
 	outcome, handle, err := a.Adapter.Dispatch(ctx, run)
 	if built, ok := a.Adapter.(*Adapter); ok && err == nil {
-		pod, getErr := built.pods().Get(ctx, handle.Name, getOptions)
-		if getErr != nil {
-			a.t.Errorf("read dispatched pod: %v", getErr)
+		pod, podErr := built.pods().Get(ctx, handle.Name, getOptions)
+		namespace, namespaceErr := built.core.Namespaces().Get(ctx, built.namespace, getOptions)
+		if readErr := errors.Join(podErr, namespaceErr); readErr != nil {
+			a.t.Errorf("read dispatched pod and its namespace: %v", readErr)
 		} else {
-			a.sccs <- pod.Annotations["openshift.io/scc"]
+			a.checks <- restricted(namespace, pod)
 		}
 	}
 	return outcome, handle, err
 }
 
+// restricted checks an admitted pod against OpenShift's restricted-v2 SCC where OpenShift annotated the pod with
+// its SCC, and against the namespace's Pod Security enforce label elsewhere.
+func restricted(namespace *corev1.Namespace, pod *corev1.Pod) error {
+	if scc, ok := pod.Annotations["openshift.io/scc"]; ok {
+		if scc != "restricted-v2" {
+			return fmt.Errorf("a pod was admitted under SCC %q; want restricted-v2", scc)
+		}
+		return nil
+	}
+	if level := namespace.Labels["pod-security.kubernetes.io/enforce"]; level != "restricted" {
+		return fmt.Errorf("namespace %s enforces Pod Security level %q; want restricted", namespace.Name, level)
+	}
+	return nil
+}
+
+func TestRestrictedByPlatform(t *testing.T) {
+	enforcing := func(level string) *corev1.Namespace {
+		namespace := &corev1.Namespace{}
+		namespace.Name = testNamespace
+		if level != "" {
+			namespace.Labels = map[string]string{"pod-security.kubernetes.io/enforce": level}
+		}
+		return namespace
+	}
+	underSCC := func(scc string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"openshift.io/scc": scc}}}
+	}
+	for name, c := range map[string]struct {
+		namespace *corev1.Namespace
+		pod       *corev1.Pod
+		admitted  bool
+	}{
+		"openshift restricted-v2":           {enforcing("restricted"), underSCC("restricted-v2"), true},
+		"openshift restricted-v2 unlabeled": {enforcing(""), underSCC("restricted-v2"), true},
+		"openshift anyuid":                  {enforcing("restricted"), underSCC("anyuid"), false},
+		"kubernetes restricted":             {enforcing("restricted"), &corev1.Pod{}, true},
+		"kubernetes baseline":               {enforcing("baseline"), &corev1.Pod{}, false},
+		"kubernetes unlabeled":              {enforcing(""), &corev1.Pod{}, false},
+	} {
+		if err := restricted(c.namespace, c.pod); (err == nil) != c.admitted {
+			t.Errorf("%s: %v; want admitted %v", name, err, c.admitted)
+		}
+	}
+}
+
 func TestRoleSuffices(t *testing.T) {
 	completes, neverStarts := conformanceSettings(t)
-	sccs := make(chan string, 64)
+	checks := make(chan error, 64)
 	adaptertest.Run(t, func(settings wherry.Settings, logger hclog.Logger) (wherry.Adapter, error) {
 		built, err := newAdapter(settings, logger)
 		if err != nil {
 			return nil, err
 		}
-		return admitted{Adapter: built, t: t, sccs: sccs}, nil
+		return admitted{Adapter: built, t: t, checks: checks}, nil
 	}, completes, neverStarts, inlineLimit)
-	close(sccs)
+	close(checks)
 	count := 0
-	for scc := range sccs {
-		if count++; scc != "restricted-v2" {
-			t.Fatalf("a pod was admitted under SCC %q; want restricted-v2", scc)
+	for err := range checks {
+		if count++; err != nil {
+			t.Fatal(err)
 		}
 	}
 	if count == 0 {
