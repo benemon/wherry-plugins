@@ -261,8 +261,6 @@ adapters:
   - name: dedicated
     platform: kubernetes
     agent: coder
-    output: file
-    reply_file: reply.md
     labels:
       nodes: dedicated
     config:
@@ -300,7 +298,6 @@ adapters:
   - name: shared
     platform: kubernetes
     agent: reviewer
-    output: claude
     labels:
       nodes: shared
     config:
@@ -376,14 +373,13 @@ message as the reason:
 
 A first `ErrImagePull` and an unscheduled pod are waited on.
 
-### Credential targets and outcome file
+### Credential targets
 
-Kubernetes injects each environment target into the agent container from a
-Secret key reference. The init container copies each file target from the
-Secret into `/run/wherry/credentials/files`, which
-`WHERRY_CREDENTIALS_DIR` names. The receiver collects
-`$WHERRY_OUTPUT_DIR/.wherry/outcome.json` from the output directory like any
-other file.
+The run's Secret holds each environment target under `env.<variable>` and
+each file target under `credentials.<file>`, and a Secret key is at most 253
+bytes, so an environment target's name is at most 249 bytes and a file
+target's at most 241. Dispatch refuses a longer one. An environment target
+replaces a runtime `env` variable of the same name.
 
 The agent sees:
 
@@ -392,7 +388,8 @@ The agent sees:
   through a `secretKeyRef`, so its value never appears in the pod spec;
 - each input file in `/wherry/inputs`, mode 0600, in a 0700 directory;
 - each S3 input in `/wherry/inputs`, as described in [S3 inputs](#s3-inputs);
-- each file target as a file in `/run/wherry/credentials/files`, mode
+- each file target as a file in `/run/wherry/credentials/files`, copied
+  from the Secret by the init container, mode
   0600, in a 0700 directory, both owned by the agent's UID, so `ssh`
   accepts a private key. File targets are on a memory-backed volume,
   which the agent mounts read-only and which is a different filesystem from
@@ -419,11 +416,10 @@ and an `ephemeral_storage` below `work_limit` evicts first.
 
 The plugin reads the agent's standard output from the logs API, which
 interleaves standard error with it. A line the agent writes to standard
-error in the middle of a standard output line corrupts the JSON result
-line, and the run ends `agent ended without a result`. Send standard
-error elsewhere in the agent's command, such as `2>"$HOME/agent.err"`.
-Kubernetes 1.32 adds `PodLogOptions.Stream` to read standard output alone,
-which removes this trap on a later minimum platform.
+error in the middle of a standard output line splits that transcript line.
+Send standard error elsewhere in the agent's command, such as
+`2>"$HOME/agent.err"`. Kubernetes 1.32 adds `PodLogOptions.Stream` to read
+standard output alone, which removes this on a later minimum platform.
 
 The plugin follows the agent's log while it runs, and the kubelet's follow
 stream carries every byte across log rotation. A follow that starts from
@@ -453,8 +449,8 @@ nothing, when it holds more entries than the receiver's limit. The holder
 reads only regular files the listing shows within the limits, opened
 within the outputs tree and refused when they are anything but a regular
 file of the listed size; links, FIFOs and devices are listed with their
-type and never read. An output the receiver streams, an S3 output, it
-streams as the receiver reads it. The agent creates the outputs directory;
+type and never read. An output the receiver streams, an S3 output or the
+agent's [outcome file](https://github.com/benemon/wherry/blob/main/docs/reference.md#agent-contract), it streams as the receiver reads it. The agent creates the outputs directory;
 without one there are no outputs.
 
 When a run ends, the plugin deletes its Secret and ends the holder, so the

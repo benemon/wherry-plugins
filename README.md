@@ -14,7 +14,6 @@ The plugins name shared settings alike; units follow each platform:
 
 | Setting | Nomad | Kubernetes | systemd |
 | --- | --- | --- | --- |
-| Credential variable | `credential_env` | `credential_env` | `credential_env` |
 | Agent image and command | `runtime.config` (driver-specific) | `runtime.image`, `command`, `args` | `runtime.command`, `args`, on the receiver's host |
 | Agent environment | `runtime.env` | `runtime.env` | `runtime.env` |
 | CPU | `runtime.resources.cpu`, MHz, default 1000 | `runtime.resources.cpu`, quantity, default `500m` | `runtime.resources.cpu_quota`, percent of one CPU, default 50 |

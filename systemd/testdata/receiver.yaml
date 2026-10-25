@@ -27,8 +27,6 @@ adapters:
   - name: provisioned
     platform: systemd
     agent: reviewer
-    output: file
-    reply_file: reply.md
     labels:
       platform: systemd-provisioned
     config:

@@ -19,8 +19,6 @@ adapters:
   - name: dedicated
     platform: kubernetes
     agent: coder
-    output: file
-    reply_file: reply.md
     labels:
       nodes: dedicated
     config:
@@ -58,7 +56,6 @@ adapters:
   - name: shared
     platform: kubernetes
     agent: reviewer
-    output: claude
     labels:
       nodes: shared
     config:

@@ -20,8 +20,6 @@ adapters:
   - name: container
     platform: nomad
     agent: coder
-    output: file
-    reply_file: reply.md
     labels:
       isolation: container
     config:
@@ -52,7 +50,6 @@ adapters:
   - name: host
     platform: nomad
     agent: reviewer
-    output: claude
     labels:
       isolation: host
     config:

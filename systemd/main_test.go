@@ -103,13 +103,11 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 			Config map[string]any `yaml:"config"`
 		} `yaml:"platforms"`
 		Adapters []struct {
-			Name      string            `yaml:"name"`
-			Platform  string            `yaml:"platform"`
-			Agent     string            `yaml:"agent"`
-			Output    string            `yaml:"output"`
-			ReplyFile string            `yaml:"reply_file"`
-			Labels    map[string]string `yaml:"labels"`
-			Config    map[string]any    `yaml:"config"`
+			Name     string            `yaml:"name"`
+			Platform string            `yaml:"platform"`
+			Agent    string            `yaml:"agent"`
+			Labels   map[string]string `yaml:"labels"`
+			Config   map[string]any    `yaml:"config"`
 		} `yaml:"adapters"`
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(example))

@@ -191,8 +191,6 @@ adapters:
   - name: provisioned
     platform: systemd
     agent: reviewer
-    output: file
-    reply_file: reply.md
     labels:
       platform: systemd-provisioned
     config:
@@ -261,7 +259,7 @@ The agent sees:
 - each S3 input in `/wherry/inputs`, as described in [S3 inputs](#s3-inputs);
 - each file target as a file in `/run/wherry/credentials`, and each
   environment target in the environment variable named by its target, as
-  described in [Credential targets and outcome file](#credential-targets-and-outcome-file);
+  described in [Credential targets](#credential-targets);
 - its outputs directory, which it creates, at `/wherry/outputs`;
 - `HOME` set to `/wherry`, the run's own work directory, so no agent state,
   history or login carries from one run to the next;
@@ -304,7 +302,7 @@ when its standard output is empty, and ended otherwise.
 The plugin follows the agent's standard output from its file by byte
 offset; the file is never rotated, so every offset stays readable until
 the run is purged. Standard error goes to its own file, which the plugin
-never reads, so a standard error line cannot split the result line. Read
+never reads, so a standard error line cannot split a transcript line. Read
 it as root until the run is purged. systemd's own messages about the unit
 stay in the journal.
 
@@ -320,7 +318,8 @@ descending a link, and refuses the tree, reading nothing, when it holds
 more entries than the receiver's limit. It reads only regular files of the
 listed size within the limits, through an `os.Root` over the outputs
 directory; links, FIFOs and devices are listed with their type and never
-read. Outputs stay on disk after any agent death, an OOM kill included.
+read. An output the receiver streams, an S3 output or the agent's
+[outcome file](https://github.com/benemon/wherry/blob/main/docs/reference.md#agent-contract), it streams as the receiver reads it. Outputs stay on disk after any agent death, an OOM kill included.
 
 When a run ends, the plugin records how it ended in the marker, stops and
 resets the unit, which drops its credential store, its dynamic user and
@@ -344,14 +343,16 @@ tenant, whose outputs share a filesystem with the receiver's signing key.
 A separate filesystem mounted at `/var/lib/private/wherry-agents`, or an
 XFS project quota on it, bounds them.
 
-### Credential targets and outcome file
+### Credential targets
 
 systemd's `LoadCredential=` reads each target when the unit starts.
 Dispatch writes an environment target as `.env.<variable>` and a file
 target under its file name to `/run/wherry-systemd/<unit>/`, root 0600 in a
 root 0700 directory, before the start, and removes the directory when the
 start job ends, whatever its result. The sweep removes any such directory
-whose unit is not starting.
+whose unit is not starting. The plugin never uses `SetCredential=`, whose
+value any local user reads from the unit's properties and its transient
+unit file.
 
 systemd copies the targets into the unit's store,
 `/run/credentials/<unit>/` on the host, readable by root and the run's
@@ -370,8 +371,10 @@ A run without targets sees `/run/wherry/credentials` empty.
 
 For each environment target, a shell wrapper reads
 `/run/wherry/credentials/.env.<variable>`, keeps trailing newlines, and
-exports the value before it execs the runtime command. The agent keeps the
-unit's main PID. A file target remains available under its file name in
+exports the value before it execs the runtime command, so an environment
+target replaces a runtime `env` variable of the same name, and one named
+`CREDENTIALS_DIRECTORY`, `STATE_DIRECTORY` or `INVOCATION_ID` replaces the
+value systemd sets. The agent keeps the unit's main PID. A file target remains available under its file name in
 `/run/wherry/credentials`.
 
 The target IDs and values of a run together hold at most 1 MiB, as systemd
@@ -380,7 +383,7 @@ systemd 255 mounts for the store holds them. Dispatch refuses a run over
 either with `the credentials exceed systemd's 1 MiB credential limit`, and
 a run whose environment target holds a NUL byte, creating nothing. Inputs
 are files and are not bounded by it. The plugin declares no inline limit;
-the pool's inline limit and the record limit bind. A delivered input name
+the record limit binds. A delivered input name
 is at most 255 bytes.
 
 Environment targets are in the agent's environment, and so in
@@ -389,9 +392,7 @@ systemd-coredump from writing a crashed agent's environment to the
 journal. A core file, where one is written under
 `/var/lib/systemd/coredump`, holds the agent's memory and is root-readable
 until vacuumed. An agent process may lower its own core limit to 0, which
-re-enables the handler for it. The receiver collects
-`$WHERRY_OUTPUT_DIR/.wherry/outcome.json` from the output directory like any
-other file.
+re-enables the handler for it.
 
 ### Sweep
 
