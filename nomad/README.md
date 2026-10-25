@@ -162,9 +162,12 @@ job it builds.
 
 ```yaml
 capacity: 2
+platforms:
+  - name: nomad
+    type: nomad
 adapters:
   - name: container
-    type: nomad
+    platform: nomad
     agent: coder
     labels:
       isolation: container
@@ -217,8 +220,6 @@ adapters:
   - name: container
     platform: nomad
     agent: coder
-    output: file
-    reply_file: reply.md
     labels:
       isolation: container
     config:
@@ -249,7 +250,6 @@ adapters:
   - name: host
     platform: nomad
     agent: reviewer
-    output: claude
     labels:
       isolation: host
     config:
@@ -298,14 +298,13 @@ finishes in that time succeeds with nothing counted; otherwise the plugin
 counts a refused signal as a platform error and deregisters the job. A stop
 whose context ends during the wait returns at once with the context's error.
 
-### Credential targets and outcome file
+### Credential targets
 
-Nomad renders an environment target into the task environment through
-`$NOMAD_SECRETS_DIR/wherry.env`. It renders a file target under
-`$NOMAD_SECRETS_DIR/credentials/<file>`, which
-`WHERRY_CREDENTIALS_DIR` names. The receiver collects
-`$WHERRY_OUTPUT_DIR/.wherry/outcome.json` from the output directory like any
-other file.
+Nomad renders environment targets through `$NOMAD_SECRETS_DIR/wherry.env`, a
+[template env file](https://developer.hashicorp.com/nomad/docs/job-specification/template#env)
+of `KEY=value` lines. A value holding a newline does not arrive intact, so
+give such a credential a file target. An environment target replaces a
+runtime `env` variable of the same name.
 
 The agent task receives:
 
@@ -316,7 +315,7 @@ The agent task receives:
 - each S3 input in `$NOMAD_TASK_DIR/inputs`, fetched as described in
   [S3 inputs](#s3-inputs);
 - each file target as a file in `$NOMAD_SECRETS_DIR/credentials`,
-  rendered the same way. With a numeric `user`, each file belongs to that
+  rendered by a template. With a numeric `user`, each file belongs to that
   UID and GID with mode 0600. With a user name or no `user`, each file
   belongs to the Nomad client's user, usually root, with Nomad's default
   template mode, 0644, so any user in the task's filesystem can read it.
@@ -356,8 +355,9 @@ read whose length differs from the listing, since the API answers some
 failed reads with status 200 and the error as the body. An output the
 receiver streams, an S3 output, it streams as the receiver reads it, at
 most the size the listing shows; the receiver's upload fails when the
-length differs. The agent creates the outputs directory; without one there
-are no outputs. The listing shows no link count, so a hard link to a
+length differs. The receiver streams the agent's [outcome file](https://github.com/benemon/wherry/blob/main/docs/reference.md#agent-contract) the same
+way. The agent creates the outputs directory; without one there are no
+outputs. The listing shows no link count, so a hard link to a
 credential file reads as a regular file; the receiver's redaction of
 delivered credential values covers it.
 
