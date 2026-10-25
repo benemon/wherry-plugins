@@ -258,17 +258,13 @@ platforms:
       ca_file: /etc/wherry/kubernetes-ca.pem
       # Holds the agent pods and their Secrets; the token holds admin here alone.
       namespace: agents
-      # Required while any adapter on the platform sets a credential.
-      credential_env: MODEL_API_KEY
       # The receiver image at the receiver's tag.
       helper_image: registry.example.com/wherry-receiver:1.0.0
 adapters:
-  # An agent on dedicated nodes that takes a credential and writes its reply
-  # to a file.
+  # An agent on dedicated nodes that writes its reply to a file.
   - name: dedicated
     platform: kubernetes
     agent: coder
-    credential: model-api-key
     output: file
     reply_file: reply.md
     labels:

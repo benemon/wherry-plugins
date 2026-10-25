@@ -27,6 +27,7 @@ import (
 	"time"
 
 	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/adapter/adaptertest"
 	sd "github.com/coreos/go-systemd/v22/dbus"
 	"github.com/godbus/dbus/v5"
 	"github.com/hashicorp/go-hclog"
@@ -526,7 +527,7 @@ func fast(t *testing.T) {
 }
 
 func agentConfig(script string) Config {
-	return Config{CredentialEnv: credentialEnv, Runtime: Runtime{
+	return Config{Runtime: Runtime{
 		Command: []string{"/bin/sh", "-c"}, Args: []string{script}, Env: map[string]string{"WHERRY_TEST_ENV": "from-runtime"},
 	}}
 }
@@ -813,7 +814,7 @@ func TestUnitPropertiesMatchSystemdSignatures(t *testing.T) {
 	config := agentConfig("exit 0")
 	config.Runtime.User, config.Runtime.Group, config.Runtime.SupplementaryGroups = "agent", "agents", []string{"video"}
 	run := testRun("signatures")
-	run.Credential = []byte("model-key")
+	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}}
 	dispatch(t, newAgent(t, agentConfig("exit 0")), run)
 	fixed := testRun("signatures-fixed")
 	dispatch(t, newAgent(t, config), fixed)
@@ -846,10 +847,9 @@ func TestUnitPropertiesHoldNoMaterial(t *testing.T) {
 	defer server.Close()
 	run := testRun("no-material")
 	run.Prompt = []byte("prompt-secret")
-	run.Credential = []byte("credential-secret")
 	run.Model = "opus"
 	run.Inputs = []wherry.File{{Name: "in.txt", Data: []byte("inline-input-secret")}}
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: []byte("task-credential-secret")}}
+	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("credential-secret")}, {Name: "deploy", File: "deploy-key", Value: []byte("task-credential-secret")}}
 	run.Fetches = []wherry.Fetch{{Name: "object.bin", URL: server.URL + "/object?X-Amz-Signature=presigned-url-secret", Size: int64(len(object)), SHA256: sha(object)}}
 	dispatch(t, adapter, run)
 	var seen strings.Builder
@@ -869,7 +869,7 @@ func TestExecStartDisablesEnvExpansion(t *testing.T) {
 	f := newHost(t)
 	adapter := newAgent(t, agentConfig("echo $HOME"))
 	plain, credentialed := testRun("expand"), testRun("expand-credential")
-	credentialed.Credential = []byte("key")
+	credentialed.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key")}}
 	for _, run := range []wherry.Run{plain, credentialed} {
 		dispatch(t, adapter, run)
 		exe := f.properties(unitOf(run))["ExecStartEx"].([]execStart)
@@ -881,11 +881,12 @@ func TestExecStartDisablesEnvExpansion(t *testing.T) {
 
 func TestCredentialWrapperPreservesBytes(t *testing.T) {
 	store := t.TempDir()
+	stored := filepath.Join(store, envCredential+credentialEnv)
 	for _, value := range []string{"plain", "trailing newlines\n\n", "  leading spaces", `quotes ' " and $HOME`, `back\slash\n`, "non-utf8 \xff\xfe"} {
-		if err := os.WriteFile(filepath.Join(store, agentCredential), []byte(value), 0o400); err != nil {
+		if err := os.WriteFile(stored, []byte(value), 0o400); err != nil {
 			t.Fatal(err)
 		}
-		script := strings.ReplaceAll(wrapper(credentialEnv), credentialsPath, store)
+		script := strings.ReplaceAll(wrapper([]string{credentialEnv}), credentialsPath, store)
 		output, err := exec.Command("/bin/sh", "-c", script, "wherry-agent", "/bin/sh", "-c", `printf %s "$`+credentialEnv+`"`).Output()
 		if err != nil {
 			t.Fatal(err)
@@ -893,14 +894,14 @@ func TestCredentialWrapperPreservesBytes(t *testing.T) {
 		if string(output) != value {
 			t.Errorf("the agent read %q; want %q", output, value)
 		}
-		if err := os.Chmod(filepath.Join(store, agentCredential), 0o600); err != nil {
+		if err := os.Chmod(stored, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Remove(filepath.Join(store, agentCredential)); err != nil {
+	if err := os.Remove(stored); err != nil {
 		t.Fatal(err)
 	}
-	script := strings.ReplaceAll(wrapper(credentialEnv), credentialsPath, store)
+	script := strings.ReplaceAll(wrapper([]string{credentialEnv}), credentialsPath, store)
 	if err := exec.Command("/bin/sh", "-c", script, "wherry-agent", "/bin/true").Run(); err == nil {
 		t.Fatal("the wrapper ran the agent without its credential")
 	}
@@ -909,27 +910,47 @@ func TestCredentialWrapperPreservesBytes(t *testing.T) {
 func TestCredentialWrapperOnlyWithACredential(t *testing.T) {
 	f := newHost(t)
 	adapter := newAgent(t, agentConfig("exec agent-run"))
-	plain, credentialed := testRun("wrapper"), testRun("wrapper-credential")
-	credentialed.Credential = []byte("key")
-	dispatch(t, adapter, plain)
-	dispatch(t, adapter, credentialed)
-	if exe := f.properties(unitOf(plain))["ExecStartEx"].([]execStart)[0]; !slices.Equal(exe.Args, []string{"/bin/sh", "-c", "exec agent-run"}) {
-		t.Errorf("without a credential: argv %q; want the runtime command alone", exe.Args)
+	plain, files, credentialed := testRun("wrapper"), testRun("wrapper-files"), testRun("wrapper-credential")
+	files.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: []byte("key")}}
+	credentialed.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key")}, files.Credentials[0], {Name: "second", Env: "SECOND_TOKEN", Value: []byte("key")}}
+	for _, run := range []wherry.Run{plain, files, credentialed} {
+		dispatch(t, adapter, run)
 	}
-	want := []string{"/bin/sh", "-c", wrapper(credentialEnv), "wherry-agent", "/bin/sh", "-c", "exec agent-run"}
+	for _, run := range []wherry.Run{plain, files} {
+		if exe := f.properties(unitOf(run))["ExecStartEx"].([]execStart)[0]; !slices.Equal(exe.Args, []string{"/bin/sh", "-c", "exec agent-run"}) {
+			t.Errorf("%s: argv %q; want the runtime command alone", run.ID, exe.Args)
+		}
+	}
+	want := []string{"/bin/sh", "-c", wrapper([]string{credentialEnv, "SECOND_TOKEN"}), "wherry-agent", "/bin/sh", "-c", "exec agent-run"}
 	if exe := f.properties(unitOf(credentialed))["ExecStartEx"].([]execStart)[0]; exe.Path != "/bin/sh" || !slices.Equal(exe.Args, want) {
 		t.Errorf("with a credential: argv %q; want the wrapper over the runtime command", exe.Args)
 	}
 }
 
-func TestCredentialEnvReachesTheAgent(t *testing.T) {
+func TestConformanceCredentialsReachTheAgent(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig(`printf '%s\n' "$`+credentialEnv+`"`))
-	run := testRun("credential-env")
-	run.Credential = []byte("model-key")
+	adapter := newAgent(t, agentConfig(`printf '%s\n' "$CONFORMANCE_TOKEN"; cat `+credentialsPath+`/conformance-key; echo`))
+	run := testRun("credential-targets")
+	run.Credentials = adaptertest.Credentials
 	lines, terminal, err := followAll(t, adapter, dispatch(t, adapter, run), 0)
-	if err != nil || terminal.ExitCode != 0 || !slices.Equal(texts(lines), []string{"model-key"}) {
-		t.Fatalf("lines %q, terminal %+v, %v; want the credential in %s", texts(lines), terminal, err, credentialEnv)
+	if err != nil || terminal.ExitCode != 0 || !slices.Equal(texts(lines), []string{"conformance-env-value", "conformance-file-value"}) {
+		t.Fatalf("lines %q, terminal %+v, %v; want the env credential, then the file credential", texts(lines), terminal, err)
+	}
+}
+
+func TestTwoCredentialsOfEachTargetReachTheAgent(t *testing.T) {
+	newHost(t)
+	adapter := newAgent(t, agentConfig(`printf '%s\n' "$`+credentialEnv+`" "$SECOND_TOKEN"; cat `+credentialsPath+`/deploy-key `+credentialsPath+`/token`))
+	run := testRun("credential-pairs")
+	run.Credentials = []wherry.Secret{
+		{Name: "model", Env: credentialEnv, Value: []byte("model-key")},
+		{Name: "deploy", File: "deploy-key", Value: []byte("deploy-value\n")},
+		{Name: "second", Env: "SECOND_TOKEN", Value: []byte("second-token")},
+		{Name: "token", File: "token", Value: []byte("token-value\n")},
+	}
+	lines, terminal, err := followAll(t, adapter, dispatch(t, adapter, run), 0)
+	if err != nil || terminal.ExitCode != 0 || !slices.Equal(texts(lines), []string{"model-key", "second-token", "deploy-value", "token-value"}) {
+		t.Fatalf("lines %q, terminal %+v, %v; want both env credentials, then both file credentials", texts(lines), terminal, err)
 	}
 }
 
@@ -1062,10 +1083,6 @@ func TestPluginImportsNoCgo(t *testing.T) {
 func TestNewValidatesConfig(t *testing.T) {
 	newHost(t)
 	cases := map[string]func(*Config){
-		"credential_env name":           func(c *Config) { c.CredentialEnv = "1BAD" },
-		"credential_env reserved":       func(c *Config) { c.CredentialEnv = "HOME" },
-		"credential_env model":          func(c *Config) { c.CredentialEnv = "WHERRY_MODEL" },
-		"credential_env systemd":        func(c *Config) { c.CredentialEnv = "CREDENTIALS_DIRECTORY" },
 		"no command":                    func(c *Config) { c.Runtime.Command = nil },
 		"relative command":              func(c *Config) { c.Runtime.Command = []string{"sh", "-c"} },
 		"NUL in command":                func(c *Config) { c.Runtime.Command = []string{"/bin/sh", "-c\x00"} },
@@ -1415,22 +1432,20 @@ func TestDispatchRefusesANameOverNameMax(t *testing.T) {
 func TestDispatchRefusesCredentialsOverTheLimit(t *testing.T) {
 	f := newHost(t)
 	adapter := newAgent(t, agentConfig("exit 0"))
-	// The store's pages bind a run whose agent credential takes a page of its own; the IDs and values bind one key.
+	// The store's pages bind a run whose env credential takes a page of its own; the IDs and values bind one key.
 	for _, c := range []struct {
-		name       string
-		credential []byte
-		value      int
+		name        string
+		credentials []wherry.Secret
+		value       int
 	}{
-		{"pages", []byte("model-key"), maxCredentials - os.Getpagesize()},
+		{"pages", []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}}, maxCredentials - os.Getpagesize()},
 		{"bytes", nil, maxCredentials - len("deploy-key")},
 	} {
 		run := testRun("at-limit-" + c.name)
-		run.Credential = c.credential
-		run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), c.value)}}
+		run.Credentials = slices.Concat(c.credentials, []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), c.value)}})
 		dispatch(t, adapter, run)
 		over := testRun("over-limit-" + c.name)
-		over.Credential = c.credential
-		over.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), c.value+1)}}
+		over.Credentials = slices.Concat(c.credentials, []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), c.value+1)}})
 		starts := len(f.recorded("start"))
 		outcome, _, err := adapter.Dispatch(context.Background(), over)
 		if outcome != wherry.OutcomeNothingCreated || err == nil || err.Error() != "the credentials exceed systemd's 1 MiB credential limit" {
@@ -1446,8 +1461,8 @@ func TestDispatchRefusesACredentialWithNUL(t *testing.T) {
 	f := newHost(t)
 	adapter := newAgent(t, agentConfig("exit 0"))
 	run := testRun("nul")
-	run.Credential = []byte("key\x00tail")
-	if outcome, _, err := adapter.Dispatch(context.Background(), run); outcome != wherry.OutcomeNothingCreated || err == nil {
+	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key\x00tail")}}
+	if outcome, _, err := adapter.Dispatch(context.Background(), run); outcome != wherry.OutcomeNothingCreated || err == nil || strings.Contains(err.Error(), "tail") {
 		t.Fatalf("outcome %d, %v; want nothing created", outcome, err)
 	}
 	model := testRun("nul-model")
@@ -2381,6 +2396,23 @@ func TestCollectStreamsNamedOutputs(t *testing.T) {
 	}
 }
 
+func TestCollectStreamsTheOutcome(t *testing.T) {
+	f := newHost(t)
+	adapter := newAgent(t, agentConfig("exit 0"))
+	run := testRun("outcome")
+	handle := ended(t, f, adapter, run)
+	outcome := `{"state":"TASK_STATE_COMPLETED"}`
+	writeOutputs(t, run, map[string]string{".wherry/outcome.json": outcome, "reply.md": "done"})
+	got, err := collect(t, adapter, handle, wherry.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20, Stream: []string{".wherry/outcome.json"}, StreamBytes: 1 << 20})
+	if err != nil || len(got) != 2 || got[0].Name != ".wherry/outcome.json" || got[0].Body == nil || got[0].Data != nil || string(got[1].Data) != "done" {
+		t.Fatalf("outputs %+v, %v; want .wherry/outcome.json streamed beside reply.md", got, err)
+	}
+	defer got[0].Body.Close()
+	if body, err := io.ReadAll(got[0].Body); err != nil || string(body) != outcome {
+		t.Fatalf("streamed %q, %v; want %q", body, err, outcome)
+	}
+}
+
 func TestCollectWithoutAnOutputsDirectory(t *testing.T) {
 	f := newHost(t)
 	adapter := newAgent(t, agentConfig("exit 0"))
@@ -2881,10 +2913,14 @@ func TestMaterialNeverInPropertiesLogsOrErrors(t *testing.T) {
 	failing := server.URL + "/fails?X-Amz-Signature=presigned-url-secret"
 	run := testRun("material")
 	run.Prompt = []byte("prompt-secret")
-	run.Credential = []byte("credential-secret")
 	run.Model = "opus"
 	run.Inputs = []wherry.File{{Name: "in.txt", Data: []byte("inline-input-secret")}}
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: []byte("task-credential-secret")}}
+	run.Credentials = []wherry.Secret{
+		{Name: "model", Env: credentialEnv, Value: []byte("credential-secret")},
+		{Name: "second", Env: "SECOND_TOKEN", Value: []byte("second-env-secret")},
+		{Name: "deploy", File: "deploy-key", Value: []byte("task-credential-secret")},
+		{Name: "token", File: "token", Value: []byte("second-file-secret")},
+	}
 	run.Fetches = []wherry.Fetch{{Name: "object.bin", URL: url, Size: int64(len(object)), SHA256: sha(object)}}
 	var errs []error
 	note := func(err error) {
@@ -2902,7 +2938,7 @@ func TestMaterialNeverInPropertiesLogsOrErrors(t *testing.T) {
 	note(adapter.Purge(context.Background(), run.ID))
 	note(adapter.Sweep(context.Background()))
 	broken := testRun("material-fails")
-	broken.Credential = run.Credential
+	broken.Credentials = run.Credentials
 	broken.Fetches = []wherry.Fetch{{Name: "object.bin", URL: failing, Size: 1, SHA256: sha([]byte("x"))}}
 	dispatch(t, adapter, broken)
 	_, terminal, err := followAll(t, adapter, dispatch(t, adapter, broken), 0)
@@ -2928,7 +2964,7 @@ func TestMaterialNeverInPropertiesLogsOrErrors(t *testing.T) {
 	for _, err := range errs {
 		fmt.Fprintln(&seen, err)
 	}
-	for _, secret := range []string{"prompt-secret", "credential-secret", "inline-input-secret", "task-credential-secret", "fetched-input-secret", "presigned-url-secret", "X-Amz", "output-bytes-secret", "/bucket/object"} {
+	for _, secret := range []string{"prompt-secret", "credential-secret", "second-env-secret", "inline-input-secret", "task-credential-secret", "second-file-secret", "fetched-input-secret", "presigned-url-secret", "X-Amz", "output-bytes-secret", "/bucket/object"} {
 		if strings.Contains(seen.String(), secret) {
 			t.Errorf("%s reached a property, log or error:\n%s", secret, seen.String())
 		}

@@ -11,6 +11,14 @@ import (
 	wherry "github.com/benemon/wherry/adapter"
 )
 
+// credentialID is the store ID of a credential: its file, or envCredential and its variable.
+func credentialID(secret wherry.Secret) string {
+	if secret.Env != "" {
+		return envCredential + secret.Env
+	}
+	return secret.File
+}
+
 // credentialTotal returns the larger of the run's credential IDs and values as systemd counts them against
 // maxCredentials, and the pages their files take in a store that is a tmpfs of maxCredentials, as systemd 255 mounts.
 func credentialTotal(run wherry.Run) int {
@@ -19,11 +27,8 @@ func credentialTotal(run wherry.Run) int {
 		total += len(id) + len(value)
 		pages += (len(value) + page - 1) / page * page
 	}
-	if run.Credential != nil {
-		add(agentCredential, run.Credential)
-	}
 	for _, secret := range run.Credentials {
-		add(secret.File, secret.Value)
+		add(credentialID(secret), secret.Value)
 	}
 	return max(total, pages)
 }
@@ -32,11 +37,8 @@ func credentialTotal(run wherry.Run) int {
 // which LoadCredential= reads it at the unit's start.
 func writeCredentials(name string, run wherry.Run) ([]loadCredential, error) {
 	files := map[string][]byte{}
-	if run.Credential != nil {
-		files[agentCredential] = run.Credential
-	}
 	for _, secret := range run.Credentials {
-		files[secret.File] = secret.Value
+		files[credentialID(secret)] = secret.Value
 	}
 	if len(files) == 0 {
 		return nil, nil

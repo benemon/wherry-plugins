@@ -24,7 +24,7 @@ func settings(t *testing.T, name string, config map[string]any) wherry.Settings 
 }
 
 func unitConfig(command ...string) map[string]any {
-	return map[string]any{"credential_env": credentialEnv, "runtime": map[string]any{"command": command}}
+	return map[string]any{"runtime": map[string]any{"command": command}}
 }
 
 func TestFactoryDecodesStrictly(t *testing.T) {
@@ -49,17 +49,13 @@ func TestFactoryDecodesStrictly(t *testing.T) {
 	}
 }
 
-func TestFactoryNeedsCredentialEnvForACredential(t *testing.T) {
+// The core delivers every credential at its target, so the plugin takes no credential setting.
+func TestFactoryRefusesCredentialEnv(t *testing.T) {
 	newHost(t)
 	config := unitConfig("/bin/true")
-	delete(config, "credential_env")
-	withCredential := settings(t, "lab", config)
-	withCredential.Credential = "model"
-	if _, err := newAdapter(withCredential, hclog.NewNullLogger()); err == nil || err.Error() != "a credential needs credential_env" {
-		t.Fatalf("got %v, want credential_env required", err)
-	}
-	if _, err := newAdapter(settings(t, "lab", config), hclog.NewNullLogger()); err != nil {
-		t.Fatalf("without a credential: %v", err)
+	config["credential_env"] = "ANTHROPIC_API_KEY"
+	if _, err := newAdapter(settings(t, "lab", config), hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "credential_env") {
+		t.Fatalf("got %v, want credential_env refused as an unknown member", err)
 	}
 }
 
@@ -107,14 +103,13 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 			Config map[string]any `yaml:"config"`
 		} `yaml:"platforms"`
 		Adapters []struct {
-			Name       string            `yaml:"name"`
-			Platform   string            `yaml:"platform"`
-			Agent      string            `yaml:"agent"`
-			Output     string            `yaml:"output"`
-			ReplyFile  string            `yaml:"reply_file"`
-			Credential string            `yaml:"credential"`
-			Labels     map[string]string `yaml:"labels"`
-			Config     map[string]any    `yaml:"config"`
+			Name      string            `yaml:"name"`
+			Platform  string            `yaml:"platform"`
+			Agent     string            `yaml:"agent"`
+			Output    string            `yaml:"output"`
+			ReplyFile string            `yaml:"reply_file"`
+			Labels    map[string]string `yaml:"labels"`
+			Config    map[string]any    `yaml:"config"`
 		} `yaml:"adapters"`
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(example))
@@ -140,7 +135,7 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := wherry.Settings{Name: adapter.Name, Pool: testPool, Agent: adapter.Agent, Credential: adapter.Credential, Config: encoded}
+		s := wherry.Settings{Name: adapter.Name, Pool: testPool, Agent: adapter.Agent, Config: encoded}
 		if _, err := newAdapter(s, hclog.NewNullLogger()); err != nil {
 			t.Fatalf("adapter %s: %v", adapter.Name, err)
 		}

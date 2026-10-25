@@ -169,19 +169,13 @@ the plugin's decoding and checks.
 ```yaml
 capacity: 2
 platforms:
-  # Every adapter on this platform takes these keys into its config, and
-  # repeats none of them.
   - name: systemd
     type: systemd
-    config:
-      # Required while any adapter on the platform sets a credential.
-      credential_env: ANTHROPIC_API_KEY
 adapters:
   # Claude Code, each run as a dynamic user of its own.
   - name: host
     platform: systemd
     agent: coder
-    credential: model-api-key
     labels:
       platform: systemd
     config:

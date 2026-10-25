@@ -146,7 +146,7 @@ func TestInputsWritesCredentialsOwnerOnly(t *testing.T) {
 func TestInputsCopiesPromptAndInputs(t *testing.T) {
 	root := pod(t)
 	binary := string([]byte{0, 1, 2, 255})
-	material(t, root, map[string]string{"prompt": "the prompt", "credential": "model-key", "inputs.data.bin": binary, "inputs.notes.md": "notes"})
+	material(t, root, map[string]string{"prompt": "the prompt", "env.MODEL_API_KEY": "model-key", "inputs.data.bin": binary, "inputs.notes.md": "notes"})
 	if code, _, stderr := invoke(root, nil, nil, "inputs"); code != 0 {
 		t.Fatalf("inputs exited %d: %s", code, stderr)
 	}
@@ -164,7 +164,7 @@ func TestInputsCopiesPromptAndInputs(t *testing.T) {
 	}
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if data, _ := os.ReadFile(path); !strings.HasPrefix(path, filepath.Join(root, materialDir)) && bytes.Contains(data, []byte("model-key")) {
-			t.Fatalf("the agent credential was copied to %s", path)
+			t.Fatalf("the env credential was copied to %s", path)
 		}
 		return nil
 	})

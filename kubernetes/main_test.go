@@ -42,10 +42,10 @@ func podConfig(address, caFile, helperImage, image string, command ...string) ma
 func TestFactoryDecodesStrictly(t *testing.T) {
 	api := newFakeAPI(t)
 	valid := podConfig(api.server.URL, api.caFile, testHelperImage, testImage)
-	withCredential := settings(t, "lab", valid)
-	withCredential.Credential = "model"
-	if _, err := newAdapter(withCredential, hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "credential_env") {
-		t.Fatalf("got %v, want credential_env required", err)
+	withCredentialEnv := podConfig(api.server.URL, api.caFile, testHelperImage, testImage)
+	withCredentialEnv["credential_env"] = "MODEL_API_KEY"
+	if _, err := newAdapter(settings(t, "lab", withCredentialEnv), hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "credential_env") {
+		t.Fatalf("got %v, want credential_env refused as an unknown member", err)
 	}
 	unknown := podConfig(api.server.URL, api.caFile, testHelperImage, testImage)
 	unknown["kubeconfig"] = "/root/.kube/config"
@@ -84,14 +84,13 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 			Config map[string]any `yaml:"config"`
 		} `yaml:"platforms"`
 		Adapters []struct {
-			Name       string            `yaml:"name"`
-			Platform   string            `yaml:"platform"`
-			Agent      string            `yaml:"agent"`
-			Output     string            `yaml:"output"`
-			ReplyFile  string            `yaml:"reply_file"`
-			Credential string            `yaml:"credential"`
-			Labels     map[string]string `yaml:"labels"`
-			Config     map[string]any    `yaml:"config"`
+			Name      string            `yaml:"name"`
+			Platform  string            `yaml:"platform"`
+			Agent     string            `yaml:"agent"`
+			Output    string            `yaml:"output"`
+			ReplyFile string            `yaml:"reply_file"`
+			Labels    map[string]string `yaml:"labels"`
+			Config    map[string]any    `yaml:"config"`
 		} `yaml:"adapters"`
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(example))
@@ -119,7 +118,7 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := wherry.Settings{Name: adapter.Name, Pool: testPool, Agent: adapter.Agent, Credential: adapter.Credential, Config: encoded, Platform: testToken}
+		s := wherry.Settings{Name: adapter.Name, Pool: testPool, Agent: adapter.Agent, Config: encoded, Platform: testToken}
 		if _, err := newAdapter(s, hclog.NewNullLogger()); err != nil {
 			t.Fatalf("adapter %s: %v", adapter.Name, err)
 		}
@@ -186,7 +185,7 @@ func conformanceSettings(t *testing.T) (wherry.Settings, wherry.Settings) {
 	t.Helper()
 	dev := devConfig(t)
 	completes := settings(t, "completes", podConfig(dev.Address, dev.CAFile, dev.HelperImage, "registry.access.redhat.com/ubi9/ubi-minimal",
-		"/bin/sh", "-c", `sleep 10; echo '{"type":"result","result":"done"}'`))
+		"/bin/sh", "-c", `sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`))
 	neverStarts := settings(t, "never-starts", podConfig(dev.Address, dev.CAFile, dev.HelperImage, "registry.invalid/wherry-conformance:0"))
 	for _, s := range []*wherry.Settings{&completes, &neverStarts} {
 		var config map[string]any

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/adapter/adaptertest"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/api"
 )
@@ -39,7 +40,7 @@ const (
 func testConfig(address string) Config {
 	script := `printf '{"type":"result","result":"prompt=%s token=%s env=%s home=%s"}\n' "$(cat ${NOMAD_TASK_DIR}/prompt.txt)" "$` + credentialEnv + `" "$WHERRY_TEST_ENV" "$HOME"`
 	return Config{
-		Address: address, Namespace: "default", CredentialEnv: credentialEnv,
+		Address: address, Namespace: "default",
 		Runtime: Runtime{
 			Driver:    "raw_exec",
 			Config:    map[string]any{"command": "/bin/sh", "args": []any{"-c", script}},
@@ -81,7 +82,7 @@ func testRun(name string) wherry.Run {
 	id := fmt.Sprintf("run-%s-%d", name, time.Now().UnixNano())
 	return wherry.Run{
 		ID: id, Adapter: testAdapter, Agent: "coder", Attempt: 2,
-		Prompt: []byte("hello-prompt"), Credential: []byte("test-credential"),
+		Prompt: []byte("hello-prompt"), Credentials: []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("test-credential")}},
 	}
 }
 
@@ -193,11 +194,11 @@ func TestBuildJobFromRuntime(t *testing.T) {
 	templates := tasks[0].Templates
 	if len(templates) != 2 || *templates[0].DestPath != "local/prompt.txt" ||
 		*templates[1].DestPath != "${NOMAD_SECRETS_DIR}/wherry.env" || !*templates[1].Envvars ||
-		!strings.Contains(*templates[1].EmbeddedTmpl, credentialEnv+"={{ .credential }}") ||
+		!strings.Contains(*templates[1].EmbeddedTmpl, credentialEnv+`={{ (index . "env/`+credentialEnv+`").Value | base64Decode }}`) ||
 		*templates[0].ChangeMode != "noop" || *templates[1].ChangeMode != "noop" {
 		t.Fatalf("templates %#v", templates)
 	}
-	run.Credential = nil
+	run.Credentials = nil
 	job, err = adapter.buildJob(run, adapter.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
@@ -230,20 +231,16 @@ func TestJobIDIsTheRunID(t *testing.T) {
 
 func TestNewValidatesConfig(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
-		"driver":            func(config *Config) { config.Runtime = Runtime{} },
-		"credential env":    func(config *Config) { config.CredentialEnv = `X={{ .prompt }}` },
-		"negative uid":      func(config *Config) { config.Runtime.User = "-1" },
-		"gid not a number":  func(config *Config) { config.Runtime.User = "1001:x" },
-		"user name":         func(config *Config) { config.Runtime.User = "Bad Name" },
-		"root uid":          func(config *Config) { config.Runtime.User = "0" },
-		"root name":         func(config *Config) { config.Runtime.User = "root" },
-		"env name":          func(config *Config) { config.Runtime.Env = map[string]string{"BAD-NAME": "x"} },
-		"credential HOME":   func(config *Config) { config.CredentialEnv = "HOME" },
-		"credential WHERRY": func(config *Config) { config.CredentialEnv = "WHERRY_MODEL" },
-		"credential git":    func(config *Config) { config.CredentialEnv = "GIT_CONFIG_GLOBAL" },
-		"leading zero":      func(config *Config) { config.Runtime.User = "0001" },
-		"uid over 32 bits":  func(config *Config) { config.Runtime.User = "4294967296" },
-		"uid over an int":   func(config *Config) { config.Runtime.User = "99999999999999999999" },
+		"driver":           func(config *Config) { config.Runtime = Runtime{} },
+		"negative uid":     func(config *Config) { config.Runtime.User = "-1" },
+		"gid not a number": func(config *Config) { config.Runtime.User = "1001:x" },
+		"user name":        func(config *Config) { config.Runtime.User = "Bad Name" },
+		"root uid":         func(config *Config) { config.Runtime.User = "0" },
+		"root name":        func(config *Config) { config.Runtime.User = "root" },
+		"env name":         func(config *Config) { config.Runtime.Env = map[string]string{"BAD-NAME": "x"} },
+		"leading zero":     func(config *Config) { config.Runtime.User = "0001" },
+		"uid over 32 bits": func(config *Config) { config.Runtime.User = "4294967296" },
+		"uid over an int":  func(config *Config) { config.Runtime.User = "99999999999999999999" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := testConfig("http://127.0.0.1:1")
@@ -471,7 +468,7 @@ func TestDispatchDeliversPromptAndCredential(t *testing.T) {
 func TestDispatchWithoutCredential(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("no-credential")
-	run.Credential = nil
+	run.Credentials = nil
 	handle := dispatch(t, adapter, ctx, run)
 	if got := output(t, ctx, adapter, handle); !strings.Contains(got, "prompt=hello-prompt token= env=from-runtime") {
 		t.Fatalf("task output %q", got)
@@ -480,7 +477,7 @@ func TestDispatchWithoutCredential(t *testing.T) {
 	if err != nil || variable == nil {
 		t.Fatalf("variable = %#v, %v", variable, err)
 	}
-	if _, ok := variable.Items["credential"]; ok {
+	if _, ok := variable.Items["env/"+credentialEnv]; ok {
 		t.Fatal("variable carries a credential item for a run without one")
 	}
 }
@@ -921,23 +918,29 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	run := testRun("urls")
 	run.ID = "run-urls"
 	run.Inputs = []wherry.File{{Name: "data.csv", Data: []byte("input-content-never-in-urls")}}
-	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte("task-credential-never-in-urls")}}
+	run.Credentials = twoOfEachTarget
 	run.Fetches = []wherry.Fetch{{Name: "dataset.bin", URL: "https://store.example.test/b/dataset.bin?X-Amz-Signature=secretsig-never-in-urls", Size: 8, SHA256: strings.Repeat("a", 64)}}
 	run.Model = "model-never-in-urls"
 	const outputContent = "output-content-never-in-urls"
 	var mu sync.Mutex
 	var urls []string
+	var variable api.Variable
+	var job []byte
 	registered := false
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		urls = append(urls, request.Method+" "+request.URL.Path+"?"+request.URL.RawQuery)
+		body, _ := io.ReadAll(request.Body)
 		if request.Header.Get("X-Nomad-Token") != token {
 			http.Error(response, "missing token", http.StatusForbidden)
 			return
 		}
 		switch request.Method + " " + request.URL.Path {
-		case "PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls",
+		case "PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls":
+			_ = json.Unmarshal(body, &variable)
+			_, _ = response.Write([]byte(`{}`))
+		case "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls",
 			"PUT /v1/var/nomad/jobs/agent-44575cf5b285-run-urls/agent", "DELETE /v1/var/nomad/jobs/agent-44575cf5b285-run-urls/agent":
 			_, _ = response.Write([]byte(`{}`))
 		case "GET /v1/client/fs/ls/alloc-urls":
@@ -957,7 +960,7 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 		case "GET /v1/vars":
 			_, _ = response.Write([]byte(`[{"Path":"nomad/jobs/agent-44575cf5b285-run-urls"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls/agent"}]`))
 		case "PUT /v1/jobs":
-			registered = true
+			registered, job = true, body
 			_, _ = response.Write([]byte(`{}`))
 		case "GET /v1/job/agent-44575cf5b285-run-urls/allocations":
 			_, _ = response.Write([]byte(`[{"ID":"alloc-urls","ClientStatus":"complete"}]`))
@@ -978,6 +981,8 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var logs bytes.Buffer
+	adapter.logger = hclog.New(&hclog.LoggerOptions{Output: &logs, Level: hclog.Trace, JSONFormat: true})
 	ctx := context.Background()
 	if _, err := adapter.Ready(ctx); err != nil {
 		t.Fatalf("ready: %v", err)
@@ -1013,12 +1018,74 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	if len(urls) != 34 {
 		t.Fatalf("requests = %d %v, want ready, dispatch, lookup, follow, stop, collect, release, purge and sweep", len(urls), urls)
 	}
+	secrets := []string{token, string(run.Prompt), string(run.Inputs[0].Data), run.Fetches[0].URL, "secretsig-never-in-urls", outputContent, run.Model}
+	for _, secret := range run.Credentials {
+		secrets = append(secrets, string(secret.Value))
+		if got := variable.Items[credentialItem(secret)]; got != base64.StdEncoding.EncodeToString(secret.Value) {
+			t.Fatalf("variable item %s = %q; want the base64 of %s", credentialItem(secret), got, secret.Name)
+		}
+	}
 	for _, url := range urls {
-		for _, secret := range []string{token, string(run.Credential), string(run.Prompt), string(run.Inputs[0].Data), string(run.Credentials[0].Value), run.Fetches[0].URL, "secretsig-never-in-urls", outputContent, run.Model} {
+		for _, secret := range secrets {
 			if strings.Contains(url, secret) {
 				t.Fatalf("request URL %q contains %q", url, secret)
 			}
 		}
+	}
+	for _, secret := range run.Credentials {
+		for _, form := range []string{string(secret.Value), base64.StdEncoding.EncodeToString(secret.Value)} {
+			if strings.Contains(string(job), form) || strings.Contains(logs.String(), form) {
+				t.Fatalf("the registered job or the logs hold the value of %s", secret.Name)
+			}
+		}
+	}
+}
+
+// twoOfEachTarget are two credentials at environment variable targets and two at file targets.
+var twoOfEachTarget = []wherry.Secret{
+	{Name: "model", Env: "MODEL_API_KEY", Value: []byte("env-credential-one")},
+	{Name: "registry", Env: "REGISTRY_TOKEN", Value: []byte("env-credential-two")},
+	{Name: "deploy-key", File: "id_ed25519", Value: []byte("file-credential-one")},
+	{Name: "kubeconfig", File: "kubeconfig", Value: []byte("file-credential-two")},
+}
+
+// TestBuildJobDeliversCredentialsAtTheirTargets builds the job for adaptertest.Credentials and for two credentials at
+// each kind of target: each env target is a line of the env template, each file target a template of its own.
+func TestBuildJobDeliversCredentialsAtTheirTargets(t *testing.T) {
+	adapter, err := build(testConfig("http://127.0.0.1:1"), testPool, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, credentials := range map[string][]wherry.Secret{"conformance": adaptertest.Credentials, "two of each": twoOfEachTarget} {
+		t.Run(name, func(t *testing.T) {
+			run := testRun("targets")
+			run.Credentials = credentials
+			path := adapter.variablePath(run.ID)
+			job, err := adapter.buildJob(run, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want []string
+			templates := map[string]string{}
+			for _, template := range job.TaskGroups[0].Tasks[0].Templates {
+				templates[*template.DestPath] = *template.EmbeddedTmpl
+			}
+			for _, secret := range credentials {
+				if secret.Env != "" {
+					want = append(want, secret.Env+`={{ (index . "env/`+secret.Env+`").Value | base64Decode }}`)
+					continue
+				}
+				if got := templates["${NOMAD_SECRETS_DIR}/credentials/"+secret.File]; got != `{{ with nomadVar "`+path+`" }}{{ (index . "credentials/`+secret.File+`").Value | base64Decode }}{{ end }}` {
+					t.Fatalf("file template for %s = %q", secret.Name, got)
+				}
+			}
+			if got := templates["${NOMAD_SECRETS_DIR}/wherry.env"]; got != `{{ with nomadVar "`+path+`" }}`+strings.Join(want, "\n")+"\n{{ end }}" {
+				t.Fatalf("env template = %q; want a line for each of %v", got, want)
+			}
+			if len(templates) != 2+len(credentials)-len(want) {
+				t.Fatalf("templates %v; want the prompt, the env template and one per file target", templates)
+			}
+		})
 	}
 }
 
@@ -1077,7 +1144,7 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 	}
 	run := testRun("plaintext")
 	run.Inputs = []wherry.File{{Name: "data.csv", Data: []byte("input-content-never-in-the-job")}}
-	run.Credentials = []wherry.Secret{{Name: "deploy-key", File: "id_ed25519", Value: []byte("task-credential-never-in-the-job")}}
+	run.Credentials = twoOfEachTarget
 	job, err := adapter.buildJob(run, adapter.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
@@ -1086,8 +1153,11 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{string(run.Credential), string(run.Prompt), string(run.Inputs[0].Data), string(run.Credentials[0].Value),
-		base64.StdEncoding.EncodeToString(run.Inputs[0].Data), base64.StdEncoding.EncodeToString(run.Credentials[0].Value)} {
+	secrets := []string{string(run.Prompt), string(run.Inputs[0].Data), base64.StdEncoding.EncodeToString(run.Inputs[0].Data)}
+	for _, credential := range run.Credentials {
+		secrets = append(secrets, string(credential.Value), base64.StdEncoding.EncodeToString(credential.Value))
+	}
+	for _, secret := range secrets {
 		if strings.Contains(string(encoded), secret) {
 			t.Fatalf("job JSON contains %q", secret)
 		}
@@ -1809,6 +1879,46 @@ func TestCollectLeavesFilesOverTheLimitsUnread(t *testing.T) {
 				t.Fatalf("notes %+v after reads %v; want it listed with its size and unread", notes, reads())
 			}
 		})
+	}
+}
+
+// The agent's outcome file lies in a directory beneath the outputs directory; Collect streams it when Limits.Stream
+// names it, outside FileBytes and TotalBytes.
+func TestCollectStreamsTheOutcomeFile(t *testing.T) {
+	const outcome = `{"state":"TASK_STATE_COMPLETED"}`
+	var reads []string
+	adapter, _ := nomadServer(t, map[string]http.HandlerFunc{
+		"GET /v1/allocation/alloc-1": serve([]byte(`{"ID":"alloc-1","ClientStatus":"complete"}`)),
+		"GET /v1/client/fs/ls/alloc-1": func(response http.ResponseWriter, request *http.Request) {
+			switch request.URL.Query().Get("path") {
+			case outputsDir:
+				_, _ = response.Write([]byte(`[{"Name":".wherry","IsDir":true,"Size":96,"FileMode":"drwxr-xr-x"},{"Name":"report.md","IsDir":false,"Size":6,"FileMode":"-rw-r--r--"}]`))
+			case outputsDir + "/.wherry":
+				fmt.Fprintf(response, `[{"Name":"outcome.json","IsDir":false,"Size":%d,"FileMode":"-rw-r--r--"}]`, len(outcome))
+			default:
+				http.Error(response, "no such file or directory", http.StatusNotFound)
+			}
+		},
+		"GET /v1/client/fs/readat/alloc-1": func(response http.ResponseWriter, request *http.Request) {
+			name := strings.TrimPrefix(request.URL.Query().Get("path"), outputsDir+"/")
+			reads = append(reads, name)
+			_, _ = response.Write([]byte(map[string]string{".wherry/outcome.json": outcome, "report.md": "hello\n"}[name]))
+		},
+	})
+	outputs, err := collectAll(adapter, wherry.Limits{Files: 256, FileBytes: 6, TotalBytes: 6, Stream: []string{".wherry/outcome.json"}, StreamBytes: 1 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outputs) != 2 || outputs[0].Name != ".wherry/outcome.json" || outputs[0].Data != nil || outputs[0].Body == nil || string(outputs[1].Data) != "hello\n" {
+		t.Fatalf("collected %+v; want the outcome file streamed and report.md read", outputs)
+	}
+	streamed, err := io.ReadAll(outputs[0].Body)
+	outputs[0].Body.Close()
+	if err != nil || string(streamed) != outcome {
+		t.Fatalf("streamed %q, %v; want %q", streamed, err, outcome)
+	}
+	if !slices.Equal(reads, []string{".wherry/outcome.json", "report.md"}) {
+		t.Fatalf("read %v", reads)
 	}
 }
 

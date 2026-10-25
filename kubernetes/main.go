@@ -4,7 +4,6 @@ package main
 
 import (
 	json "encoding/json/v2"
-	"errors"
 	"fmt"
 
 	wherry "github.com/benemon/wherry/adapter"
@@ -23,9 +22,6 @@ func newAdapter(settings wherry.Settings, logger hclog.Logger) (wherry.Adapter, 
 	var config Config
 	if err := json.Unmarshal(settings.Config, &config, json.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
-	}
-	if settings.Credential != "" && config.CredentialEnv == "" {
-		return nil, errors.New("a credential needs credential_env")
 	}
 	client, err := newClient(config, settings.Platform)
 	if err != nil {
