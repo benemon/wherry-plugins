@@ -1,7 +1,6 @@
 name: broken
 platform: kind
 agent: fake
-output: file
 labels:
   e2e: broken
 config:

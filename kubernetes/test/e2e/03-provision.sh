@@ -29,7 +29,7 @@ cat >"$host_config" <<JSON
   "bundle": "$work/host.bundle",
   "host_key": "$work/host/host.key",
   "state_dir": "$work/host/state",
-  "credentials": {"dummy": "$work/host/dummy"}
+  "credentials": {"dummy": {"file": "$work/host/dummy"}}
 }
 JSON
 wherry init --config-file "$host_config"

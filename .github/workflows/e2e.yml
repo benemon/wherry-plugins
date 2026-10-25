@@ -14,7 +14,7 @@ permissions:
 
 env:
   # The wherry release whose CLI provisions and submits, and which the receiver image holds.
-  WHERRY_VERSION: v0.1.0-rc.9
+  WHERRY_VERSION: v0.1.0-rc.12
   KIND_VERSION: v0.33.0
   KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
 
