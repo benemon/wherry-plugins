@@ -1,17 +1,17 @@
-# The wherry receiver systemd-1 as a root system service. Its plugin starts each run's agent as a transient unit in
+# The wherry receiver as a root system service. Its plugin starts each run's agent as a transient unit in
 # wherry.slice, so restarting or stopping the receiver leaves every agent running for the restarted receiver to adopt.
 # A compromised receiver is host root: any uid-0 process starts root units through systemd's private socket, whatever
 # its capabilities. The settings below bound accidents and partial exploits.
 [Unit]
-Description=wherry receiver systemd-1
+Description=wherry receiver
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=exec
-ExecStart=/usr/local/bin/wherry receiver run --bundle-file /etc/wherry/systemd-1.bundle \
+ExecStart=/usr/local/bin/wherry receiver run --bundle-file /etc/wherry/receiver.bundle \
   --state-dir /var/lib/wherry/state --plugin-dir /usr/local/libexec/wherry/plugins \
-  --metrics-addr 0.0.0.0:9465
+  --metrics-addr :9465
 Restart=on-failure
 RestartSec=5s
 StateDirectory=wherry

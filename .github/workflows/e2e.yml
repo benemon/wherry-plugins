@@ -32,7 +32,7 @@ jobs:
         id: changes
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: .github/changed.sh "$BASE" '^(kubernetes/|Makefile$|\.github/workflows/e2e\.yml$|\.github/changed\.sh$)'
+        run: .github/changed.sh "$BASE" '^(kubernetes/|examples/kubernetes/|Makefile$|\.github/workflows/e2e\.yml$|\.github/changed\.sh$)'
       - name: Install kind
         if: steps.changes.outputs.changed == 'true'
         run: |

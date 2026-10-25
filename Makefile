@@ -106,4 +106,4 @@ dist: ## Cross-compile PLUGIN's release archives and checksums.txt into DIST
 .PHONY: image
 image: ## Build the receiver image (VERSION, WHERRY_VERSION, CONTAINER)
 	@test -n "$(WHERRY_VERSION)" || { echo "FAIL: set WHERRY_VERSION"; exit 1; }
-	$(CONTAINER) build -f kubernetes/Containerfile --build-arg WHERRY_VERSION=$(WHERRY_VERSION) -t $(IMAGE):$(VERSION) .
+	$(CONTAINER) build -f examples/kubernetes/Containerfile --build-arg WHERRY_VERSION=$(WHERRY_VERSION) -t $(IMAGE):$(VERSION) .

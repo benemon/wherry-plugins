@@ -10,5 +10,5 @@ kind load docker-image --name "$cluster" wherry-receiver:e2e wherry-e2e-agent:e2
 kubectl create namespace "$namespace"
 kubectl label namespace "$namespace" pod-security.kubernetes.io/enforce=restricted
 NAMESPACE=$namespace IMAGE=wherry-receiver:e2e BOOTSTRAP=wherry-kafka-kafka-bootstrap.kafka.svc:9093 \
-	BUNDLE=$work/receiver.bundle "$repo/kubernetes/deploy/apply.sh"
+	BUNDLE=$work/receiver.bundle "$repo/examples/kubernetes/apply.sh"
 kubectl rollout status -n "$namespace" deployment/wherry-receiver --timeout=5m
