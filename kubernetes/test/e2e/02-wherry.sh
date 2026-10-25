@@ -9,5 +9,5 @@ x86_64 | amd64) arch=amd64 ;;
 aarch64 | arm64) arch=arm64 ;;
 *) echo "unsupported machine $(uname -m)" >&2 && exit 1 ;;
 esac
-docker build -f "$repo/kubernetes/Containerfile" --target wherry --build-arg WHERRY_VERSION="$WHERRY_VERSION" \
+docker build -f "$repo/examples/kubernetes/Containerfile" --target wherry --build-arg WHERRY_VERSION="$WHERRY_VERSION" \
 	--build-arg WHERRY_OS="$os" --build-arg WHERRY_ARCH="$arch" --output "type=local,dest=$work/bin" "$repo"

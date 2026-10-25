@@ -505,6 +505,22 @@ The client's artifact fetches run in a subprocess of the client, in the
 client host's network namespace, outside any task network. Restrict the
 client host's egress separately.
 
+## Run the receiver in a container
+
+The [Nomad example Containerfile](../examples/nomad/Containerfile) builds
+from the repository root. It downloads and verifies the wherry release,
+builds `wherry-plugin-nomad`, and places both binaries in a UBI minimal
+image. The receiver needs the Nomad API address and token for this plugin.
+Set the address with the adapter's `address` setting or `NOMAD_ADDR`; supply
+the token in the bundle's platform entry or `NOMAD_TOKEN`, as described in
+[Credentials](#credentials).
+
+Build it with Docker and a wherry release version:
+
+```sh
+docker build -f examples/nomad/Containerfile --build-arg WHERRY_VERSION=<version> .
+```
+
 ## Tests
 
 ```sh

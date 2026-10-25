@@ -504,8 +504,8 @@ addresses only, or an `nftables` rule matching the dynamic UID range,
 ## Run the receiver as a systemd service
 
 The receiver runs as root under its own unit,
-[`deploy/wherry-receiver.service`](deploy/wherry-receiver.service), and
-its agent units run in [`deploy/wherry.slice`](deploy/wherry.slice),
+[`examples/systemd/wherry-receiver.service`](../examples/systemd/wherry-receiver.service), and
+its agent units run in [`examples/systemd/wherry.slice`](../examples/systemd/wherry.slice),
 outside the receiver's cgroup. Restarting or stopping the receiver never
 touches them: the receiver exits on `SIGTERM` without stopping its jobs,
 and the restarted receiver adopts them. A run is adopted only by a
@@ -513,6 +513,8 @@ receiver with the same adapter on the same host, so give each systemd
 receiver a pool of its own.
 
 ### Install
+
+From the repository root:
 
 1. Install `/usr/local/bin/wherry` (root, 0755) and
    `/usr/local/libexec/wherry/plugins/wherry-plugin-systemd` (root, 0755, in
@@ -535,15 +537,15 @@ receiver a pool of its own.
    `/run/wherry/credentials`, which every boot recreates:
 
    ```sh
-   install -m 0644 deploy/wherry.slice deploy/wherry-receiver.service /etc/systemd/system/
-   install -m 0644 deploy/wherry-tmpfiles.conf /etc/tmpfiles.d/wherry.conf
+   install -m 0644 examples/systemd/wherry.slice examples/systemd/wherry-receiver.service /etc/systemd/system/
+   install -m 0644 examples/systemd/wherry-tmpfiles.conf /etc/tmpfiles.d/wherry.conf
    systemd-tmpfiles --create /etc/tmpfiles.d/wherry.conf
    ```
 
 4. Record `sysctl kernel.core_pattern`, which says whether a core dump
    pipes to systemd-coredump, abrt or neither.
-5. Write the bundle `wherry admin receiver add systemd-1` produced to
-   `/etc/wherry/systemd-1.bundle`, root 0600, and the receiver
+5. Write the bundle `wherry admin receiver add <name>` produced to
+   `/etc/wherry/receiver.bundle`, root 0600, and the receiver
    configuration it names.
 6. Start the receiver:
 

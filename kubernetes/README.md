@@ -80,7 +80,7 @@ The token needs the [RBAC](#rbac) grants in the adapter's namespace.
 
 Agent pods run in the receiver's own namespace. The receiver's service
 account holds the cluster role `admin` in that namespace alone, through the
-RoleBinding in [`deploy/receiver.yaml`](deploy/receiver.yaml), and nothing
+RoleBinding in [`examples/kubernetes/receiver.yaml`](../examples/kubernetes/receiver.yaml), and nothing
 outside it.
 
 The plugin's calls, all in that namespace, need:
@@ -617,7 +617,7 @@ podSelector:
 
 The receiver runs as a one-replica Deployment with its own service account,
 and its agent pods run beside it in the same namespace.
-[`deploy/receiver.yaml`](deploy/receiver.yaml) holds its manifests: the
+[`examples/kubernetes/receiver.yaml`](../examples/kubernetes/receiver.yaml) holds its manifests: the
 ServiceAccount, the RoleBinding of `admin` ([RBAC](#rbac)), the state
 PersistentVolumeClaim, the Deployment and the metrics Service. The Secret
 `wherry-receiver-bundle` holds the bundle. Kubernetes and OpenShift take the
@@ -626,7 +626,7 @@ address differ.
 
 ### Image
 
-`kubernetes/Containerfile` builds the receiver image. From a checkout of
+[`examples/kubernetes/Containerfile`](../examples/kubernetes/Containerfile) builds the receiver image from the repository root. From a checkout of
 the tag `kubernetes/<version>`, where `<version>` carries its `v`, such as
 `v0.1.0`:
 
@@ -676,16 +676,16 @@ from.
    in-cluster receiver's adapters take no platform entry in the bundle; the
    service account supplies the token.
 
-3. Apply the receiver:
+3. Apply the receiver with [`examples/kubernetes/apply.sh`](../examples/kubernetes/apply.sh):
 
    ```sh
    NAMESPACE=wherry IMAGE=registry.example.com/wherry-receiver:<version> \
      BOOTSTRAP=wherry-kafka-kafka-bootstrap.kafka.svc:9093 BUNDLE=kubernetes-1.bundle \
-     kubernetes/deploy/apply.sh
+     examples/kubernetes/apply.sh
    kubectl rollout status deployment/wherry-receiver -n wherry
    ```
 
-[`deploy/apply.sh`](deploy/apply.sh) creates or replaces the Secret
+[`examples/kubernetes/apply.sh`](../examples/kubernetes/apply.sh) creates or replaces the Secret
 `wherry-receiver-bundle` from `BUNDLE` with its `broker` replaced by
 `BOOTSTRAP` ([Bundle and Kafka](#bundle-and-kafka)), never writing the
 bundle to disk, then applies `receiver.yaml` with the namespace and the

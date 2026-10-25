@@ -37,7 +37,7 @@ spec:
         - name: receiver
           image: wherry-receiver
           args: [receiver, run, --bundle-file, /etc/wherry/bundle/bundle.yaml, --state-dir, /var/lib/wherry/state,
-                 --plugin-dir, /usr/local/libexec/wherry/plugins, --metrics-addr, "0.0.0.0:9464"]
+                 --plugin-dir, /usr/local/libexec/wherry/plugins, --metrics-addr, ":9464"]
           env:
             - {name: TMPDIR, value: /tmp}
             - {name: HOME, value: /tmp}

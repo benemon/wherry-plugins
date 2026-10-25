@@ -13,6 +13,25 @@ permissions:
   contents: read
 
 jobs:
+  nomad-image:
+    runs-on: ubuntu-latest
+    env:
+      WHERRY_VERSION: v0.1.0-rc.12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find changes to the Nomad example or its source
+        id: changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: .github/changed.sh "$BASE" '^(examples/nomad/|nomad/|\.github/workflows/ci\.yml$)'
+      - name: Build the Nomad receiver image
+        if: steps.changes.outputs.changed == 'true'
+        run: docker build -f examples/nomad/Containerfile --build-arg WHERRY_VERSION="$WHERRY_VERSION" .
+
   check:
     runs-on: ubuntu-latest
     strategy:
