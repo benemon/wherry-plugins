@@ -27,15 +27,14 @@ linux amd64 and arm64, and `checksums.txt`, into `dist`.
 ## Install
 
 [Run the receiver as a systemd service](#run-the-receiver-as-a-systemd-service)
-gives the whole install. The plugin goes into the receiver's plugin
-directory:
-
-```sh
-install -o root -g root -m 0755 wherry-plugin-systemd /usr/local/libexec/wherry/plugins/
-```
+gives the whole install. Download `wherry-plugin-systemd` from its
+[release](https://github.com/benemon/wherry-plugins/releases), verify it and
+install it in the receiver's plugin directory, as
+[Install adapter plugins](https://benemon.github.io/wherry/operations#install-adapter-plugins)
+describes with `plugin=systemd`. [Build](#build) covers building it from source.
 
 The receiver checks the plugin directory and binary before it runs them;
-see [`wherry receiver`](https://github.com/benemon/wherry/blob/main/docs/reference.md).
+see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
 The plugin is not run by hand.
 
 ## Credentials
@@ -319,7 +318,7 @@ more entries than the receiver's limit. It reads only regular files of the
 listed size within the limits, through an `os.Root` over the outputs
 directory; links, FIFOs and devices are listed with their type and never
 read. An output the receiver streams, an S3 output or the agent's
-[outcome file](https://github.com/benemon/wherry/blob/main/docs/reference.md#agent-contract), it streams as the receiver reads it. Outputs stay on disk after any agent death, an OOM kill included.
+[outcome file](https://benemon.github.io/wherry/configuration#agent-contract), it streams as the receiver reads it. Outputs stay on disk after any agent death, an OOM kill included.
 
 When a run ends, the plugin records how it ended in the marker, stops and
 resets the unit, which drops its credential store, its dynamic user and
@@ -481,7 +480,7 @@ operation and the class; the line holds no error text.
 ## Agent network reach
 
 The operator guide's
-[Agent network reach](https://github.com/benemon/wherry/blob/main/docs/operator-guide.md#agent-network-reach)
+[Agent network reach](https://benemon.github.io/wherry/operations#agent-network-reach)
 says what an agent job's egress policy denies and allows.
 
 Agents have the host's network: everything the host reaches. On loopback

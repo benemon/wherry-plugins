@@ -21,11 +21,11 @@ archives and `checksums.txt` into `dist`.
 
 ## Install
 
-1. Copy `wherry-plugin-nomad` into the receiver's plugin directory:
-
-   ```sh
-   install -o root -g root -m 0755 wherry-plugin-nomad /usr/local/libexec/wherry/plugins/
-   ```
+1. Download `wherry-plugin-nomad` from its
+   [release](https://github.com/benemon/wherry-plugins/releases), verify it and
+   install it in the receiver's plugin directory, as
+   [Install adapter plugins](https://benemon.github.io/wherry/operations#install-adapter-plugins) describes
+   with `plugin=nomad`. [Build](#build) covers building it from source.
 
 2. Start the receiver with `--plugin-dir` naming that directory:
 
@@ -34,7 +34,7 @@ archives and `checksums.txt` into `dist`.
    ```
 
 The receiver checks the plugin directory and binary before it runs them;
-see [`wherry receiver`](https://github.com/benemon/wherry/blob/main/docs/reference.md).
+see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
 The plugin is not run by hand.
 
 ## Credentials
@@ -355,7 +355,7 @@ read whose length differs from the listing, since the API answers some
 failed reads with status 200 and the error as the body. An output the
 receiver streams, an S3 output, it streams as the receiver reads it, at
 most the size the listing shows; the receiver's upload fails when the
-length differs. The receiver streams the agent's [outcome file](https://github.com/benemon/wherry/blob/main/docs/reference.md#agent-contract) the same
+length differs. The receiver streams the agent's [outcome file](https://benemon.github.io/wherry/configuration#agent-contract) the same
 way. The agent creates the outputs directory; without one there are no
 outputs. The listing shows no link count, so a hard link to a
 credential file reads as a regular file; the receiver's redaction of
@@ -381,7 +381,7 @@ variables when the run ends.
 ### Sweep
 
 On each sweep the receiver requests
-([adapter plugins](https://github.com/benemon/wherry/blob/main/docs/reference.md#adapter-plugins)),
+([adapter plugins](https://benemon.github.io/wherry/commands#adapter-plugins)),
 the plugin deletes the variables of jobs that have stopped, and of jobs
 never registered within 10 minutes, and purges agent jobs that have been
 dead for 10 minutes. A receiver sweeps only its own pool's jobs and
@@ -466,7 +466,7 @@ every 2 seconds, which bounds the precision of placement times.
 ## Agent network reach
 
 The operator guide's
-[Agent network reach](https://github.com/benemon/wherry/blob/main/docs/operator-guide.md#agent-network-reach)
+[Agent network reach](https://benemon.github.io/wherry/operations#agent-network-reach)
 says what an agent job's egress policy denies and allows.
 
 The plugin's agent jobs carry no `network` block, so the driver decides
