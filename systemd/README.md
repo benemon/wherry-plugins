@@ -80,14 +80,11 @@ An adapter's `config` section in the receiver configuration:
 
 | Field | Default | Content |
 | --- | --- | --- |
-| `credential_env` | none | environment variable the agent receives the credential in |
 | `runtime` | required | the agent's command, identity and limits |
 
-`credential_env` is required when the adapter sets `credential`, matches
-`[A-Za-z_][A-Za-z0-9_]*`, and is none of the variables the plugin or
-systemd sets for the agent. Unknown fields are errors. The plugin checks
-the section when the receiver configures the adapter, and the receiver
-exits with `adapter <name>: ...` on an error.
+Unknown fields are errors. The plugin checks the section when the receiver
+configures the adapter, and the receiver exits with `adapter <name>: ...`
+on an error.
 
 `runtime` has these fields:
 
@@ -109,8 +106,8 @@ names a GID. They set the unit's `User=`, `Group=` and
 and `memory_mb` caps the agent's RAM with no swap.
 
 The plugin sets `SHELL=/bin/sh` before `env`, so `env` may override it.
-It sets `HOME`, the `WHERRY_*` variables and the credential variable over
-`env`, so a variable of these names in `env` is overwritten.
+It sets `HOME` and the `WHERRY_*` variables over `env`, so a variable of
+these names in `env` is overwritten.
 
 Configure also fails when:
 
@@ -128,7 +125,7 @@ failed agent unit included until its run is released. `starting` holds
 while a boot job is still queued after `basic.target` is active, which an
 agent unit's default dependencies wait for. Readiness does not check the
 runtime command: a missing command shows at dispatch as a unit that never
-started with class `exec`, or, for a run with a credential, as an agent
+started with class `exec`, or, for a run with an environment target, as an agent
 that exits 127.
 
 An adapter file in a receiver configuration directory:
@@ -137,11 +134,9 @@ An adapter file in a receiver configuration directory:
 name: host
 platform: systemd
 agent: coder
-credential: model-api-key
 labels:
   platform: systemd
 config:
-  credential_env: ANTHROPIC_API_KEY
   runtime:
     command: [/bin/sh, -c]
     args:
@@ -264,9 +259,9 @@ The agent sees:
 - the prompt in `/wherry/prompt.txt`, mode 0600;
 - each input file in `/wherry/inputs`, mode 0600, in a 0700 directory;
 - each S3 input in `/wherry/inputs`, as described in [S3 inputs](#s3-inputs);
-- each task credential as a file in `/run/wherry/credentials`, and the
-  agent credential as `.credential` beside them, as described in
-  [Credentials](#credentials-1);
+- each file target as a file in `/run/wherry/credentials`, and each
+  environment target in the environment variable named by its target, as
+  described in [Credential targets and outcome file](#credential-targets-and-outcome-file);
 - its outputs directory, which it creates, at `/wherry/outputs`;
 - `HOME` set to `/wherry`, the run's own work directory, so no agent state,
   history or login carries from one run to the next;
@@ -291,10 +286,10 @@ A unit that cannot start is reported as never started:
 | `start` | the start job ended `canceled`, `timeout` or `dependency`, or the unit never ran its command | the job result or the unit's `Result` |
 | `fetch` | an S3 input was not fetched | `input <name>: not fetched` |
 
-A run with a credential starts the credential wrapper, `/bin/sh`, so its
-unit starts whatever the runtime command is, and a missing command ends the
-agent with exit code 127. The journal holds systemd's own account of a
-failed start; read it with `journalctl -u <unit>`.
+A run with an environment target starts the credential wrapper, `/bin/sh`,
+so its unit starts whatever the runtime command is, and a missing command
+ends the agent with exit code 127. The journal holds systemd's own account
+of a failed start; read it with `journalctl -u <unit>`.
 
 On systemd 252 and 253, `systemctl daemon-reload` loads a running agent
 unit again as `bad-setting`, without its command: those releases write
@@ -349,22 +344,20 @@ tenant, whose outputs share a filesystem with the receiver's signing key.
 A separate filesystem mounted at `/var/lib/private/wherry-agents`, or an
 XFS project quota on it, bounds them.
 
-### Credentials
+### Credential targets and outcome file
 
-systemd's `LoadCredential=` reads every credential when the unit starts.
-Dispatch writes the agent credential as `.credential` and each task
-credential under its file name to `/run/wherry-systemd/<unit>/`, root 0600
-in a root 0700 directory, before the start, and removes the directory
-when the start job ends, whatever its result. The sweep removes any such
-directory whose unit is not starting. The plugin never uses
-`SetCredential=`, whose value any local user reads from the unit's
-properties and its transient unit file.
+systemd's `LoadCredential=` reads each target when the unit starts.
+Dispatch writes an environment target as `.env.<variable>` and a file
+target under its file name to `/run/wherry-systemd/<unit>/`, root 0600 in a
+root 0700 directory, before the start, and removes the directory when the
+start job ends, whatever its result. The sweep removes any such directory
+whose unit is not starting.
 
-systemd copies the credentials into the unit's store,
+systemd copies the targets into the unit's store,
 `/run/credentials/<unit>/` on the host, readable by root and the run's
 user, until the unit stops. The agent sees the store read-only at
 `/run/wherry/credentials`, on a separate filesystem from `/wherry`, so the
-agent cannot hard-link a credential into its outputs. Where the store is a
+agent cannot hard-link a target into its outputs. Where the store is a
 ramfs, as systemd 252 mounts it first, each file is 0400 owned by the
 agent's UID in a 0500 directory it owns. Where the store is a tmpfs, as
 systemd 255 mounts it first on Linux 6.3 and later, each file is root
@@ -372,30 +365,33 @@ systemd 255 mounts it first on Linux 6.3 and later, each file is root
 read access, and search on the directory; `stat` shows them as 0440 and
 0550, since the group bits of a file with an ACL are its mask, and the
 owning group's entry grants nothing. Either way only root and the agent's
-UID read the credentials. `ssh` accepts the key in both.
-A run without credentials sees `/run/wherry/credentials` empty.
+UID read the targets. `ssh` accepts the key in both.
+A run without targets sees `/run/wherry/credentials` empty.
 
-The credential variable is set by a shell wrapper over the runtime command,
-which reads `/run/wherry/credentials/.credential` and keeps its trailing
-newlines, then execs the command; the agent keeps the unit's main PID.
-Without a credential the unit runs the runtime command alone.
+For each environment target, a shell wrapper reads
+`/run/wherry/credentials/.env.<variable>`, keeps trailing newlines, and
+exports the value before it execs the runtime command. The agent keeps the
+unit's main PID. A file target remains available under its file name in
+`/run/wherry/credentials`.
 
-The credential IDs and values of a run together hold at most 1 MiB, as
-systemd allows, and so do their files counted in whole pages, as the
-1 MiB tmpfs systemd 255 mounts for the store holds them. Dispatch refuses
-a run over either with
-`the credentials exceed systemd's 1 MiB credential limit`, and a run whose
-credential holds a NUL byte, creating nothing. Inputs are files and are not
-bounded by it. The plugin declares no inline limit; the pool's inline limit
-and the record limit bind. A delivered input name is at most 255 bytes.
+The target IDs and values of a run together hold at most 1 MiB, as systemd
+allows, and so do their files counted in whole pages, as the 1 MiB tmpfs
+systemd 255 mounts for the store holds them. Dispatch refuses a run over
+either with `the credentials exceed systemd's 1 MiB credential limit`, and
+a run whose environment target holds a NUL byte, creating nothing. Inputs
+are files and are not bounded by it. The plugin declares no inline limit;
+the pool's inline limit and the record limit bind. A delivered input name
+is at most 255 bytes.
 
-The agent credential is in the agent's environment, and so in
+Environment targets are in the agent's environment, and so in
 `/proc/<pid>/environ` of the agent and its children. `LimitCORE=1` keeps
 systemd-coredump from writing a crashed agent's environment to the
 journal. A core file, where one is written under
 `/var/lib/systemd/coredump`, holds the agent's memory and is root-readable
 until vacuumed. An agent process may lower its own core limit to 0, which
-re-enables the handler for it.
+re-enables the handler for it. The receiver collects
+`$WHERRY_OUTPUT_DIR/.wherry/outcome.json` from the output directory like any
+other file.
 
 ### Sweep
 
@@ -588,8 +584,8 @@ restorecon -Rv /var/lib/wherry/systemd /var/lib/private/wherry-agents
 
 The receiver and the plugin, both `bin_t` under `/usr/local`, run as
 `unconfined_service_t`. An agent unit whose command starts with `/bin/sh`,
-as every run with a credential does, runs as `initrc_t`; one whose command
-is a `bin_t` binary runs as `unconfined_service_t`. Both are unconfined
+as every run with an environment target does, runs as `initrc_t`; one whose
+command is a `bin_t` binary runs as `unconfined_service_t`. Both are unconfined
 domains, so DAC and the unit's sandbox confine the agent.
 
 ## Tests
