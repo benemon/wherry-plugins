@@ -142,15 +142,12 @@ An adapter's `config` section in the receiver configuration:
 | `address` | in-cluster | API server URL; must be `https://` |
 | `ca_file` | the service account's CA when `address` is empty; the system roots otherwise | CA bundle for the API, a path on the receiver |
 | `namespace` | required | namespace for agent pods and their Secrets; a DNS-1123 label |
-| `credential_env` | none | environment variable the agent receives the credential in |
 | `node_selector` | none | node labels agent pods require |
 | `tolerations` | none | taints agent pods tolerate |
 | `helper_image` | required | image, with no whitespace, holding `wherry-k8s-helper` at `/usr/local/libexec/wherry/`; the receiver image at the receiver's tag |
 | `runtime` | required | the agent container's definition |
 
-`credential_env` is required when the adapter sets `credential`, matches
-`[A-Za-z_][A-Za-z0-9_]*`, and is none of the variables the plugin sets for the
-agent. `node_selector` keys and values are
+`node_selector` keys and values are
 Kubernetes label keys and values. Each toleration has `key`, `operator`
 (`Equal`, or `Exists` without a `value`), `value` and `effect`
 (`NoSchedule`, `PreferNoSchedule` or `NoExecute`). Unknown fields are
@@ -182,8 +179,9 @@ refused, and so is root (0). `group` is refused beside a `user` that names
 a GID. They set the pod's `securityContext.runAsGroup` and
 `securityContext.supplementalGroups`.
 
-The plugin sets `HOME`, the `WHERRY_*` variables and the credential
-variable over `env`, so a variable of these names in `env` is overwritten.
+The plugin sets `HOME` and the `WHERRY_*` variables over `env`, so a
+variable of these names in `env` is overwritten. Environment targets are
+injected from the run's Secret.
 
 An adapter is ready when the API answers with the namespace, and the
 namespace is active. This proves the address, the token and the namespace.
@@ -206,7 +204,6 @@ An adapter file in a receiver configuration directory:
 name: kubernetes
 platform: kubernetes
 agent: coder
-credential: model-api-key
 labels:
   platform: kubernetes
 config:
@@ -227,7 +224,6 @@ name: kubernetes
 type: kubernetes
 config:
   namespace: wherry
-  credential_env: MODEL_API_KEY
   helper_image: registry.example.com/wherry-receiver:<version>
 ```
 
@@ -380,16 +376,25 @@ message as the reason:
 
 A first `ErrImagePull` and an unscheduled pod are waited on.
 
+### Credential targets and outcome file
+
+Kubernetes injects each environment target into the agent container from a
+Secret key reference. The init container copies each file target from the
+Secret into `/run/wherry/credentials/files`, which
+`WHERRY_CREDENTIALS_DIR` names. The receiver collects
+`$WHERRY_OUTPUT_DIR/.wherry/outcome.json` from the output directory like any
+other file.
+
 The agent sees:
 
 - the prompt in `/wherry/prompt.txt`;
-- the credential in the environment variable `credential_env` names,
+- each environment target in the environment variable named by the target,
   through a `secretKeyRef`, so its value never appears in the pod spec;
 - each input file in `/wherry/inputs`, mode 0600, in a 0700 directory;
 - each S3 input in `/wherry/inputs`, as described in [S3 inputs](#s3-inputs);
-- each task credential as a file in `/run/wherry/credentials/files`, mode
+- each file target as a file in `/run/wherry/credentials/files`, mode
   0600, in a 0700 directory, both owned by the agent's UID, so `ssh`
-  accepts a private key. The credentials are on a memory-backed volume,
+  accepts a private key. File targets are on a memory-backed volume,
   which the agent mounts read-only and which is a different filesystem from
   its outputs, so the agent cannot hard-link a credential into them;
 - its outputs directory, which it creates, at `/wherry/outputs`;
@@ -464,25 +469,26 @@ recorded end, and does not collect from it.
 
 ### Secrets
 
-A run's Secret holds its prompt (`prompt`), its credential (`credential`),
-each task credential (`credentials.<file>`) and each input file
-(`inputs.<name>`), as raw bytes, so binary files arrive intact. Only the
-`inputs` init container mounts it.
+A run's Secret holds its prompt (`prompt`), each environment target
+(`env.<variable>`), each file target (`credentials.<file>`) and each input
+file (`inputs.<name>`), as raw bytes, so binary files arrive intact. The
+init container mounts it to stage inputs and file targets. The agent
+container reads environment targets through Secret key references.
 
 The API server limits a Secret's values together to 1 MiB, and a key to
-253 characters. Dispatch adds up the prompt, the credential, the task
-credentials and then the inputs, and refuses a run over either limit,
+253 characters. Dispatch adds up the prompt, target values and then the
+inputs, and refuses a run over either limit,
 creating nothing:
 
 - An input that takes the total past 1 MiB, or whose name is over 246
   characters, fails the run naming the input.
-- A task credential file name over 241 characters fails the run the same
+- A file target name over 241 characters fails the run the same
   way; the receiver calls it an input.
-- A prompt and credentials over 1 MiB without any input fail the run with
+- A prompt and target values over 1 MiB without any input fail the run with
   `the prompt and credentials exceed the 1 MiB Secret limit`.
 
 The plugin declares an inline limit of 512 KiB, half the Secret, which
-leaves the prompt and credentials the rest, so a host sends larger inputs
+leaves the prompt and target values the rest, so a host sends larger inputs
 through the pool's bucket. Under the default pool terms, inputs fit.
 
 The plugin writes the Secret only when the run's pod does not exist yet,

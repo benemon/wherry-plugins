@@ -109,17 +109,13 @@ An adapter's `config` section in the receiver configuration:
 | `address` | `NOMAD_ADDR`, else `http://127.0.0.1:4646` | Nomad API address |
 | `ca_file` | none | CA bundle for the Nomad API, a path on the receiver |
 | `namespace` | `default` | namespace for agent jobs and variables; `NOMAD_NAMESPACE` is not read |
-| `credential_env` | none | environment variable the job receives the credential in |
 | `node_pool` | `default` | node pool for agent jobs |
 | `datacenters` | every datacenter | datacenters for agent jobs |
 | `runtime` | required | the agent task's definition |
 
-`credential_env` is required when the adapter sets `credential`, matches
-`[A-Za-z_][A-Za-z0-9_]*`, and is none of the variables the plugin sets
-for the agent. Names in `runtime.env` match the same pattern. Unknown fields
-are errors. The plugin
-checks the section when the receiver configures the adapter, and the
-receiver exits with `adapter <name>: ...` on an error.
+Names in `runtime.env` match `[A-Za-z_][A-Za-z0-9_]*`. Unknown fields are
+errors. The plugin checks the section when the receiver configures the
+adapter, and the receiver exits with `adapter <name>: ...` on an error.
 
 `runtime` has these fields:
 
@@ -170,14 +166,12 @@ adapters:
   - name: container
     type: nomad
     agent: coder
-    credential: model-api-key
     labels:
       isolation: container
     config:
       address: https://nomad.example.com:4646
       ca_file: /secrets/nomad-ca.pem
       namespace: agents
-      credential_env: MODEL_API_KEY
       runtime:
         driver: docker
         config:
@@ -304,16 +298,24 @@ finishes in that time succeeds with nothing counted; otherwise the plugin
 counts a refused signal as a platform error and deregisters the job. A stop
 whose context ends during the wait returns at once with the context's error.
 
+### Credential targets and outcome file
+
+Nomad renders an environment target into the task environment through
+`$NOMAD_SECRETS_DIR/wherry.env`. It renders a file target under
+`$NOMAD_SECRETS_DIR/credentials/<file>`, which
+`WHERRY_CREDENTIALS_DIR` names. The receiver collects
+`$WHERRY_OUTPUT_DIR/.wherry/outcome.json` from the output directory like any
+other file.
+
 The agent task receives:
 
 - the prompt in `$NOMAD_TASK_DIR/prompt.txt`;
-- the credential in the environment variable `credential_env` names, when
-  the adapter delivers one;
+- each environment target in the environment variable named by the target;
 - each input file in `$NOMAD_TASK_DIR/inputs`, rendered by a template that
   decodes its base64, so binary files arrive intact;
 - each S3 input in `$NOMAD_TASK_DIR/inputs`, fetched as described in
   [S3 inputs](#s3-inputs);
-- each task credential as a file in `$NOMAD_SECRETS_DIR/credentials`,
+- each file target as a file in `$NOMAD_SECRETS_DIR/credentials`,
   rendered the same way. With a numeric `user`, each file belongs to that
   UID and GID with mode 0600. With a user name or no `user`, each file
   belongs to the Nomad client's user, usually root, with Nomad's default
