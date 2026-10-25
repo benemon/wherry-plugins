@@ -43,13 +43,14 @@ const (
 	// systemd mounts as a unit's credential store.
 	maxCredentials = 1 << 20
 	// maxName is NAME_MAX, the longest delivered input name.
-	maxName         = 255
-	minVersion      = 252
-	cgroup2Magic    = 0x63677270
-	agentCredential = ".credential"
-	cleanupWait     = 10 * time.Second
-	startTimeout    = 30 * time.Second
-	stopTimeout     = 15 * time.Second
+	maxName      = 255
+	minVersion   = 252
+	cgroup2Magic = 0x63677270
+	// envCredential starts the store ID of a credential delivered as environment variable.
+	envCredential = ".env."
+	cleanupWait   = 10 * time.Second
+	startTimeout  = 30 * time.Second
+	stopTimeout   = 15 * time.Second
 
 	phasePrepared = "prepared"
 	phaseStarting = "starting"
@@ -116,8 +117,7 @@ type manager interface {
 
 // Config is the adapter's section of the receiver configuration.
 type Config struct {
-	CredentialEnv string  `json:"credential_env"`
-	Runtime       Runtime `json:"runtime"`
+	Runtime Runtime `json:"runtime"`
 }
 
 // Runtime defines the agent command the adapter runs in each unit.
@@ -146,7 +146,6 @@ const (
 // Adapter runs each run as one transient service on the receiver's host.
 type Adapter struct {
 	name, pool, node string
-	credentialEnv    string
 	runtime          Runtime
 	user, group      string
 	cpuQuota         int
@@ -228,10 +227,6 @@ func validID(value string) bool {
 func New(config Config, name, pool string, logger hclog.Logger) (*Adapter, error) {
 	command := config.Runtime.Command
 	switch {
-	case config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv):
-		return nil, errors.New("credential_env must be an environment variable name")
-	case wherry.ReservedEnv(config.CredentialEnv) || slices.Contains(systemdEnv, config.CredentialEnv):
-		return nil, errors.New("credential_env must not be a variable the plugin or systemd sets for the agent, such as HOME or CREDENTIALS_DIRECTORY")
 	case len(command) == 0 || !path.IsAbs(command[0]):
 		return nil, errors.New("runtime command must start with an absolute path")
 	case slices.ContainsFunc(slices.Concat(command, config.Runtime.Args), func(s string) bool { return !text(s) }):
@@ -297,7 +292,7 @@ func New(config Config, name, pool string, logger hclog.Logger) (*Adapter, error
 		return nil, errors.New("systemd 252 or later is required")
 	}
 	return &Adapter{
-		name: name, pool: pool, node: node, credentialEnv: config.CredentialEnv, runtime: config.Runtime,
+		name: name, pool: pool, node: node, runtime: config.Runtime,
 		user: user, group: group, cpuQuota: cpuQuota, memoryMB: memoryMB,
 		fetcher: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -462,10 +457,14 @@ type addressFamilies struct {
 	Families []string
 }
 
-// wrapper is the shell script that exports the agent credential from the store as variable and execs the agent; the
-// trailing x keeps the credential's trailing newlines.
-func wrapper(variable string) string {
-	return `c=$(cat -- ` + credentialsPath + `/` + agentCredential + ` && printf x) || exit; export ` + variable + `="${c%x}"; exec "$@"`
+// wrapper is the shell script that exports each variable's credential from the store and execs the agent; the trailing
+// x keeps a credential's trailing newlines.
+func wrapper(variables []string) string {
+	script := ""
+	for _, variable := range variables {
+		script += `c=$(cat -- ` + credentialsPath + `/` + envCredential + variable + ` && printf x) || exit; export ` + variable + `="${c%x}"; `
+	}
+	return script + `exec "$@"`
 }
 
 // properties builds the run's unit, whose agent reads its credentials from the files LoadCredential= names.
@@ -491,8 +490,14 @@ func (adapter *Adapter) properties(run wherry.Run, job string, credentials []loa
 	}
 	vars = append(vars, own...)
 	argv := slices.Concat(adapter.runtime.Command, adapter.runtime.Args)
-	if run.Credential != nil {
-		argv = slices.Concat([]string{"/bin/sh", "-c", wrapper(adapter.credentialEnv), "wherry-agent"}, argv)
+	var variables []string
+	for _, secret := range run.Credentials {
+		if secret.Env != "" {
+			variables = append(variables, secret.Env)
+		}
+	}
+	if len(variables) > 0 {
+		argv = slices.Concat([]string{"/bin/sh", "-c", wrapper(variables), "wherry-agent"}, argv)
 	}
 	control := filepath.Join(controlRoot, job)
 	properties := []sd.Property{
@@ -591,8 +596,10 @@ func deliverable(run wherry.Run) error {
 	if credentialTotal(run) > maxCredentials {
 		return errors.New("the credentials exceed systemd's 1 MiB credential limit")
 	}
-	if slices.Contains(run.Credential, 0) {
-		return errors.New("the credential holds a NUL byte, which an environment variable cannot")
+	for _, secret := range run.Credentials {
+		if secret.Env != "" && slices.Contains(secret.Value, 0) {
+			return errors.New("credential " + secret.Name + " holds a NUL byte, which an environment variable cannot")
+		}
 	}
 	if !text(run.Model) {
 		return errors.New("the model must be UTF-8 without NUL")

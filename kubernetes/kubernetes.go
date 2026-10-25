@@ -80,14 +80,13 @@ var (
 
 // Config is the adapter's section of the receiver configuration.
 type Config struct {
-	Address       string            `json:"address"`
-	CAFile        string            `json:"ca_file"`
-	Namespace     string            `json:"namespace"`
-	CredentialEnv string            `json:"credential_env"`
-	NodeSelector  map[string]string `json:"node_selector,omitzero"`
-	Tolerations   []Toleration      `json:"tolerations,omitzero"`
-	HelperImage   string            `json:"helper_image"`
-	Runtime       Runtime           `json:"runtime"`
+	Address      string            `json:"address"`
+	CAFile       string            `json:"ca_file"`
+	Namespace    string            `json:"namespace"`
+	NodeSelector map[string]string `json:"node_selector,omitzero"`
+	Tolerations  []Toleration      `json:"tolerations,omitzero"`
+	HelperImage  string            `json:"helper_image"`
+	Runtime      Runtime           `json:"runtime"`
 }
 
 // Toleration lets agent pods onto nodes with a matching taint.
@@ -128,7 +127,6 @@ func (adapter *Adapter) InlineLimit() int64 { return inlineLimit }
 // Adapter runs each run as one pod and one Secret in a namespace.
 type Adapter struct {
 	name, pool, namespace string
-	credentialEnv         string
 	helperImage           string
 	runtime               Runtime
 	nodeSelector          map[string]string
@@ -224,10 +222,6 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 	switch {
 	case len(validation.IsDNS1123Label(config.Namespace)) > 0:
 		return nil, errors.New("namespace must be a DNS-1123 label")
-	case config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv):
-		return nil, errors.New("credential_env must be an environment variable name")
-	case wherry.ReservedEnv(config.CredentialEnv):
-		return nil, errors.New("credential_env must not be a variable the plugin sets for the agent, such as HOME or WHERRY_MODEL")
 	case !image(config.HelperImage):
 		return nil, errors.New("helper_image must be an image")
 	case !image(config.Runtime.Image):
@@ -329,7 +323,7 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 		return nil, err
 	}
 	return &Adapter{
-		name: name, pool: pool, namespace: config.Namespace, credentialEnv: config.CredentialEnv, helperImage: config.HelperImage,
+		name: name, pool: pool, namespace: config.Namespace, helperImage: config.HelperImage,
 		runtime: config.Runtime, nodeSelector: config.NodeSelector, tolerations: tolerations, resources: resources, workLimit: workLimit,
 		uid: uid, gid: gid, groups: groups,
 		core: core, meta: meta,
@@ -423,17 +417,22 @@ func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 	return namespace.Status.Phase == corev1.NamespaceActive, nil
 }
 
+// secretKey is the run's Secret key holding a credential; the helper copies credentials.* keys alone into files.
+func secretKey(secret wherry.Secret) string {
+	if secret.Env != "" {
+		return "env." + secret.Env
+	}
+	return "credentials." + secret.File
+}
+
 // secretData is a run's Secret data, refused when a key or the values together pass the API server's limits.
 func secretData(run wherry.Run) (map[string][]byte, error) {
 	data := map[string][]byte{"prompt": run.Prompt}
-	size := len(run.Prompt) + len(run.Credential)
-	if run.Credential != nil {
-		data["credential"] = run.Credential
-	}
+	size := len(run.Prompt)
 	for _, secret := range run.Credentials {
-		key := "credentials." + secret.File
+		key := secretKey(secret)
 		if len(key) > maxKey {
-			return nil, &wherry.InputTooLargeError{Name: secret.File}
+			return nil, &wherry.InputTooLargeError{Name: cmp.Or(secret.File, secret.Env)}
 		}
 		data[key] = secret.Value
 		size += len(secret.Value)
@@ -471,17 +470,19 @@ func (adapter *Adapter) buildPod(run wherry.Run, name string) *corev1.Pod {
 	if run.Model != "" {
 		env["WHERRY_MODEL"] = run.Model
 	}
-	if run.Credential != nil {
-		delete(env, adapter.credentialEnv)
+	for _, secret := range run.Credentials {
+		delete(env, secret.Env)
 	}
 	var vars []corev1.EnvVar
 	for _, variable := range slices.Sorted(maps.Keys(env)) {
 		vars = append(vars, corev1.EnvVar{Name: variable, Value: env[variable]})
 	}
-	if run.Credential != nil {
-		vars = append(vars, corev1.EnvVar{Name: adapter.credentialEnv, ValueFrom: &corev1.EnvVarSource{
-			SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: "credential"},
-		}})
+	for _, secret := range run.Credentials {
+		if secret.Env != "" {
+			vars = append(vars, corev1.EnvVar{Name: secret.Env, ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: secretKey(secret)},
+			}})
+		}
 	}
 	var args []string
 	for _, fetch := range run.Fetches {

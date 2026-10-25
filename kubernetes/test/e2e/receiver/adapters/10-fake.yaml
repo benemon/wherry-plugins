@@ -1,7 +1,6 @@
 name: fake
 platform: kind
 agent: fake
-output: file
 labels:
   e2e: fake
 config:

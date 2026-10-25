@@ -22,9 +22,6 @@ func newAdapter(settings wherry.Settings, logger hclog.Logger) (wherry.Adapter, 
 	if err := json.Unmarshal(settings.Config, &config, json.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
-	if settings.Credential != "" && config.CredentialEnv == "" {
-		return nil, errors.New("a credential needs credential_env")
-	}
 	if settings.Platform != "" {
 		return nil, errors.New("the systemd plugin takes no platform credential")
 	}

@@ -48,16 +48,20 @@ const (
 // implicit workload policy reads the group's variable, and no deeper path, beside the job's own.
 const inputsSuffix = "/" + taskName
 
-// credentialItem is the run variable's item holding the value of the task credential delivered as file.
-func credentialItem(file string) string { return "credentials/" + file }
+// credentialItem is the run variable's item holding the value of a credential, keyed by its target.
+func credentialItem(secret wherry.Secret) string {
+	if secret.Env != "" {
+		return "env/" + secret.Env
+	}
+	return "credentials/" + secret.File
+}
 
 // Config is the adapter's section of the receiver configuration.
 type Config struct {
-	Address       string  `json:"address"`
-	CAFile        string  `json:"ca_file"`
-	Namespace     string  `json:"namespace"`
-	CredentialEnv string  `json:"credential_env"`
-	Runtime       Runtime `json:"runtime"`
+	Address   string  `json:"address"`
+	CAFile    string  `json:"ca_file"`
+	Namespace string  `json:"namespace"`
+	Runtime   Runtime `json:"runtime"`
 	// NodePool and Datacenters bound where Nomad may place the adapter's
 	// jobs; unset, Nomad's defaults apply.
 	NodePool    string   `json:"node_pool,omitzero"`
@@ -84,13 +88,12 @@ type Resources struct {
 // Adapter registers per-run agent jobs in one namespace.
 type Adapter struct {
 	// name is the adapter's name, which its jobs' meta records.
-	name          string
-	client        *api.Client
-	namespace     string
-	credentialEnv string
-	runtime       Runtime
-	nodePool      string
-	datacenters   []string
+	name        string
+	client      *api.Client
+	namespace   string
+	runtime     Runtime
+	nodePool    string
+	datacenters []string
 	// uid and gid own the task's credential files when the runtime's user is numeric.
 	uid, gid *int
 	// prefix starts every job ID of the adapter's pool; agentJob matches those IDs and runVariable the variables of those
@@ -151,12 +154,6 @@ func newClient(config Config, token string) (*api.Client, error) {
 
 // New builds the adapter named name for a pool's jobs on client.
 func New(config Config, name, pool string, client *api.Client, logger hclog.Logger) (*Adapter, error) {
-	if config.CredentialEnv != "" && !envName.MatchString(config.CredentialEnv) {
-		return nil, errors.New("credential_env must be an environment variable name")
-	}
-	if wherry.ReservedEnv(config.CredentialEnv) {
-		return nil, errors.New("credential_env must not be a variable the plugin sets for the agent, such as HOME or WHERRY_MODEL")
-	}
 	for variable := range config.Runtime.Env {
 		if !envName.MatchString(variable) {
 			return nil, errors.New("runtime env names must be environment variable names")
@@ -215,7 +212,7 @@ func New(config Config, name, pool string, client *api.Client, logger hclog.Logg
 	sum := sha256.Sum256([]byte(pool))
 	prefix := jobPrefix + hex.EncodeToString(sum[:])[:12] + "-"
 	return &Adapter{
-		name: name, client: client, namespace: config.Namespace, credentialEnv: config.CredentialEnv, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters,
+		name: name, client: client, namespace: config.Namespace, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters,
 		uid: uid, gid: gid,
 		prefix:      prefix,
 		agentJob:    regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `.+$`),
@@ -283,11 +280,8 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 	}
 	jobID := *job.ID
 	items := map[string]string{"prompt": string(run.Prompt)}
-	if run.Credential != nil {
-		items["credential"] = string(run.Credential)
-	}
 	for _, secret := range run.Credentials {
-		items[credentialItem(secret.File)] = base64.StdEncoding.EncodeToString(secret.Value)
+		items[credentialItem(secret)] = base64.StdEncoding.EncodeToString(secret.Value)
 	}
 	variable := &api.Variable{Namespace: adapter.namespace, Path: path, Items: items}
 	if _, _, err := adapter.client.Variables().Update(variable, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
@@ -431,9 +425,16 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 	templates := []*api.Template{
 		{EmbeddedTmpl: new(`{{ with nomadVar "` + path + `" }}` + prompt + `{{ end }}`), DestPath: new("local/prompt.txt"), ChangeMode: new("noop")},
 	}
-	if run.Credential != nil {
+	var envs []string
+	for _, secret := range run.Credentials {
+		if secret.Env != "" {
+			delete(env, secret.Env)
+			envs = append(envs, secret.Env+`={{ (index . "`+credentialItem(secret)+`").Value | base64Decode }}`)
+		}
+	}
+	if len(envs) > 0 {
 		templates = append(templates, &api.Template{
-			EmbeddedTmpl: new(`{{ with nomadVar "` + path + `" }}` + adapter.credentialEnv + `={{ .credential }}{{ end }}`),
+			EmbeddedTmpl: new(`{{ with nomadVar "` + path + `" }}` + strings.Join(envs, "\n") + "\n{{ end }}"),
 			DestPath:     new("${NOMAD_SECRETS_DIR}/wherry.env"), Envvars: new(true), ChangeMode: new("noop"),
 		})
 	}
@@ -445,8 +446,11 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 		})
 	}
 	for _, secret := range run.Credentials {
+		if secret.File == "" {
+			continue
+		}
 		template := &api.Template{
-			EmbeddedTmpl: new(`{{ with nomadVar "` + path + `" }}{{ (index . "` + credentialItem(secret.File) + `").Value | base64Decode }}{{ end }}`),
+			EmbeddedTmpl: new(`{{ with nomadVar "` + path + `" }}{{ (index . "` + credentialItem(secret) + `").Value | base64Decode }}{{ end }}`),
 			DestPath:     new("${NOMAD_SECRETS_DIR}/credentials/" + secret.File), ChangeMode: new("noop"),
 		}
 		if adapter.uid != nil {

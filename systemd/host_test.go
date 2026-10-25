@@ -117,7 +117,7 @@ func conformanceSettings(t *testing.T) (wherry.Settings, wherry.Settings) {
 	t.Helper()
 	onSystemd(t)
 	pool := hostPool(t)
-	completes := settings(t, "completes", unitConfig("/bin/sh", "-c", `sleep 10; echo '{"type":"result","result":"done"}'`))
+	completes := settings(t, "completes", unitConfig("/bin/sh", "-c", `sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`))
 	neverStarts := settings(t, "never-starts", unitConfig("/nonexistent/wherry-conformance"))
 	completes.Pool, neverStarts.Pool = pool, pool
 	return completes, neverStarts
@@ -169,10 +169,9 @@ func TestReceiverBoundingSetOnSystemd(t *testing.T) {
 func TestUnitPropertiesOnSystemd(t *testing.T) {
 	adapter := hostAdapter(t, shConfig("sleep 30"))
 	run := testRun("properties")
-	run.Credential = []byte("model-key")
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: []byte("key")}}
+	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}, {Name: "deploy", File: "deploy-key", Value: []byte("key")}}
 	sent := map[string]any{}
-	for _, p := range adapter.properties(run, adapter.jobName(run.ID), []loadCredential{{agentCredential, "unused"}}) {
+	for _, p := range adapter.properties(run, adapter.jobName(run.ID), []loadCredential{{envCredential + credentialEnv, "unused"}}) {
 		sent[p.Name] = p.Value.Value()
 	}
 	handle := dispatch(t, adapter, run)
@@ -317,15 +316,14 @@ func TestAgentViewOnSystemd(t *testing.T) {
 	withShell.Runtime.Env = map[string]string{"PROBE": probe, "SHELL": "/bin/bash"}
 	bash := hostAdapter(t, withShell)
 	credentialed := testRun("view-credentials")
-	credentialed.Credential = []byte("model-key")
-	credentialed.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: []byte("key")}, {Name: "token", File: "token", Value: []byte("t")}}
+	credentialed.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}, {Name: "deploy", File: "deploy-key", Value: []byte("key")}, {Name: "token", File: "token", Value: []byte("t")}}
 	for _, c := range []struct {
 		adapter     *Adapter
 		run         wherry.Run
 		credentials string
 		shell       string
 	}{
-		{adapter, credentialed, ".credential deploy-key token", "/bin/sh"},
+		{adapter, credentialed, envCredential + credentialEnv + " deploy-key token", "/bin/sh"},
 		{adapter, testRun("view-plain"), "", "/bin/sh"},
 		{bash, testRun("view-bash"), "", "/bin/bash"},
 	} {
@@ -448,29 +446,36 @@ func TestCredentialFileOwnerAndModeOnSystemd(t *testing.T) {
 	}
 }
 
-func TestCredentialEnvOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig(`mkdir outputs; printf %s "$`+credentialEnv+`" > outputs/env`))
+func TestCredentialTargetsOnSystemd(t *testing.T) {
+	adapter := hostAdapter(t, shConfig(`mkdir outputs; printf %s "$`+credentialEnv+`" > outputs/env; printf %s "$SECOND_TOKEN" > outputs/second
+cp "$WHERRY_CREDENTIALS_DIR/deploy-key" "$WHERRY_CREDENTIALS_DIR/token" outputs/`))
 	run := testRun("env")
-	run.Credential = []byte("model-key with $dollar and trailing newline\n")
+	run.Credentials = []wherry.Secret{
+		{Name: "model", Env: credentialEnv, Value: []byte("model-key with $dollar and trailing newline\n")},
+		{Name: "second", Env: "SECOND_TOKEN", Value: []byte("second-token")},
+		{Name: "deploy", File: "deploy-key", Value: []byte("deploy-key-value")},
+		{Name: "token", File: "token", Value: []byte("token-value\n")},
+	}
 	_, _, outputs := hostTurn(t, adapter, run)
-	if !bytes.Equal(outputs["env"].Data, run.Credential) {
-		t.Fatalf("the agent's %s is %q; want %q", credentialEnv, outputs["env"].Data, run.Credential)
+	for name, secret := range map[string]wherry.Secret{"env": run.Credentials[0], "second": run.Credentials[1], "deploy-key": run.Credentials[2], "token": run.Credentials[3]} {
+		if !bytes.Equal(outputs[name].Data, secret.Value) {
+			t.Errorf("the agent's credential %s is %q; want %q", secret.Name, outputs[name].Data, secret.Value)
+		}
 	}
 }
 
 func TestCredentialsAtTheLimitOnSystemd(t *testing.T) {
 	adapter := hostAdapter(t, shConfig("exit 0"))
 	run := testRun("limit")
-	run.Credential = []byte("model-key")
-	// The agent credential takes one page of the store.
+	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}}
+	// The env credential takes one page of the store.
 	value := maxCredentials - os.Getpagesize()
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), value)}}
+	run.Credentials = append(run.Credentials, wherry.Secret{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), value)})
 	if _, terminal, _ := hostTurn(t, adapter, run); !terminal.Started || terminal.ExitCode != 0 {
 		t.Fatalf("at the limit: terminal %+v; want the run started", terminal)
 	}
 	over := testRun("over")
-	over.Credential = run.Credential
-	over.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), value+1)}}
+	over.Credentials = []wherry.Secret{run.Credentials[0], {Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), value+1)}}
 	if outcome, _, err := adapter.Dispatch(context.Background(), over); outcome != wherry.OutcomeNothingCreated || err == nil {
 		t.Fatalf("one byte over: outcome %d, %v", outcome, err)
 	}
@@ -483,7 +488,7 @@ func TestCredentialsAtTheLimitOnSystemd(t *testing.T) {
 func TestTwoRunsCannotReachEachOther(t *testing.T) {
 	first := hostAdapter(t, shConfig("sleep 60"))
 	run := testRun("first")
-	run.Credential = []byte("first-credential")
+	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("first-credential")}}
 	dispatch(t, first, run)
 	u, err := first.unit(context.Background(), unitName(first.jobName(run.ID)))
 	if err != nil || u.mainPID == 0 {
@@ -687,7 +692,7 @@ func TestCoreDumpKeepsTheCredentialOutOfTheJournalOnSystemd(t *testing.T) {
 	t.Logf("kernel.core_pattern: %s", bytes.TrimSpace(pattern))
 	since := time.Now().Add(-time.Second).Format("2006-01-02 15:04:05")
 	run := testRun("core")
-	run.Credential = []byte("core-dump-credential-" + hex.EncodeToString([]byte(since)))
+	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("core-dump-credential-" + hex.EncodeToString([]byte(since)))}}
 	_, terminal, _ := hostTurn(t, adapter, run)
 	if terminal.Signal != "11" {
 		t.Errorf("terminal %+v; want signal 11", terminal)
@@ -702,7 +707,7 @@ func TestCoreDumpKeepsTheCredentialOutOfTheJournalOnSystemd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("journalctl %v: %v", args, err)
 		}
-		if bytes.Contains(output, run.Credential) {
+		if bytes.Contains(output, run.Credentials[0].Value) {
 			t.Errorf("journalctl %v holds the credential", args)
 		}
 	}
@@ -712,8 +717,7 @@ func TestTransientFileHoldsNoMaterial(t *testing.T) {
 	adapter := hostAdapter(t, shConfig("sleep 30"))
 	run := testRun("transient")
 	run.Prompt = []byte("transient-prompt-secret")
-	run.Credential = []byte("transient-credential-secret")
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: []byte("transient-task-secret")}}
+	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("transient-credential-secret")}, {Name: "deploy", File: "deploy-key", Value: []byte("transient-task-secret")}}
 	run.Inputs = []wherry.File{{Name: "in.txt", Data: []byte("transient-input-secret")}}
 	handle := dispatch(t, adapter, run)
 	file, err := os.ReadFile(filepath.Join("/run/systemd/transient", handle.Name))
@@ -735,7 +739,7 @@ func TestTransientFileHoldsNoMaterial(t *testing.T) {
 func TestPurgeLeavesNothingOnSystemd(t *testing.T) {
 	adapter := hostAdapter(t, shConfig(`mkdir outputs; echo x > outputs/x; sleep 30`))
 	run := testRun("purge")
-	run.Credential = []byte("key")
+	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key")}}
 	handle := dispatch(t, adapter, run)
 	if err := adapter.Purge(context.Background(), run.ID); err != nil {
 		t.Fatal(err)

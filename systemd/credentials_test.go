@@ -16,8 +16,7 @@ import (
 
 func credentialedRun(name string) wherry.Run {
 	run := testRun(name)
-	run.Credential = []byte("model-key")
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: []byte("ssh-key\n")}}
+	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}, {Name: "deploy", File: "deploy-key", Value: []byte("ssh-key\n")}}
 	return run
 }
 
@@ -36,7 +35,7 @@ func TestCredentialFilesAreRootOnly(t *testing.T) {
 			if got := mode(t, dir); got != 0o700 {
 				t.Errorf("%s: mode %o; want 0700", dir, got)
 			}
-			for id, want := range map[string]string{agentCredential: "model-key", "deploy-key": "ssh-key\n"} {
+			for id, want := range map[string]string{envCredential + credentialEnv: "model-key", "deploy-key": "ssh-key\n"} {
 				path := filepath.Join(dir, id)
 				if got := mode(t, path); got != 0o600 {
 					t.Errorf("%s: mode %o; want 0600", path, got)
@@ -47,7 +46,7 @@ func TestCredentialFilesAreRootOnly(t *testing.T) {
 			}
 			got := props["LoadCredential"].([]loadCredential)
 			slices.SortFunc(got, func(a, b loadCredential) int { return strings.Compare(a.ID, b.ID) })
-			want := []loadCredential{{agentCredential, filepath.Join(dir, agentCredential)}, {"deploy-key", filepath.Join(dir, "deploy-key")}}
+			want := []loadCredential{{envCredential + credentialEnv, filepath.Join(dir, envCredential+credentialEnv)}, {"deploy-key", filepath.Join(dir, "deploy-key")}}
 			if !slices.Equal(got, want) {
 				t.Errorf("LoadCredential %v; want %v", got, want)
 			}
@@ -130,7 +129,7 @@ func TestSweepRemovesStaleCredentialFiles(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(credentialRoot, name), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(credentialRoot, name, agentCredential), []byte("key"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(credentialRoot, name, "deploy-key"), []byte("key"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

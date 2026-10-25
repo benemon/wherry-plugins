@@ -27,6 +27,7 @@ import (
 
 	"github.com/benemon/wherry-plugins/kubernetes/helper"
 	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/adapter/adaptertest"
 	"github.com/hashicorp/go-hclog"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -57,7 +58,7 @@ var getOptions = metav1.GetOptions{}
 
 func testConfig(address, caFile string) Config {
 	return Config{
-		Address: address, CAFile: caFile, Namespace: testNamespace, CredentialEnv: credentialEnv, HelperImage: testHelperImage,
+		Address: address, CAFile: caFile, Namespace: testNamespace, HelperImage: testHelperImage,
 		Runtime: Runtime{
 			Image: testImage, Command: []string{"/bin/sh", "-c"}, Args: []string{"exec agent-run < /wherry/prompt.txt"},
 			Env: map[string]string{"WHERRY_TEST_ENV": "from-runtime"},
@@ -77,7 +78,7 @@ func build(config Config, pool, token string) (*Adapter, error) {
 func testRun(name string) wherry.Run {
 	return wherry.Run{
 		ID: "run-" + name, Adapter: testAdapter, Agent: "coder", Attempt: 2,
-		Prompt: []byte("hello-prompt"), Credential: []byte("test-credential"),
+		Prompt: []byte("hello-prompt"), Credentials: []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("test-credential")}},
 	}
 }
 
@@ -706,7 +707,7 @@ func TestBuildPodFromRuntime(t *testing.T) {
 		t.Fatalf("agent env %v; want %v", env, wantEnv)
 	}
 	last := agent.Env[len(agent.Env)-1]
-	if last.Name != credentialEnv || last.ValueFrom.SecretKeyRef.Name != name || last.ValueFrom.SecretKeyRef.Key != "credential" {
+	if last.Name != credentialEnv || last.ValueFrom.SecretKeyRef.Name != name || last.ValueFrom.SecretKeyRef.Key != "env."+credentialEnv {
 		t.Fatalf("credential variable %#v; want a reference to the Secret's credential key", last)
 	}
 	if material := volume(pod, "material"); material.Secret.SecretName != name || *material.Secret.DefaultMode != 0o444 {
@@ -716,7 +717,7 @@ func TestBuildPodFromRuntime(t *testing.T) {
 	if args := container(adapter.buildPod(run, name), "inputs").Args; !slices.Equal(args, []string{"--await", "data.csv", "12", strings.Repeat("a", 64)}) {
 		t.Fatalf("inputs args %v; want --await and the fetch's name, size and digest", args)
 	}
-	run.Credential = nil
+	run.Credentials = nil
 	if env := container(adapter.buildPod(run, name), "agent").Env; slices.ContainsFunc(env, func(v corev1.EnvVar) bool { return v.Name == credentialEnv }) {
 		t.Fatal("credential variable set for a run without a credential")
 	}
@@ -788,7 +789,7 @@ func TestPodSpecHoldsNoMaterial(t *testing.T) {
 	run := testRun("material")
 	run.Model = "sonnet"
 	run.Inputs = []wherry.File{{Name: "notes.md", Data: []byte("input-bytes-secret")}}
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "id_ed25519", Value: []byte("task-credential-secret")}}
+	run.Credentials = append(run.Credentials, wherry.Secret{Name: "deploy", File: "id_ed25519", Value: []byte("task-credential-secret")})
 	run.Fetches = []wherry.Fetch{{Name: "data.csv", URL: "https://storage.example.com/data.csv?X-Amz-Signature=signature-secret", Size: 3, SHA256: strings.Repeat("b", 64)}}
 	pod := adapter.buildPod(run, adapter.jobName(run.ID))
 	encoded := podJSON(t, pod)
@@ -919,10 +920,6 @@ func TestNewValidatesConfig(t *testing.T) {
 		"http address":              func(c *Config) { c.Address = "http://127.0.0.1:6443" },
 		"no namespace":              func(c *Config) { c.Namespace = "" },
 		"namespace not a label":     func(c *Config) { c.Namespace = "Agents_1" },
-		"credential_env not a name": func(c *Config) { c.CredentialEnv = "MODEL-KEY" },
-		"credential_env HOME":       func(c *Config) { c.CredentialEnv = "HOME" },
-		"credential_env WHERRY_":    func(c *Config) { c.CredentialEnv = "WHERRY_MODEL" },
-		"credential_env git config": func(c *Config) { c.CredentialEnv = "GIT_CONFIG_GLOBAL" },
 		"no helper image":           func(c *Config) { c.HelperImage = "" },
 		"no image":                  func(c *Config) { c.Runtime.Image = "" },
 		"image with whitespace":     func(c *Config) { c.Runtime.Image = "agent :1" },
@@ -1049,7 +1046,7 @@ func TestDispatchCreatesSecretThenPod(t *testing.T) {
 	adapter, _ := api.adapter(t)
 	run := testRun("create")
 	run.Inputs = []wherry.File{{Name: "notes.md", Data: []byte("notes")}}
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "id_ed25519", Value: []byte("key")}}
+	run.Credentials = append(run.Credentials, wherry.Secret{Name: "deploy", File: "id_ed25519", Value: []byte("key")})
 	handle := dispatch(t, adapter, run)
 	name := poolPrefix + "run-create"
 	base := "/api/v1/namespaces/agents/"
@@ -1058,7 +1055,7 @@ func TestDispatchCreatesSecretThenPod(t *testing.T) {
 		t.Fatalf("requests %v; want %v", got, want)
 	}
 	secret := api.secret(name)
-	wantData := map[string]string{"prompt": "hello-prompt", "credential": "test-credential", "inputs.notes.md": "notes", "credentials.id_ed25519": "key"}
+	wantData := map[string]string{"prompt": "hello-prompt", "env." + credentialEnv: "test-credential", "inputs.notes.md": "notes", "credentials.id_ed25519": "key"}
 	if secret.Type != corev1.SecretTypeOpaque || len(secret.Data) != len(wantData) || secret.Labels[labelRun] != run.ID {
 		t.Fatalf("secret %#v", secret)
 	}
@@ -1069,6 +1066,44 @@ func TestDispatchCreatesSecretThenPod(t *testing.T) {
 	}
 	if decoded, err := decodeHandle(handle); err != nil || handle.Name != name || decoded.Pod != name || decoded.UID != string(api.pod(name).UID) {
 		t.Fatalf("handle %s %+v, %v", handle.Name, decoded, err)
+	}
+}
+
+// Each env credential reaches the agent as a reference into the run's Secret, and each file credential as a key the
+// inputs helper writes into the credentials directory.
+func TestDispatchDeliversCredentialsAtTheirTargets(t *testing.T) {
+	for name, credentials := range map[string][]wherry.Secret{
+		"conformance": adaptertest.Credentials,
+		"two of each": {
+			{Name: "model", Env: "MODEL_API_KEY", Value: []byte("env-value-one")}, {Name: "git", Env: "GIT_TOKEN", Value: []byte("env-value-two")},
+			{Name: "deploy", File: "id_ed25519", Value: []byte("file-value-one")}, {Name: "ca", File: "ca.pem", Value: []byte("file-value-two")},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			adapter, _ := api.adapter(t)
+			run := testRun("credentials")
+			run.Credentials = credentials
+			dispatch(t, adapter, run)
+			job := adapter.jobName(run.ID)
+			secret, agent := api.secret(job), container(api.pod(job), "agent")
+			for _, credential := range credentials {
+				key := "credentials." + credential.File
+				if credential.Env != "" {
+					key = "env." + credential.Env
+					i := slices.IndexFunc(agent.Env, func(v corev1.EnvVar) bool { return v.Name == credential.Env })
+					if i < 0 || agent.Env[i].Value != "" || agent.Env[i].ValueFrom == nil || *agent.Env[i].ValueFrom.SecretKeyRef != (corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: job}, Key: key}) {
+						t.Fatalf("agent env %#v; want %s from the Secret's key %s", agent.Env, credential.Env, key)
+					}
+				}
+				if string(secret.Data[key]) != string(credential.Value) {
+					t.Fatalf("secret %s = %q; want credential %s", key, secret.Data[key], credential.Name)
+				}
+			}
+			if len(secret.Data) != 1+len(credentials) {
+				t.Fatalf("secret keys %v; want the prompt and one per credential", slices.Sorted(maps.Keys(secret.Data)))
+			}
+		})
 	}
 }
 
@@ -1240,8 +1275,7 @@ func TestDispatchRefusesInputsOverTheSecretLimit(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter, _ := api.adapter(t)
 	run := testRun("limit")
-	run.Credential = []byte("cred")
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "key", Value: []byte("key")}}
+	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("cred")}, {Name: "deploy", File: "key", Value: []byte("key")}}
 	run.Inputs = []wherry.File{{Name: "first.bin", Data: []byte("abc")}, {Name: "fill.bin", Data: bytes.Repeat([]byte{0xff}, maxSecret-len(run.Prompt)-4-3-3)}}
 	dispatch(t, adapter, run)
 	run.ID = "run-over"
@@ -2557,6 +2591,25 @@ func TestCollectStreamsNamedOutputs(t *testing.T) {
 	}
 }
 
+// The receiver reads the agent's outcome from .wherry/outcome.json, nested beneath the outputs directory, by streaming it.
+func TestCollectStreamsTheNestedOutcome(t *testing.T) {
+	const outcome = `{"state":"TASK_STATE_COMPLETED"}`
+	api := newFakeAPI(t)
+	adapter, execer := api.adapter(t)
+	api.set(func() { api.kubelet = endsAfter(0, 0) })
+	pod := api.agentPod(t, adapter, "outcome", nil)
+	writeOutputs(t, execer, pod.Name, map[string]string{".wherry/outcome.json": outcome, "report.md": "r"})
+	collected, err := outputsOf(t, adapter, handleOf(pod), wherry.Limits{Files: 10, FileBytes: 1 << 20, TotalBytes: 1 << 20, Stream: []string{".wherry/outcome.json"}, StreamBytes: 1 << 10})
+	if err != nil || len(collected) != 2 || collected[0].Name != ".wherry/outcome.json" || collected[0].Data != nil || collected[0].Body == nil {
+		t.Fatalf("collected %+v, %v; want the outcome streamed and report.md", collected, err)
+	}
+	data, err := io.ReadAll(collected[0].Body)
+	collected[0].Body.Close()
+	if err != nil || string(data) != outcome {
+		t.Fatalf("streamed outcome %q, %v", data, err)
+	}
+}
+
 func TestCollectWithoutAnOutputsDirectory(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter, _ := api.adapter(t)
@@ -3038,7 +3091,10 @@ func turn(t *testing.T) (string, []string) {
 	run := fetchRun("turn", store, files)
 	run.Model = "sonnet"
 	run.Inputs = []wherry.File{{Name: "notes.md", Data: []byte("input-bytes-secret")}}
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "id_ed25519", Value: []byte("task-credential-secret")}}
+	run.Credentials = []wherry.Secret{
+		{Name: "model", Env: "MODEL_API_KEY", Value: []byte("env-credential-secret")}, {Name: "git", Env: "GIT_TOKEN", Value: []byte("second-env-credential-secret")},
+		{Name: "deploy", File: "id_ed25519", Value: []byte("task-credential-secret")}, {Name: "ca", File: "ca.pem", Value: []byte("second-file-credential-secret")},
+	}
 	name := adapter.jobName(run.ID)
 	startInit(t, api, execer, name, run.Fetches, nil)
 	var errs []error
@@ -3118,7 +3174,8 @@ func turn(t *testing.T) (string, []string) {
 func TestSecretsNeverInRequestURLs(t *testing.T) {
 	secretBodies, seen := turn(t)
 	for _, line := range seen {
-		for _, secret := range []string{"hello-prompt", "test-credential", "input-bytes-secret", "task-credential-secret", "fetched-bytes-secret", "signature-secret", "X-Amz-Signature", "output-bytes-secret", "unreachable.invalid"} {
+		for _, secret := range []string{"hello-prompt", "test-credential", "input-bytes-secret", "env-credential-secret", "second-env-credential-secret",
+			"task-credential-secret", "second-file-credential-secret", "fetched-bytes-secret", "signature-secret", "X-Amz-Signature", "output-bytes-secret", "unreachable.invalid"} {
 			if strings.Contains(line, secret) {
 				t.Fatalf("%q holds %q", line, secret)
 			}
@@ -3149,8 +3206,8 @@ func devConfig(t *testing.T) Config {
 	}
 	return Config{
 		Address: address, CAFile: os.Getenv("WHERRY_KUBERNETES_DEV_CA_FILE"), Namespace: os.Getenv("WHERRY_KUBERNETES_DEV_NAMESPACE"),
-		CredentialEnv: credentialEnv, HelperImage: os.Getenv("WHERRY_KUBERNETES_DEV_HELPER_IMAGE"),
-		Runtime: Runtime{Image: "registry.access.redhat.com/ubi9/ubi-minimal", Command: []string{"/bin/sh", "-c"}, Resources: Resources{CPU: "100m", Memory: "256Mi"}},
+		HelperImage: os.Getenv("WHERRY_KUBERNETES_DEV_HELPER_IMAGE"),
+		Runtime:     Runtime{Image: "registry.access.redhat.com/ubi9/ubi-minimal", Command: []string{"/bin/sh", "-c"}, Resources: Resources{CPU: "100m", Memory: "256Mi"}},
 	}
 }
 
@@ -3257,11 +3314,11 @@ func TestCredentialFileOwnerAndModeOnKubernetes(t *testing.T) {
 func TestInputAtTheSecretLimitOnKubernetes(t *testing.T) {
 	adapter, ctx := devAdapter(t, `echo '{"type":"result","result":"done"}'`, nil)
 	run := devRun(t, adapter, "limit")
-	run.Credential = nil
+	run.Credentials = nil
 	run.Inputs = []wherry.File{{Name: "fill.bin", Data: bytes.Repeat([]byte{0xff}, maxSecret-len(run.Prompt))}}
 	devTurn(t, ctx, adapter, run)
 	over := devRun(t, adapter, "over")
-	over.Credential = nil
+	over.Credentials = nil
 	over.Inputs = []wherry.File{{Name: "fill.bin", Data: bytes.Repeat([]byte{0xff}, maxSecret-len(run.Prompt)+1)}}
 	var tooLarge *wherry.InputTooLargeError
 	if outcome, _, err := adapter.Dispatch(ctx, over); outcome != wherry.OutcomeNothingCreated || !errors.As(err, &tooLarge) {
@@ -3351,7 +3408,7 @@ func TestAdoptionOnKubernetes(t *testing.T) {
 	const script = `i=0; while [ $i -lt 60 ]; do echo "line $i"; i=$((i+1)); sleep 1; done; echo report > "$WHERRY_OUTPUT_DIR/report.md"; sleep 600`
 	first, ctx := devAdapter(t, script, nil)
 	run := devRun(t, first, "adopt")
-	run.Credential = nil
+	run.Credentials = nil
 	outcome, handle, err := first.Dispatch(ctx, run)
 	if err != nil || outcome != wherry.OutcomeCreated {
 		t.Fatalf("dispatch = %v, %v", outcome, err)
@@ -3458,7 +3515,7 @@ func TestFollowPastLogRotationOnKubernetes(t *testing.T) {
 func TestDeletingPodOnKubernetes(t *testing.T) {
 	adapter, ctx := devAdapter(t, `trap '' TERM; echo started; while :; do sleep 1; done`, nil)
 	run := devRun(t, adapter, "deleting")
-	run.Credential = nil
+	run.Credentials = nil
 	outcome, handle, err := adapter.Dispatch(ctx, run)
 	if err != nil || outcome != wherry.OutcomeCreated {
 		t.Fatalf("dispatch = %v, %v", outcome, err)

@@ -11,18 +11,15 @@ platforms:
       ca_file: /etc/wherry/nomad-ca.pem
       # Holds the agent jobs and their variables; the ACL policy names it.
       namespace: agents
-      # Required while any adapter on the platform sets a credential.
-      credential_env: MODEL_API_KEY
       # Unset, every datacenter.
       datacenters:
         - dc1
         - dc2
 adapters:
-  # A container agent that takes a credential and writes its reply to a file.
+  # A container agent that writes its reply to a file.
   - name: container
     platform: nomad
     agent: coder
-    credential: model-api-key
     output: file
     reply_file: reply.md
     labels:

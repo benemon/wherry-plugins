@@ -37,10 +37,10 @@ func execConfig(address string, command string, args ...any) map[string]any {
 }
 
 func TestFactoryDecodesStrictly(t *testing.T) {
-	withCredential := settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true"))
-	withCredential.Credential = "model"
-	if _, err := newAdapter(withCredential, hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "credential_env") {
-		t.Fatalf("got %v, want credential_env required", err)
+	retired := execConfig("http://127.0.0.1:1", "/bin/true")
+	retired["credential_env"] = "MODEL_API_KEY"
+	if _, err := newAdapter(settings(t, "lab", retired), hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "unknown") || !strings.Contains(err.Error(), "credential_env") {
+		t.Fatalf("got %v, want credential_env refused as an unknown member", err)
 	}
 	unknown := execConfig("http://127.0.0.1:1", "/bin/true")
 	unknown["token"] = "x"
@@ -74,14 +74,13 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 			Config map[string]any `yaml:"config"`
 		} `yaml:"platforms"`
 		Adapters []struct {
-			Name       string            `yaml:"name"`
-			Platform   string            `yaml:"platform"`
-			Agent      string            `yaml:"agent"`
-			Output     string            `yaml:"output"`
-			ReplyFile  string            `yaml:"reply_file"`
-			Credential string            `yaml:"credential"`
-			Labels     map[string]string `yaml:"labels"`
-			Config     map[string]any    `yaml:"config"`
+			Name      string            `yaml:"name"`
+			Platform  string            `yaml:"platform"`
+			Agent     string            `yaml:"agent"`
+			Output    string            `yaml:"output"`
+			ReplyFile string            `yaml:"reply_file"`
+			Labels    map[string]string `yaml:"labels"`
+			Config    map[string]any    `yaml:"config"`
 		} `yaml:"adapters"`
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(example))
@@ -115,7 +114,7 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := wherry.Settings{Name: adapter.Name, Pool: testPool, Agent: adapter.Agent, Credential: adapter.Credential, Config: encoded}
+		s := wherry.Settings{Name: adapter.Name, Pool: testPool, Agent: adapter.Agent, Config: encoded}
 		if _, err := newAdapter(s, hclog.NewNullLogger()); err != nil {
 			t.Fatalf("adapter %s: %v", adapter.Name, err)
 		}
@@ -163,7 +162,8 @@ func conformanceSettings(t *testing.T) (wherry.Settings, wherry.Settings) {
 	if address == "" {
 		t.Skip("WHERRY_NOMAD_DEV_ADDR not set")
 	}
-	return settings(t, "completes", execConfig(address, "/bin/sh", "-c", `sleep 10; echo '{"type":"result","result":"done"}'`)),
+	// The completing job exits 0 only with adaptertest.Credentials delivered at their targets.
+	return settings(t, "completes", execConfig(address, "/bin/sh", "-c", `sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`)),
 		settings(t, "never-starts", execConfig(address, "/nonexistent/wherry-conformance"))
 }
 
