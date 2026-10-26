@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -36,7 +37,7 @@ import (
 const (
 	credentialEnv = "WHERRY_TEST_CREDENTIAL"
 	testPool      = "build"
-	testAdapter   = "host"
+	testProfile   = "host"
 	// poolPrefix is agent- and the first 12 hex digits of sha256("build").
 	poolPrefix = "agent-44575cf5b285-"
 )
@@ -535,7 +536,7 @@ func agentConfig(script string) Config {
 func newAgent(t *testing.T, config Config) *Adapter {
 	t.Helper()
 	fast(t)
-	adapter, err := New(config, testAdapter, testPool, hclog.NewNullLogger())
+	adapter, err := New(config, testProfile, testPool, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -543,7 +544,7 @@ func newAgent(t *testing.T, config Config) *Adapter {
 }
 
 func testRun(name string) wherry.Run {
-	return wherry.Run{ID: "run-" + name, Adapter: testAdapter, Agent: "coder", Attempt: 2, Prompt: []byte("hello-prompt")}
+	return wherry.Run{ID: "run-" + name, Profile: testProfile, Agent: "coder", Attempt: 2, Prompt: []byte("hello-prompt")}
 }
 
 func unitOf(run wherry.Run) string { return unitName(jobName(testPool, run.ID)) }
@@ -632,7 +633,7 @@ func putMarker(t *testing.T, run wherry.Run, phase string, edit func(*marker)) {
 			t.Fatal(err)
 		}
 	}
-	m := &marker{V: 1, Pool: testPool, Adapter: run.Adapter, Agent: run.Agent, Run: run.ID, Attempt: run.Attempt, Instance: "0123456789abcdef0123456789abcdef", Phase: phase}
+	m := &marker{V: 1, Pool: testPool, Profile: run.Profile, Agent: run.Agent, Run: run.ID, Attempt: run.Attempt, Instance: "0123456789abcdef0123456789abcdef", Phase: phase}
 	if edit != nil {
 		edit(m)
 	}
@@ -679,7 +680,7 @@ func TestUnitPropertiesFromRuntime(t *testing.T) {
 	props := f.properties(unitOf(run))
 	job := jobOf(run)
 	want := map[string]any{
-		"Description":                "wherry agent run-props (adapter host)",
+		"Description":                "wherry agent run-props (profile host)",
 		"Slice":                      "wherry.slice",
 		"Type":                       "exec",
 		"RemainAfterExit":            true,
@@ -1114,7 +1115,7 @@ func TestNewValidatesConfig(t *testing.T) {
 	for name, edit := range cases {
 		config := agentConfig("exit 0")
 		edit(&config)
-		if _, err := New(config, testAdapter, testPool, hclog.NewNullLogger()); err == nil {
+		if _, err := New(config, testProfile, testPool, hclog.NewNullLogger()); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -1134,7 +1135,7 @@ func TestNewValidatesConfig(t *testing.T) {
 	} {
 		config := agentConfig("exit 0")
 		edit(&config)
-		if _, err := New(config, testAdapter, testPool, hclog.NewNullLogger()); err != nil {
+		if _, err := New(config, testProfile, testPool, hclog.NewNullLogger()); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -1143,7 +1144,7 @@ func TestNewValidatesConfig(t *testing.T) {
 func TestConfigureRefusesOldSystemdAndCgroupV1(t *testing.T) {
 	f := newHost(t)
 	f.set(func() { f.version = "251.9" })
-	if _, err := New(agentConfig("exit 0"), testAdapter, testPool, hclog.NewNullLogger()); err == nil || err.Error() != "systemd 252 or later is required" {
+	if _, err := New(agentConfig("exit 0"), testProfile, testPool, hclog.NewNullLogger()); err == nil || err.Error() != "systemd 252 or later is required" {
 		t.Fatalf("systemd 251: %v", err)
 	}
 	f.set(func() { f.version = "252" })
@@ -1151,7 +1152,7 @@ func TestConfigureRefusesOldSystemdAndCgroupV1(t *testing.T) {
 		buf.Type = 0x01021994 // tmpfs, as /sys/fs/cgroup is under the hybrid hierarchy
 		return nil
 	}
-	if _, err := New(agentConfig("exit 0"), testAdapter, testPool, hclog.NewNullLogger()); err == nil || err.Error() != "systemd's unified cgroup hierarchy is required" {
+	if _, err := New(agentConfig("exit 0"), testProfile, testPool, hclog.NewNullLogger()); err == nil || err.Error() != "systemd's unified cgroup hierarchy is required" {
 		t.Fatalf("cgroup v1: %v", err)
 	}
 }
@@ -1170,7 +1171,7 @@ func TestConfigureParsesTheManagerVersion(t *testing.T) {
 func TestConfigureRefusesANonRootPlugin(t *testing.T) {
 	newHost(t)
 	rootUID = os.Geteuid() + 1
-	if _, err := New(agentConfig("exit 0"), testAdapter, testPool, hclog.NewNullLogger()); err == nil || err.Error() != "the systemd plugin runs as root" {
+	if _, err := New(agentConfig("exit 0"), testProfile, testPool, hclog.NewNullLogger()); err == nil || err.Error() != "the systemd plugin runs as root" {
 		t.Fatalf("got %v; want the plugin refused", err)
 	}
 }
@@ -1181,7 +1182,7 @@ func TestConfigureRefusesAnOpenCredentialDirectory(t *testing.T) {
 	if err := os.Chmod(credentialRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(agentConfig("exit 0"), testAdapter, testPool, hclog.NewNullLogger()); err == nil || err.Error() != want {
+	if _, err := New(agentConfig("exit 0"), testProfile, testPool, hclog.NewNullLogger()); err == nil || err.Error() != want {
 		t.Fatalf("mode 0755: %v; want %q", err, want)
 	}
 	if got := f.recorded("dial"); len(got) != 0 {
@@ -1222,11 +1223,11 @@ func TestUnitNames(t *testing.T) {
 func TestSameRunInTwoPoolsMakesTwoUnits(t *testing.T) {
 	f := newHost(t)
 	fast(t)
-	first, err := New(agentConfig("exit 0"), testAdapter, "build", hclog.NewNullLogger())
+	first, err := New(agentConfig("exit 0"), testProfile, "build", hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := New(agentConfig("exit 0"), testAdapter, "review", hclog.NewNullLogger())
+	second, err := New(agentConfig("exit 0"), testProfile, "review", hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1412,8 +1413,8 @@ func TestDispatchRefusesANameOverNameMax(t *testing.T) {
 	adapter := newAgent(t, agentConfig("exit 0"))
 	long := strings.Repeat("n", 256)
 	for _, run := range []wherry.Run{
-		{ID: "run-inline", Adapter: testAdapter, Inputs: []wherry.File{{Name: long, Data: []byte("x")}}},
-		{ID: "run-fetch", Adapter: testAdapter, Fetches: []wherry.Fetch{{Name: long, URL: "https://storage.invalid/x", Size: 1}}},
+		{ID: "run-inline", Profile: testProfile, Inputs: []wherry.File{{Name: long, Data: []byte("x")}}},
+		{ID: "run-fetch", Profile: testProfile, Fetches: []wherry.Fetch{{Name: long, URL: "https://storage.invalid/x", Size: 1}}},
 	} {
 		outcome, _, err := adapter.Dispatch(context.Background(), run)
 		var tooLarge *wherry.InputTooLargeError
@@ -1728,7 +1729,7 @@ func TestLookupReadsDispatchMetadata(t *testing.T) {
 	run := testRun("metadata")
 	handle := dispatch(t, adapter, run)
 	job, err := adapter.Lookup(context.Background(), run.ID)
-	if err != nil || job.State != wherry.JobRunning || job.Attempt != 2 || job.Adapter != testAdapter || job.Agent != "coder" || job.Handle.Name != handle.Name {
+	if err != nil || job.State != wherry.JobRunning || job.Attempt != 2 || job.Profile != testProfile || job.Agent != "coder" || job.Handle.Name != handle.Name {
 		t.Fatalf("lookup %+v, %v; want running with the dispatch's metadata", job, err)
 	}
 	f.exited(t, unitOf(run))
@@ -2612,29 +2613,75 @@ func TestSweepSettlesOwnEndedRunsAtOnce(t *testing.T) {
 	}
 }
 
-func TestSweepCountsOnlyThisAdaptersRuns(t *testing.T) {
+func TestSweepCountsOnlyThisProfilesRuns(t *testing.T) {
 	f := newHost(t)
 	adapter := newAgent(t, agentConfig("exit 0"))
 	own, other := testRun("own"), testRun("other")
-	other.Adapter = "other"
+	other.Profile = "other"
 	ended(t, f, adapter, own)
 	ended(t, f, adapter, other)
 	backdate(t, f, own, 11*time.Minute)
 	backdate(t, f, other, 11*time.Minute)
 	sweep(t, adapter)
 	if !exists(markerPath(jobOf(other))) || exists(markerPath(jobOf(own))) {
-		t.Fatal("want the own run purged and the other adapter's kept")
+		t.Fatal("want the own run purged and the other profile's kept")
 	}
 	if got := samples(adapter)["wherry_adapter_sweep_deletions_total/job"].Value; got != 1 {
 		t.Fatalf("deletions %v; want 1", got)
 	}
 }
 
-func TestSweepSettlesAnotherAdaptersExpiredRun(t *testing.T) {
+// setMarkerProfile rewrites the profile field of run's job.json as it is on disk.
+func setMarkerProfile(t *testing.T, run wherry.Run, profile string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(markerPath(jobOf(run)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	written := maps.Clone(raw)
+	raw["profile"] = profile
+	if data, err = json.Marshal(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(markerPath(jobOf(run)), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return written
+}
+
+func TestMarkerProfileDecidesOwnership(t *testing.T) {
+	f := newHost(t)
+	adapter := newAgent(t, agentConfig("exit 0"))
+	run := testRun("marked")
+	ended(t, f, adapter, run)
+	if written := setMarkerProfile(t, run, "other"); written["profile"] != testProfile || written["adapter"] != nil {
+		t.Fatalf("marker %v; want the profile under profile", written)
+	}
+	if job, err := adapter.Lookup(context.Background(), run.ID); err != nil || job.Profile != "other" {
+		t.Fatalf("lookup %+v, %v; want the marker's profile other", job, err)
+	}
+	backdate(t, f, run, 11*time.Minute)
+	sweep(t, adapter)
+	if !exists(markerPath(jobOf(run))) {
+		t.Fatal("swept a run whose marker names another profile")
+	}
+	setMarkerProfile(t, run, testProfile)
+	backdate(t, f, run, 11*time.Minute)
+	sweep(t, adapter)
+	if exists(markerPath(jobOf(run))) {
+		t.Fatal("kept an expired run whose marker names this profile")
+	}
+}
+
+func TestSweepSettlesAnotherProfilesExpiredRun(t *testing.T) {
 	f := newHost(t)
 	adapter := newAgent(t, agentConfig("exit 0"))
 	recent, expired := testRun("other-recent"), testRun("other-expired")
-	recent.Adapter, expired.Adapter = "other", "other"
+	recent.Profile, expired.Profile = "other", "other"
 	ended(t, f, adapter, recent)
 	ended(t, f, adapter, expired)
 	backdate(t, f, expired, 11*time.Minute)
@@ -2643,7 +2690,7 @@ func TestSweepSettlesAnotherAdaptersExpiredRun(t *testing.T) {
 		t.Fatal("want the expired run's unit stopped and material deleted, and the run kept")
 	}
 	if f.unit(unitOf(recent)).LoadState != "loaded" || !exists(filepath.Join(agentRoot(true), jobOf(recent), "prompt.txt")) {
-		t.Fatal("another adapter's run inside the grace was settled")
+		t.Fatal("another profile's run inside the grace was settled")
 	}
 }
 
@@ -2663,7 +2710,7 @@ func TestSweepRemovesStaleMaterial(t *testing.T) {
 	newHost(t)
 	adapter := newAgent(t, agentConfig("exit 0"))
 	own, other := testRun("stale"), testRun("stale-other")
-	other.Adapter = "other"
+	other.Profile = "other"
 	for _, run := range []wherry.Run{own, other} {
 		putMarker(t, run, phasePrepared, nil)
 		backdate(t, nil, run, 11*time.Minute)
@@ -2879,7 +2926,7 @@ func TestHandledErrorIsLoggedOnceWithoutText(t *testing.T) {
 	newHost(t)
 	var logs bytes.Buffer
 	fast(t)
-	adapter, err := New(agentConfig("exit 0"), testAdapter, testPool, hclog.New(&hclog.LoggerOptions{Output: &logs}))
+	adapter, err := New(agentConfig("exit 0"), testProfile, testPool, hclog.New(&hclog.LoggerOptions{Output: &logs}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2896,7 +2943,7 @@ func TestMaterialNeverInPropertiesLogsOrErrors(t *testing.T) {
 	var logs bytes.Buffer
 	fast(t)
 	adapter, err := New(agentConfig(`cat prompt.txt inputs/* > /dev/null; mkdir outputs; printf 'output-%s-secret' bytes > outputs/reply.md; echo '{"type":"result"}'`),
-		testAdapter, testPool, hclog.New(&hclog.LoggerOptions{Output: &logs, Level: hclog.Trace}))
+		testProfile, testPool, hclog.New(&hclog.LoggerOptions{Output: &logs, Level: hclog.Trace}))
 	if err != nil {
 		t.Fatal(err)
 	}

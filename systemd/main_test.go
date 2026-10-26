@@ -62,7 +62,7 @@ func TestFactoryRefusesCredentialEnv(t *testing.T) {
 func TestFactoryRefusesAPlatformCredential(t *testing.T) {
 	newHost(t)
 	withPlatform := settings(t, "lab", unitConfig("/bin/true"))
-	withPlatform.Platform = "token"
+	withPlatform.Credential = "token"
 	if _, err := newAdapter(withPlatform, hclog.NewNullLogger()); err == nil || err.Error() != "the systemd plugin takes no platform credential" {
 		t.Fatalf("got %v", err)
 	}
@@ -80,8 +80,8 @@ func TestFactoryGivesTheAdapterServesLogger(t *testing.T) {
 	}
 }
 
-// TestReadmeReceiverConfigures configures each adapter of the README's receiver configuration as the receiver does,
-// with the platform's config keys merged into the adapter's.
+// TestReadmeReceiverConfigures configures each plugin profile of the README's receiver configuration as the receiver
+// does, with the plugin's config merged into the profile's.
 func TestReadmeReceiverConfigures(t *testing.T) {
 	newHost(t)
 	example, err := os.ReadFile("testdata/receiver.yaml")
@@ -96,49 +96,57 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 		t.Fatal("README.md does not hold testdata/receiver.yaml")
 	}
 	var receiver struct {
-		Capacity  int64 `yaml:"capacity"`
-		Platforms []struct {
-			Name   string         `yaml:"name"`
-			Type   string         `yaml:"type"`
-			Config map[string]any `yaml:"config"`
-		} `yaml:"platforms"`
-		Adapters []struct {
-			Name     string            `yaml:"name"`
-			Platform string            `yaml:"platform"`
-			Agent    string            `yaml:"agent"`
+		Capacity int64 `yaml:"capacity"`
+		Plugins  map[string]struct {
 			Labels   map[string]string `yaml:"labels"`
 			Config   map[string]any    `yaml:"config"`
-		} `yaml:"adapters"`
+			Profiles []struct {
+				Name   string            `yaml:"name"`
+				Agent  string            `yaml:"agent"`
+				Labels map[string]string `yaml:"labels"`
+				Config map[string]any    `yaml:"config"`
+			} `yaml:"profiles"`
+		} `yaml:"plugins"`
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(example))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&receiver); err != nil {
 		t.Fatal(err)
 	}
-	if len(receiver.Platforms) != 1 || receiver.Platforms[0].Type != "systemd" || len(receiver.Adapters) < 2 {
-		t.Fatal("want one systemd platform and at least two adapters")
+	plugin, ok := receiver.Plugins["systemd"]
+	if len(receiver.Plugins) != 1 || !ok || len(plugin.Profiles) < 2 {
+		t.Fatal("want one systemd plugin and at least two profiles")
 	}
-	platform := receiver.Platforms[0]
-	for _, adapter := range receiver.Adapters {
-		if adapter.Platform != platform.Name {
-			t.Fatalf("adapter %s: platform %q, want %q", adapter.Name, adapter.Platform, platform.Name)
-		}
-		for key, value := range platform.Config {
-			if _, ok := adapter.Config[key]; ok {
-				t.Fatalf("adapter %s: config key %q is also set by the platform", adapter.Name, key)
-			}
-			adapter.Config[key] = value
-		}
-		encoded, err := json.Marshal(adapter.Config)
+	for _, profile := range plugin.Profiles {
+		encoded, err := json.Marshal(merge(plugin.Config, profile.Config))
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := wherry.Settings{Name: adapter.Name, Pool: testPool, Agent: adapter.Agent, Config: encoded}
+		s := wherry.Settings{Name: profile.Name, Pool: testPool, Agent: profile.Agent, Config: encoded}
 		if _, err := newAdapter(s, hclog.NewNullLogger()); err != nil {
-			t.Fatalf("adapter %s: %v", adapter.Name, err)
+			t.Fatalf("profile %s: %v", profile.Name, err)
 		}
 	}
 	if !strings.Contains(string(readme), "TestReadmeReceiverConfigures") {
 		t.Fatal("README.md does not name this test")
 	}
+}
+
+// merge returns base with over merged onto it as wherry merges a plugin profile's config onto its plugin's: maps
+// merge recursively, and over wins on every other key.
+func merge(base, over map[string]any) map[string]any {
+	merged := make(map[string]any, len(base)+len(over))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range over {
+		inner, isMap := value.(map[string]any)
+		inherited, inheritedMap := merged[key].(map[string]any)
+		if isMap && inheritedMap {
+			merged[key] = merge(inherited, inner)
+			continue
+		}
+		merged[key] = value
+	}
+	return merged
 }

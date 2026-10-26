@@ -87,7 +87,7 @@ type Resources struct {
 
 // Adapter registers per-run agent jobs in one namespace.
 type Adapter struct {
-	// name is the adapter's name, which its jobs' meta records.
+	// name is the profile's name, which its jobs' profile meta records.
 	name        string
 	client      *api.Client
 	namespace   string
@@ -345,7 +345,7 @@ func (adapter *Adapter) Lookup(ctx context.Context, runID string) (wherry.Job, e
 	}
 	// A job registered without the key reads as attempt 0.
 	attempt, _ := strconv.ParseInt(job.Meta["attempt"], 10, 64)
-	return wherry.Job{State: state, Handle: handle, Attempt: attempt, Adapter: job.Meta["adapter"], Agent: job.Meta["agent"]}, nil
+	return wherry.Job{State: state, Handle: handle, Attempt: attempt, Profile: job.Meta["profile"], Agent: job.Meta["agent"]}, nil
 }
 
 // handle is the version 1 encoding of wherry.Handle.Data.
@@ -483,7 +483,7 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 		NodePool: nodePool(adapter.nodePool), Datacenters: adapter.datacenters,
 		Meta: map[string]string{
 			"run_id": run.ID, "attempt": strconv.FormatInt(run.Attempt, 10),
-			"adapter": run.Adapter, "agent": run.Agent,
+			"profile": run.Profile, "agent": run.Agent,
 		},
 		TaskGroups: []*api.TaskGroup{{
 			Name:             new(taskName),
@@ -972,10 +972,10 @@ func (adapter *Adapter) purge(ctx context.Context, jobID string) error {
 	return adapter.release(ctx, jobID)
 }
 
-// Sweep purges this adapter's agent jobs dead for the grace period, and deletes per-run variables whose job is this
-// adapter's and has ended or been stopped, is any adapter's and dead for the grace period, or never registered. Every
-// adapter of the pool shares the job prefix, so a job's meta decides whose it is; variables hold the prompt and
-// credentials, so a removed adapter's are swept too. Pending jobs and deletions count this adapter's jobs only.
+// Sweep purges this profile's agent jobs dead for the grace period, and deletes per-run variables whose job is this
+// profile's and has ended or been stopped, is any profile's and dead for the grace period, or never registered. Every
+// profile of the pool shares the job prefix, so a job's profile meta decides whose it is; variables hold the prompt
+// and credentials, so a removed profile's are swept too. Pending jobs and deletions count this profile's jobs only.
 func (adapter *Adapter) Sweep(ctx context.Context) error {
 	jobs, _, err := adapter.client.Jobs().ListOptions(&api.JobListOptions{Fields: &api.JobListFields{Meta: true}}, (&api.QueryOptions{Prefix: adapter.prefix}).WithContext(ctx))
 	if err != nil {
@@ -983,13 +983,13 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 	}
 	var errs []error
 	pending, purged := 0, 0
-	// expired holds other adapters' jobs dead for the grace period.
+	// expired holds other profiles' jobs dead for the grace period.
 	expired := map[string]bool{}
 	for _, job := range jobs {
 		if job.Status != "dead" || !adapter.agentJob.MatchString(job.ID) || job.Meta["run_id"] == "" {
 			continue
 		}
-		own := job.Meta["adapter"] == adapter.name
+		own := job.Meta["profile"] == adapter.name
 		if own {
 			pending++
 		}
@@ -1041,7 +1041,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 		case err != nil:
 			errs = append(errs, adapter.failed("sweep read job of "+variable.Path, err))
 			continue
-		case job.Meta["adapter"] != adapter.name:
+		case job.Meta["profile"] != adapter.name:
 			own = false
 			if !expired[match[1]] {
 				continue
@@ -1111,7 +1111,7 @@ func (adapter *Adapter) failed(op string, err error) error {
 func (adapter *Adapter) handled(op string, err error) {
 	var failure *wherry.Error
 	if errors.As(adapter.failed(op, err), &failure) && failure.Class != "" {
-		adapter.logger.Warn("nomad call failed", "adapter", adapter.name, "op", failure.Op, "class", failure.Class)
+		adapter.logger.Warn("nomad call failed", "profile", adapter.name, "op", failure.Op, "class", failure.Class)
 	}
 }
 

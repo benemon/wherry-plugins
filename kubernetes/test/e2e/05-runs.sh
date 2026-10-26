@@ -20,7 +20,7 @@ finish() {
 }
 replied() { grep -x -F "$2" "$work/$1.await" >/dev/null || fail "run $1 did not reply '$2'"; }
 sha256() { sha256sum <"$1" | cut -d' ' -f1; }
-ready() { host receivers | grep 'adapter=fake agent=fake ready=true' >/dev/null; }
+ready() { host receivers | grep 'profile=fake plugin=kubernetes agent=fake ready=true' >/dev/null; }
 running() {
 	kubectl get pod -n "$namespace" -l "wherry.io/run=$cancelled" 2>/dev/null \
 		-o jsonpath='{.items[*].status.containerStatuses[?(@.name=="agent")].state.running.startedAt}' | grep . >/dev/null

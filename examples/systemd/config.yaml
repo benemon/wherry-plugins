@@ -1,0 +1,7 @@
+# The receiver's local configuration, at /etc/wherry/config.yaml for wherry-receiver.service.
+# state_dir sits under the unit's StateDirectory, which ProtectSystem=strict leaves writable.
+# The systemd plugin refuses a platform credential, so this configuration has no credentials.
+bundle: /etc/wherry/receiver.bundle
+state_dir: /var/lib/wherry/state
+plugin_dir: /usr/local/libexec/wherry/plugins
+metrics_addr: ":9465"

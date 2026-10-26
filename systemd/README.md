@@ -1,9 +1,10 @@
 # wherry-plugin-systemd
 
-The wherry adapter plugin for systemd. A wherry receiver starts it from its
-plugin directory for adapters of type `systemd`, and runs each of the
-receiver's runs as one transient service on the receiver's own host. One
-plugin process hosts every `systemd` adapter of a receiver.
+The wherry plugin for systemd. A wherry receiver starts it from its
+plugin directory for the `systemd` entry of its configuration's `plugins`,
+and runs each of the receiver's runs as one transient service on the
+receiver's own host. One plugin process hosts every `systemd` plugin
+profile of a receiver.
 
 systemd 252 or later with the unified cgroup v2 hierarchy, on Linux, is the
 platform. The plugin connects to systemd's
@@ -30,18 +31,19 @@ linux amd64 and arm64, and `checksums.txt`, into `dist`.
 gives the whole install. Download `wherry-plugin-systemd` from its
 [release](https://github.com/benemon/wherry-plugins/releases), verify it and
 install it in the receiver's plugin directory, as
-[Install adapter plugins](https://benemon.github.io/wherry/operations#install-adapter-plugins)
+[Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
 describes with `plugin=systemd`. [Build](#build) covers building it from source.
 
 The receiver checks the plugin directory and binary before it runs them;
-see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
+see [Plugins](https://benemon.github.io/wherry/commands#plugins).
 The plugin is not run by hand.
 
 ## Credentials
 
 The plugin takes no platform credential: it talks to its own host's
-systemd as root. An adapter whose bundle holds a `platform` entry fails to
-configure with `the systemd plugin takes no platform credential`.
+systemd as root. A plugin profile whose merged `config` names a
+`credential` fails its configuration with
+`the systemd plugin takes no platform credential`.
 
 ## Privileges
 
@@ -75,15 +77,24 @@ file-write bug, with these settings:
 
 ## Settings
 
-An adapter's `config` section in the receiver configuration:
+The `config` keys of the receiver configuration's `systemd` plugin entry,
+set on the plugin or on a plugin profile:
 
 | Field | Default | Content |
 | --- | --- | --- |
 | `runtime` | required | the agent's command, identity and limits |
 
-Unknown fields are errors. The plugin checks the section when the receiver
-configures the adapter, and the receiver exits with `adapter <name>: ...`
-on an error.
+A plugin profile's `config` is the plugin's `config` merged with its own:
+maps merge recursively, the plugin profile winning on every key it sets; a
+list on a plugin profile replaces the plugin's whole; `key: null` on a
+plugin profile deletes the inherited key. A `credential` key names a
+platform credential, which the receiver resolves from its local
+configuration and this plugin refuses, as [Credentials](#credentials)
+describes.
+
+Unknown fields are errors. The plugin checks the merged section when the
+receiver configures the plugin profile, and the receiver exits with
+`profile <name>: ...` on an error.
 
 `runtime` has these fields:
 
@@ -118,7 +129,7 @@ Configure also fails when:
 - `/run/wherry-systemd` is not a directory owned by root with mode 0700:
   `/run/wherry-systemd must be root 0700`.
 
-An adapter is ready while the manager's `SystemState` is `running`,
+A plugin profile is ready while the manager's `SystemState` is `running`,
 `degraded` or `starting`. Any failed unit on the host sets `degraded`, a
 failed agent unit included until its run is released. `starting` holds
 while a boot job is still queued after `basic.target` is active, which an
@@ -127,11 +138,11 @@ runtime command: a missing command shows at dispatch as a unit that never
 started with class `exec`, or, for a run with an environment target, as an agent
 that exits 127.
 
-An adapter file in a receiver configuration directory:
+A plugin profile file in a receiver configuration directory, such as
+`plugins/systemd/profiles/10-host.yaml`:
 
 ```yaml
 name: host
-platform: systemd
 agent: coder
 labels:
   platform: systemd
@@ -153,51 +164,52 @@ the read-only root. Claude Code runs its shell tool through `$SHELL`.
 
 ### Receiver configuration
 
-This receiver configuration file holds one platform and two adapters.
-Each adapter's `config` takes the platform's `config` keys at the top level,
-and an adapter that sets one of them again is an error.
+This receiver configuration file holds the `systemd` plugin and two plugin
+profiles. The plugin's `labels` and `config` hold what both share, and each
+plugin profile's own merge onto them: `provisioned` replaces the
+`platform` label and both run with the plugin's `resources`.
 [`testdata/receiver.yaml`](testdata/receiver.yaml) holds this file, and
-`TestReadmeReceiverConfigures` configures each adapter from it through
-the plugin's decoding and checks.
+`TestReadmeReceiverConfigures` configures each plugin profile from it,
+merged, through the plugin's decoding and checks.
 
 ```yaml
 capacity: 2
-platforms:
-  - name: systemd
-    type: systemd
-adapters:
-  # Claude Code, each run as a dynamic user of its own.
-  - name: host
-    platform: systemd
-    agent: coder
+plugins:
+  systemd:
+    # Every plugin profile of this plugin inherits these keys and can override them.
     labels:
       platform: systemd
     config:
       runtime:
-        command: [/bin/sh, -c]
-        args:
-          - >-
-            test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
-            exec /usr/local/bin/claude -p --output-format stream-json --verbose --model "$WHERRY_MODEL" < /wherry/prompt.txt
-        env:
-          SHELL: /bin/bash
-          DISABLE_AUTOUPDATER: "1"
         resources:
           cpu_quota: 100
           memory_mb: 2048
-  # An agent that needs a provisioned identity, run as a fixed user that
-  # every run of the adapter shares.
-  - name: provisioned
-    platform: systemd
-    agent: reviewer
-    labels:
-      platform: systemd-provisioned
-    config:
-      runtime:
-        user: wherry-agent
-        group: wherry-agent
-        supplementary_groups: [video]
-        command: [/usr/local/bin/agent-run, --prompt-file, /wherry/prompt.txt]
+    profiles:
+      # Claude Code, each run as a dynamic user of its own.
+      - name: host
+        agent: coder
+        config:
+          runtime:
+            command: [/bin/sh, -c]
+            args:
+              - >-
+                test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
+                exec /usr/local/bin/claude -p --output-format stream-json --verbose --model "$WHERRY_MODEL" < /wherry/prompt.txt
+            env:
+              SHELL: /bin/bash
+              DISABLE_AUTOUPDATER: "1"
+      # An agent that needs a provisioned identity, run as a fixed user that
+      # every run of the plugin profile shares.
+      - name: provisioned
+        agent: reviewer
+        labels:
+          platform: systemd-provisioned
+        config:
+          runtime:
+            user: wherry-agent
+            group: wherry-agent
+            supplementary_groups: [video]
+            command: [/usr/local/bin/agent-run, --prompt-file, /wherry/prompt.txt]
 ```
 
 ## Agent units
@@ -218,11 +230,13 @@ directories:
 | `/run/wherry-systemd/<unit>/` | root, 0700; files 0600 | the run's credential files from Dispatch to the end of the unit's start |
 | `/run/credentials/<unit>/` | systemd | the unit's credential store, until the unit stops |
 
-The marker records the run's pool, adapter, agent, attempt and a random
+The marker records the run's pool, plugin profile, agent, attempt and a random
 instance per dispatch, the phase (`prepared`, `starting`, `started`), and
 how the run ended once the plugin settles it. It outlives the unit, so a
 restarted receiver finds every run it started, and Lookup reports the
-attempt, adapter and agent from it.
+attempt, plugin profile and agent from it. It names the plugin profile
+in its `profile` field, and the unit's `Description` is
+`wherry agent <run> (profile <name>)`.
 
 The unit is `Type=exec` with `RemainAfterExit=yes` and `Restart=no`, so a
 run executes once, its start job fails when the command cannot run, and
@@ -329,7 +343,7 @@ The work directory, standard output, standard error and outputs stay until
 the [sweep](#sweep). Purging a run stops its unit, waits for it to unload,
 then removes the marker first and the run's directories after it.
 
-`runtime.user` runs every run of the adapter as one fixed user. Concurrent
+`runtime.user` runs every run of the plugin profile as one fixed user. Concurrent
 runs of one user can signal, `ptrace` and read the environment, credential
 included, of each other's processes, and read each other's work
 directories; `ProtectProc=invisible` hides only other users' processes.
@@ -395,16 +409,16 @@ re-enables the handler for it.
 
 ### Sweep
 
-On each sweep the plugin reads the control directories of the adapter's
+On each sweep the plugin reads the control directories of the plugin profile's
 pool, each marker and its unit, and ignores units of the pool that have no
 marker. A run has ended when its main process has exited, its unit is not
 loaded, or it never started; its end time is the main process's exit,
 else the unit's last deactivation, else the later change of its marker and
 standard output.
 
-- The adapter's own ended runs are settled at once, as at the end of a
+- The plugin profile's own ended runs are settled at once, as at the end of a
   run, and purged 10 minutes after they ended.
-- Other adapters' runs ended 10 minutes ago are settled, which drops their
+- Other plugin profiles' runs ended 10 minutes ago are settled, which drops their
   credential store and deletes their prompt and inputs, and kept until an
   operator deletes them.
 - A marker in phase `prepared` with no unit, 10 minutes old, is a Dispatch
@@ -413,8 +427,8 @@ standard output.
   old, are removed.
 
 An adopter can read an ended run's standard output for 10 minutes.
-Ownership is by adapter name. One receiver per host carries a pool's
-systemd adapters: two would share the control directories and
+Ownership is by plugin profile name. One receiver per host carries a
+pool's systemd plugin profiles: two would share the control directories and
 `/run/wherry-systemd`.
 
 ### S3 inputs
@@ -441,22 +455,22 @@ sets them. This protects an agent that follows its prompt. An agent that
 runs commands of its own can undo this.
 
 Any local user, an agent included, reads every unit's `Description`,
-`ExecStart` and `Environment` over the system bus, so run IDs, adapter
-names, the configured command and the configured environment are public on
+`ExecStart` and `Environment` over the system bus, so run IDs, plugin
+profile names, the configured command and the configured environment are public on
 the host. Keep material out of `runtime.env`.
 
 ## Metrics
 
-The plugin speaks adapter protocol version 7, and a receiver of another
+The plugin speaks adapter protocol version 9, and a receiver of another
 protocol version refuses it, so upgrade it with the receiver. For each
-adapter it reports these families, which the receiver serves on its
-`/metrics` with the adapter's name as `adapter`:
+plugin profile it reports these families, which the receiver serves on its
+`/metrics` with the plugin profile's name as `profile`:
 
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
 | `wherry_adapter_platform_errors_total` | counter | `class` | failed systemd and filesystem calls |
-| `wherry_adapter_cleanup_pending` | gauge | none | the adapter's ended runs the latest sweep left |
-| `wherry_adapter_sweep_deletions_total` | counter | `kind` | the adapter's runs a sweep purged (`job`) and stale material of a Dispatch cut short it removed (`variable`) |
+| `wherry_adapter_cleanup_pending` | gauge | none | the plugin profile's ended runs the latest sweep left |
+| `wherry_adapter_sweep_deletions_total` | counter | `kind` | the plugin profile's runs a sweep purged (`job`) and stale material of a Dispatch cut short it removed (`variable`) |
 | `wherry_adapter_placement_seconds` | histogram | none | time from a Dispatch that starts the unit to its start job's end, fetches included |
 
 A D-Bus call's class comes from its error name: `AccessDenied` and
@@ -474,8 +488,8 @@ closes is dialled again on the next call.
 A failed call the plugin returns reaches the receiver with its operation,
 class and systemd's text, and the receiver logs it redacted. A failed call
 the plugin handles itself, such as a poll or the removal of credential
-files, logs one warning, `systemd call failed`, naming the adapter, the
-operation and the class; the line holds no error text.
+files, logs one warning, `systemd call failed`, naming the plugin profile
+under `profile`, the operation and the class; the line holds no error text.
 
 ## Agent network reach
 
@@ -503,12 +517,13 @@ addresses only, or an `nftables` rule matching the dynamic UID range,
 ## Run the receiver as a systemd service
 
 The receiver runs as root under its own unit,
-[`examples/systemd/wherry-receiver.service`](../examples/systemd/wherry-receiver.service), and
+[`examples/systemd/wherry-receiver.service`](../examples/systemd/wherry-receiver.service),
+as `wherry receiver run --config-file /etc/wherry/config.yaml`, and
 its agent units run in [`examples/systemd/wherry.slice`](../examples/systemd/wherry.slice),
 outside the receiver's cgroup. Restarting or stopping the receiver never
 touches them: the receiver exits on `SIGTERM` without stopping its jobs,
 and the restarted receiver adopts them. A run is adopted only by a
-receiver with the same adapter on the same host, so give each systemd
+receiver with the same plugin profile on the same host, so give each systemd
 receiver a pool of its own.
 
 ### Install
@@ -544,15 +559,24 @@ From the repository root:
 4. Record `sysctl kernel.core_pattern`, which says whether a core dump
    pipes to systemd-coredump, abrt or neither.
 5. Write the bundle `wherry admin receiver add <name>` produced to
-   `/etc/wherry/receiver.bundle`, root 0600, and the receiver
-   configuration it names.
+   `/etc/wherry/receiver.bundle`, root 0600, and install the receiver's
+   local configuration,
+   [`examples/systemd/config.yaml`](../examples/systemd/config.yaml), which
+   names the bundle, the state directory, the plugin directory and the
+   metrics address:
+
+   ```sh
+   install -m 0600 examples/systemd/config.yaml /etc/wherry/config.yaml
+   ```
+
 6. Start the receiver:
 
    ```sh
    systemctl daemon-reload && systemctl enable --now wherry-receiver
    ```
 
-The receiver's metrics listen on port 9465. The endpoint has no authentication; admit only Prometheus to it
+The receiver's metrics listen on port 9465, the configuration's
+`metrics_addr`. The endpoint has no authentication; admit only Prometheus to it
 with a `firewalld` rule.
 
 ### SELinux

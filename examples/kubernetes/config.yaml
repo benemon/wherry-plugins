@@ -1,0 +1,13 @@
+# The receiver's local configuration. apply.sh applies it as the ConfigMap wherry-receiver-config, which receiver.yaml
+# mounts at /etc/wherry/config; the bundle is the Secret wherry-receiver-bundle mounted at /etc/wherry/bundle.
+# state_dir is on the state claim at /var/lib/wherry. The image installs the plugins in plugin_dir.
+bundle: /etc/wherry/bundle/bundle.yaml
+state_dir: /var/lib/wherry/state
+plugin_dir: /usr/local/libexec/wherry/plugins
+metrics_addr: ":9464"
+# In the cluster the plugin authenticates as the receiver's service account, so no profile names a platform
+# credential. A platform credential, such as a token for another cluster, comes from a Secret mounted with defaultMode
+# 0440 or stricter, under the name the plugin's config gives in its credential key:
+# credentials:
+#   cluster-token:
+#     file: /etc/wherry/cluster-token/token

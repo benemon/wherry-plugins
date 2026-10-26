@@ -42,7 +42,7 @@ const (
 	credentialEnv   = "WHERRY_TEST_CREDENTIAL"
 	testPool        = "build"
 	testNamespace   = "agents"
-	testAdapter     = "container"
+	testProfile     = "container"
 	testToken       = "kube-token-secret"
 	testImage       = "registry.example.com/agent:1.0"
 	testHelperImage = "registry.example.com/wherry-receiver:0.1.0"
@@ -66,18 +66,18 @@ func testConfig(address, caFile string) Config {
 	}
 }
 
-// build is newAdapter's path to one adapter named testAdapter, from a Config rather than settings.
+// build is newAdapter's path to one adapter named testProfile, from a Config rather than settings.
 func build(config Config, pool, token string) (*Adapter, error) {
 	client, err := newClient(config, token)
 	if err != nil {
 		return nil, err
 	}
-	return New(config, testAdapter, pool, client, hclog.NewNullLogger())
+	return New(config, testProfile, pool, client, hclog.NewNullLogger())
 }
 
 func testRun(name string) wherry.Run {
 	return wherry.Run{
-		ID: "run-" + name, Adapter: testAdapter, Agent: "coder", Attempt: 2,
+		ID: "run-" + name, Profile: testProfile, Agent: "coder", Attempt: 2,
 		Prompt: []byte("hello-prompt"), Credentials: []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("test-credential")}},
 	}
 }
@@ -687,7 +687,7 @@ func TestBuildPodFromRuntime(t *testing.T) {
 	run := testRun("build")
 	name := adapter.jobName(run.ID)
 	pod := adapter.buildPod(run, name)
-	wantLabels := map[string]string{labelPool: testPool, labelAdapter: testAdapter, labelAgent: "coder", labelRun: run.ID}
+	wantLabels := map[string]string{labelPool: testPool, "wherry.io/profile": testProfile, labelAgent: "coder", labelRun: run.ID}
 	if pod.Name != poolPrefix+"run-build" || pod.Namespace != testNamespace || !maps.Equal(pod.Labels, wantLabels) ||
 		pod.Annotations[annotationAttempt] != "2" || pod.Spec.RestartPolicy != corev1.RestartPolicyNever || *pod.Spec.TerminationGracePeriodSeconds != 15 {
 		t.Fatalf("unexpected pod identity: %#v", pod.ObjectMeta)
@@ -1723,7 +1723,7 @@ func TestLookupReadsDispatchMetadata(t *testing.T) {
 	run := testRun("meta")
 	handle := dispatch(t, adapter, run)
 	job, err := adapter.Lookup(context.Background(), run.ID)
-	if err != nil || job.State != wherry.JobRunning || job.Attempt != 2 || job.Adapter != testAdapter || job.Agent != "coder" || job.Handle.Name != handle.Name {
+	if err != nil || job.State != wherry.JobRunning || job.Attempt != 2 || job.Profile != testProfile || job.Agent != "coder" || job.Handle.Name != handle.Name {
 		t.Fatalf("lookup = %+v, %v", job, err)
 	}
 	api.agentPod(t, adapter, "unannotated", func(pod *corev1.Pod) { pod.Annotations = nil })
@@ -1796,7 +1796,7 @@ func TestLookupMapsCapturedPods(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || job.State != test.state || job.Adapter != "openshift" || job.Agent != "coder" || job.Attempt != 1 {
+			if err != nil || job.State != test.state || job.Profile != "openshift" || job.Agent != "coder" || job.Attempt != 1 {
 				t.Fatalf("lookup = %+v, %v; want %v", job, err, test.state)
 			}
 		})
@@ -1874,7 +1874,7 @@ func TestRateLimitedWaitPastTheDeadlineIsTheDeadline(t *testing.T) {
 	}
 	// One token a second: the second read of the wait needs a token past the deadline.
 	client.RateLimiter = limiter{flowcontrol.NewTokenBucketRateLimiter(1, 1)}
-	adapter, err := New(testConfig(api.server.URL, api.caFile), testAdapter, testPool, client, hclog.NewNullLogger())
+	adapter, err := New(testConfig(api.server.URL, api.caFile), testProfile, testPool, client, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2695,11 +2695,11 @@ func TestPurgeOfAbsentPodSucceeds(t *testing.T) {
 	}
 }
 
-// sweepPod is an agent pod of adapter owner whose agent ended ago, or is running when ago is 0.
+// sweepPod is an agent pod of profile owner whose agent ended ago, or is running when ago is 0.
 func (api *fakeAPI) sweepPod(t *testing.T, adapter *Adapter, name, owner string, ago time.Duration) string {
 	t.Helper()
 	pod := api.agentPod(t, adapter, name, func(pod *corev1.Pod) {
-		pod.Labels[labelAdapter] = owner
+		pod.Labels[labelProfile] = owner
 		if ago == 0 {
 			setStatus(pod, corev1.PodRunning, exited("inputs", 0), runningStatus("agent"), runningStatus("outputs"))
 			return
@@ -2718,7 +2718,7 @@ func (api *fakeAPI) secretFor(name, owner string, ago time.Duration) {
 	defer api.mu.Unlock()
 	_, run, _ := strings.Cut(name, poolPrefix)
 	api.secrets[name] = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace, ResourceVersion: "1", CreationTimestamp: metav1.NewTime(time.Now().Add(-ago)),
-		Labels: map[string]string{labelPool: testPool, labelAdapter: owner, labelAgent: "coder", labelRun: run}}, Data: map[string][]byte{"prompt": []byte("p")}}
+		Labels: map[string]string{labelPool: testPool, labelProfile: owner, labelAgent: "coder", labelRun: run}}, Data: map[string][]byte{"prompt": []byte("p")}}
 }
 
 func sweep(t *testing.T, api *fakeAPI) *Adapter {
@@ -2731,7 +2731,7 @@ func sweep(t *testing.T, api *fakeAPI) *Adapter {
 func TestSweepPurgesPodsEndedPastTheGrace(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter := sweep(t, api)
-	name := api.sweepPod(t, adapter, "old", testAdapter, 11*time.Minute)
+	name := api.sweepPod(t, adapter, "old", testProfile, 11*time.Minute)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -2743,7 +2743,7 @@ func TestSweepPurgesPodsEndedPastTheGrace(t *testing.T) {
 func TestSweepKeepsPodsInsideTheGrace(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter := sweep(t, api)
-	name := api.sweepPod(t, adapter, "recent", testAdapter, 9*time.Minute)
+	name := api.sweepPod(t, adapter, "recent", testProfile, 9*time.Minute)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -2759,10 +2759,10 @@ func TestSweepPurgesADeletingPodPastTheGrace(t *testing.T) {
 		pod := captured(t, "lost-node-running")
 		pod.Labels = adapter.labels(testRun("lost"))
 		pod.Name = adapter.jobName("run-lost")
-		pod.Labels[labelAdapter] = testAdapter
+		pod.Labels[labelProfile] = testProfile
 		pod.DeletionTimestamp = new(metav1.NewTime(time.Now().Add(-ago)))
 		api.put(pod)
-		api.secretFor(pod.Name, testAdapter, time.Hour)
+		api.secretFor(pod.Name, testProfile, time.Hour)
 		if err := adapter.Sweep(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -2772,11 +2772,11 @@ func TestSweepPurgesADeletingPodPastTheGrace(t *testing.T) {
 	}
 }
 
-func TestSweepCountsOnlyThisAdaptersPods(t *testing.T) {
+func TestSweepCountsOnlyThisProfilesPods(t *testing.T) {
 	api := newFakeAPI(t)
 	container := sweep(t, api)
-	waiting := api.sweepPod(t, container, "waiting", testAdapter, time.Minute)
-	expired := api.sweepPod(t, container, "expired", testAdapter, 11*time.Minute)
+	waiting := api.sweepPod(t, container, "waiting", testProfile, time.Minute)
+	expired := api.sweepPod(t, container, "expired", testProfile, 11*time.Minute)
 	host, _ := api.adapter(t)
 	host.name = "host"
 	if err := host.Sweep(context.Background()); err != nil {
@@ -2804,7 +2804,7 @@ func TestSweepCountsOnlyThisAdaptersPods(t *testing.T) {
 func TestSweepDeletesSecretOfEndedPod(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter := sweep(t, api)
-	name := api.sweepPod(t, adapter, "ended", testAdapter, time.Minute)
+	name := api.sweepPod(t, adapter, "ended", testProfile, time.Minute)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -2813,7 +2813,7 @@ func TestSweepDeletesSecretOfEndedPod(t *testing.T) {
 	}
 }
 
-func TestSweepDeletesSecretOfAnotherAdaptersExpiredPod(t *testing.T) {
+func TestSweepDeletesSecretOfAnotherProfilesExpiredPod(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter := sweep(t, api)
 	expired := api.sweepPod(t, adapter, "removed", "removed", 11*time.Minute)
@@ -2825,15 +2825,15 @@ func TestSweepDeletesSecretOfAnotherAdaptersExpiredPod(t *testing.T) {
 		t.Fatal("want the expired pod's Secret deleted, the pod kept, and the recent pod's Secret kept")
 	}
 	if got := samples(t, adapter)["wherry_adapter_sweep_deletions_total/variable"].Value; got != 0 {
-		t.Fatalf("counted %v deletions of another adapter's Secrets", got)
+		t.Fatalf("counted %v deletions of another profile's Secrets", got)
 	}
 }
 
 func TestSweepKeepsSecretOfRunningPod(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter := sweep(t, api)
-	name := api.sweepPod(t, adapter, "running", testAdapter, 0)
-	api.secretFor(name, testAdapter, time.Hour)
+	name := api.sweepPod(t, adapter, "running", testProfile, 0)
+	api.secretFor(name, testProfile, time.Hour)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -2845,7 +2845,7 @@ func TestSweepKeepsSecretOfRunningPod(t *testing.T) {
 func TestSweepDeletesStaleSecretWithoutPod(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter := sweep(t, api)
-	api.secretFor(poolPrefix+"run-orphan", testAdapter, 11*time.Minute)
+	api.secretFor(poolPrefix+"run-orphan", testProfile, 11*time.Minute)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -2857,7 +2857,7 @@ func TestSweepDeletesStaleSecretWithoutPod(t *testing.T) {
 func TestSweepKeepsRecentSecretWithoutPod(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter := sweep(t, api)
-	api.secretFor(poolPrefix+"run-new", testAdapter, time.Minute)
+	api.secretFor(poolPrefix+"run-new", testProfile, time.Minute)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -2874,7 +2874,7 @@ func TestSweepIgnoresForeignNames(t *testing.T) {
 		setStatus(pod, corev1.PodRunning, exited("inputs", 0), exited("agent", 0), runningStatus("outputs"))
 		pod.Status.ContainerStatuses[0].State.Terminated.FinishedAt = metav1.NewTime(time.Now().Add(-time.Hour))
 	})
-	api.secretFor("user-secret", testAdapter, time.Hour)
+	api.secretFor("user-secret", testProfile, time.Hour)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -2906,9 +2906,9 @@ func TestSweepListsSecretsAsMetadata(t *testing.T) {
 func TestSweepReportsDeletionsAndPendingPods(t *testing.T) {
 	api := newFakeAPI(t)
 	adapter := sweep(t, api)
-	api.sweepPod(t, adapter, "old", testAdapter, 11*time.Minute)
-	api.sweepPod(t, adapter, "recent", testAdapter, time.Minute)
-	api.secretFor(poolPrefix+"run-gone", testAdapter, time.Hour)
+	api.sweepPod(t, adapter, "old", testProfile, 11*time.Minute)
+	api.sweepPod(t, adapter, "recent", testProfile, time.Minute)
+	api.secretFor(poolPrefix+"run-gone", testProfile, time.Hour)
 	if err := adapter.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -3050,7 +3050,7 @@ func TestHandledPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
 func TestWarningsReachTheLogger(t *testing.T) {
 	api := newFakeAPI(t)
 	var logs bytes.Buffer
-	adapter, err := New(testConfig(api.server.URL, api.caFile), testAdapter, testPool, mustClient(t, api), hclog.New(&hclog.LoggerOptions{Output: &logs, JSONFormat: true}))
+	adapter, err := New(testConfig(api.server.URL, api.caFile), testProfile, testPool, mustClient(t, api), hclog.New(&hclog.LoggerOptions{Output: &logs, JSONFormat: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3423,7 +3423,7 @@ func TestAdoptionOnKubernetes(t *testing.T) {
 	cancel()
 	second, _ := devAdapter(t, script, nil)
 	job, err := second.Lookup(ctx, run.ID)
-	if err != nil || job.State != wherry.JobRunning || job.Adapter != testAdapter {
+	if err != nil || job.State != wherry.JobRunning || job.Profile != testProfile {
 		t.Fatalf("lookup = %+v, %v", job, err)
 	}
 	resumed := make(chan wherry.Line)

@@ -29,7 +29,7 @@ func settings(t *testing.T, name string, config map[string]any) wherry.Settings 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return wherry.Settings{Name: name, Pool: testPool, Agent: "claude", Config: encoded, Platform: testToken}
+	return wherry.Settings{Name: name, Pool: testPool, Agent: "claude", Config: encoded, Credential: testToken}
 }
 
 func podConfig(address, caFile, helperImage, image string, command ...string) map[string]any {
@@ -62,8 +62,9 @@ func TestFactoryDecodesStrictly(t *testing.T) {
 	}
 }
 
-// TestReadmeReceiverConfigures configures each adapter of the README's receiver configuration as the receiver does,
-// with the platform's config keys merged into the adapter's and a platform credential in the bundle.
+// TestReadmeReceiverConfigures configures each plugin profile of the README's receiver configuration as the receiver
+// does, with the plugin's config merged into the profile's, the credential key taken out, and the platform credential's
+// value passed in Configure.
 func TestReadmeReceiverConfigures(t *testing.T) {
 	example, err := os.ReadFile("testdata/receiver.yaml")
 	if err != nil {
@@ -77,50 +78,60 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 		t.Fatal("README.md does not hold testdata/receiver.yaml")
 	}
 	var receiver struct {
-		Capacity  int64 `yaml:"capacity"`
-		Platforms []struct {
-			Name   string         `yaml:"name"`
-			Type   string         `yaml:"type"`
-			Config map[string]any `yaml:"config"`
-		} `yaml:"platforms"`
-		Adapters []struct {
-			Name     string            `yaml:"name"`
-			Platform string            `yaml:"platform"`
-			Agent    string            `yaml:"agent"`
+		Capacity int64 `yaml:"capacity"`
+		Plugins  map[string]struct {
 			Labels   map[string]string `yaml:"labels"`
 			Config   map[string]any    `yaml:"config"`
-		} `yaml:"adapters"`
+			Profiles []struct {
+				Name   string            `yaml:"name"`
+				Agent  string            `yaml:"agent"`
+				Labels map[string]string `yaml:"labels"`
+				Config map[string]any    `yaml:"config"`
+			} `yaml:"profiles"`
+		} `yaml:"plugins"`
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(example))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&receiver); err != nil {
 		t.Fatal(err)
 	}
-	if len(receiver.Platforms) != 1 || receiver.Platforms[0].Type != "kubernetes" || len(receiver.Adapters) < 2 {
-		t.Fatal("want one kubernetes platform and at least two adapters")
+	plugin, ok := receiver.Plugins["kubernetes"]
+	if len(receiver.Plugins) != 1 || !ok || len(plugin.Profiles) < 2 {
+		t.Fatal("want one kubernetes plugin and at least two profiles")
 	}
-	platform := receiver.Platforms[0]
 	// ca_file names a path on the receiver; the client reads the CA when the adapter is built.
-	platform.Config["ca_file"] = newFakeAPI(t).caFile
-	for _, adapter := range receiver.Adapters {
-		if adapter.Platform != platform.Name {
-			t.Fatalf("adapter %s: platform %q, want %q", adapter.Name, adapter.Platform, platform.Name)
-		}
-		for key, value := range platform.Config {
-			if _, ok := adapter.Config[key]; ok {
-				t.Fatalf("adapter %s: config key %q is also set by the platform", adapter.Name, key)
-			}
-			adapter.Config[key] = value
-		}
-		encoded, err := json.Marshal(adapter.Config)
+	plugin.Config["ca_file"] = newFakeAPI(t).caFile
+	for _, profile := range plugin.Profiles {
+		config := merge(plugin.Config, profile.Config)
+		// The receiver resolves the credential's name and sends the plugin the config without it.
+		delete(config, "credential")
+		encoded, err := json.Marshal(config)
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := wherry.Settings{Name: adapter.Name, Pool: testPool, Agent: adapter.Agent, Config: encoded, Platform: testToken}
+		s := wherry.Settings{Name: profile.Name, Pool: testPool, Agent: profile.Agent, Config: encoded, Credential: testToken}
 		if _, err := newAdapter(s, hclog.NewNullLogger()); err != nil {
-			t.Fatalf("adapter %s: %v", adapter.Name, err)
+			t.Fatalf("profile %s: %v", profile.Name, err)
 		}
 	}
+}
+
+// merge returns base with over merged in as wherry merges a plugin profile's config onto its plugin's: maps merge
+// recursively, and over wins on every other key.
+func merge(base, over map[string]any) map[string]any {
+	merged := make(map[string]any, len(base)+len(over))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range over {
+		inner, overMap := value.(map[string]any)
+		inherited, baseMap := merged[key].(map[string]any)
+		if overMap && baseMap {
+			value = merge(inherited, inner)
+		}
+		merged[key] = value
+	}
+	return merged
 }
 
 func TestFactoryGivesTheAdapterServesLogger(t *testing.T) {
@@ -135,7 +146,7 @@ func TestFactoryGivesTheAdapterServesLogger(t *testing.T) {
 	}
 }
 
-func TestFactoryTokenFromBundleElseServiceAccount(t *testing.T) {
+func TestFactoryTokenFromCredentialElseServiceAccount(t *testing.T) {
 	api := newFakeAPI(t)
 	accountDir := t.TempDir()
 	ca, err := os.ReadFile(api.caFile)
@@ -153,10 +164,10 @@ func TestFactoryTokenFromBundleElseServiceAccount(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", host)
 	t.Setenv("KUBERNETES_SERVICE_PORT", port)
 	inCluster := settings(t, "in-cluster", podConfig("", "", testHelperImage, testImage))
-	inCluster.Platform = ""
-	withBundle := settings(t, "bundle", podConfig("", "", testHelperImage, testImage))
-	withBundle.Platform = "bundle-token"
-	for _, s := range []wherry.Settings{inCluster, withBundle} {
+	inCluster.Credential = ""
+	withCredential := settings(t, "credential", podConfig("", "", testHelperImage, testImage))
+	withCredential.Credential = "platform-credential"
+	for _, s := range []wherry.Settings{inCluster, withCredential} {
 		a, err := newAdapter(s, hclog.NewNullLogger())
 		if err != nil {
 			t.Fatal(err)
@@ -169,11 +180,11 @@ func TestFactoryTokenFromBundleElseServiceAccount(t *testing.T) {
 	for _, r := range api.recorded() {
 		tokens = append(tokens, r.header.Get("Authorization"))
 	}
-	if len(tokens) != 2 || tokens[0] != "Bearer service-account-token" || tokens[1] != "Bearer bundle-token" {
-		t.Fatalf("tokens %v; want the service account's without a bundle token, else the bundle's", tokens)
+	if len(tokens) != 2 || tokens[0] != "Bearer service-account-token" || tokens[1] != "Bearer platform-credential" {
+		t.Fatalf("tokens %v; want the service account's without a platform credential, else the credential", tokens)
 	}
 	remote := settings(t, "remote", podConfig(api.server.URL, api.caFile, testHelperImage, testImage))
-	remote.Platform = ""
+	remote.Credential = ""
 	if _, err := newAdapter(remote, hclog.NewNullLogger()); err == nil || err.Error() != "address needs a platform credential" {
 		t.Fatalf("address without a platform credential: %v", err)
 	}
@@ -193,7 +204,7 @@ func conformanceSettings(t *testing.T) (wherry.Settings, wherry.Settings) {
 			config["runtime"].(map[string]any)["user"] = user
 		}
 		s.Config, _ = json.Marshal(config)
-		s.Platform = devToken(t)
+		s.Credential = devToken(t)
 	}
 	return completes, neverStarts
 }

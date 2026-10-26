@@ -1,37 +1,37 @@
 capacity: 2
-platforms:
-  - name: systemd
-    type: systemd
-adapters:
-  # Claude Code, each run as a dynamic user of its own.
-  - name: host
-    platform: systemd
-    agent: coder
+plugins:
+  systemd:
+    # Every plugin profile of this plugin inherits these keys and can override them.
     labels:
       platform: systemd
     config:
       runtime:
-        command: [/bin/sh, -c]
-        args:
-          - >-
-            test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
-            exec /usr/local/bin/claude -p --output-format stream-json --verbose --model "$WHERRY_MODEL" < /wherry/prompt.txt
-        env:
-          SHELL: /bin/bash
-          DISABLE_AUTOUPDATER: "1"
         resources:
           cpu_quota: 100
           memory_mb: 2048
-  # An agent that needs a provisioned identity, run as a fixed user that
-  # every run of the adapter shares.
-  - name: provisioned
-    platform: systemd
-    agent: reviewer
-    labels:
-      platform: systemd-provisioned
-    config:
-      runtime:
-        user: wherry-agent
-        group: wherry-agent
-        supplementary_groups: [video]
-        command: [/usr/local/bin/agent-run, --prompt-file, /wherry/prompt.txt]
+    profiles:
+      # Claude Code, each run as a dynamic user of its own.
+      - name: host
+        agent: coder
+        config:
+          runtime:
+            command: [/bin/sh, -c]
+            args:
+              - >-
+                test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
+                exec /usr/local/bin/claude -p --output-format stream-json --verbose --model "$WHERRY_MODEL" < /wherry/prompt.txt
+            env:
+              SHELL: /bin/bash
+              DISABLE_AUTOUPDATER: "1"
+      # An agent that needs a provisioned identity, run as a fixed user that
+      # every run of the plugin profile shares.
+      - name: provisioned
+        agent: reviewer
+        labels:
+          platform: systemd-provisioned
+        config:
+          runtime:
+            user: wherry-agent
+            group: wherry-agent
+            supplementary_groups: [video]
+            command: [/usr/local/bin/agent-run, --prompt-file, /wherry/prompt.txt]

@@ -1,0 +1,12 @@
+# The receiver's local configuration for the image examples/nomad/Containerfile builds, mounted at
+# /etc/wherry/config.yaml with the bundle beside it. state_dir holds the receiver's signing key under /var/lib/wherry,
+# which group 0 writes; a volume there keeps the key across restarts. The image installs the plugin in plugin_dir.
+bundle: /etc/wherry/receiver.bundle
+state_dir: /var/lib/wherry/state
+plugin_dir: /usr/local/libexec/wherry/plugins
+metrics_addr: ":9464"
+# The receiver configuration's plugin config sets credential: nomad-token. The token can come from a file instead, a
+# regular file that its group cannot write and others cannot read: nomad-token: {file: /etc/wherry/nomad-token}
+credentials:
+  nomad-token:
+    env: NOMAD_TOKEN

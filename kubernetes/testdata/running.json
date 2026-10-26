@@ -9,7 +9,7 @@
     "creationTimestamp": "2026-10-20T10:00:00Z",
     "labels": {
       "wherry.io/pool": "capture",
-      "wherry.io/adapter": "openshift",
+      "wherry.io/profile": "openshift",
       "wherry.io/agent": "coder",
       "wherry.io/run": "capture-running"
     },
