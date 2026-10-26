@@ -1,5 +1,5 @@
-github.com/benemon/wherry/adapter v0.7.0-rc.1 h1:sh+reXdRlApZ79I/VGJu33VDnJVS8PrRsmE4+A+rtqw=
-github.com/benemon/wherry/adapter v0.7.0-rc.1/go.mod h1:L5VEAbT6d+Ex7eXkIBu+d56tLg7p59E3Xv2S6XLA8H8=
+github.com/benemon/wherry/adapter v0.7.0-rc.2 h1:sATuYAHrEYeO+5tEzU16Y+B0US2G0KP10ADZfrNX1p8=
+github.com/benemon/wherry/adapter v0.7.0-rc.2/go.mod h1:L5VEAbT6d+Ex7eXkIBu+d56tLg7p59E3Xv2S6XLA8H8=
 github.com/bufbuild/protocompile v0.14.1 h1:iA73zAf/fyljNjQKwYzUHD6AD4R8KMasmwa/FBatYVw=
 github.com/bufbuild/protocompile v0.14.1/go.mod h1:ppVdAIhbr2H8asPk6k4pY7t9zB1OU5DoEw9xY/FUi1c=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
