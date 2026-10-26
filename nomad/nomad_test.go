@@ -686,6 +686,26 @@ func TestStopAlreadyTerminalDoesNotSignal(t *testing.T) {
 	}
 }
 
+// A receiver adopting a job Nomad has already purged stops it as a no-op.
+func TestStopAfterPurgeSucceeds(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests = append(requests, request.Method+" "+request.URL.Path)
+		http.Error(response, "alloc not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+	adapter, err := build(Config{Address: server.URL, Runtime: Runtime{Driver: "raw_exec"}}, testPool, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Stop(context.Background(), wherry.Handle{Data: []byte(`{"v":1,"job":"agent-purged","alloc":"alloc-purged","format":""}`)}); err != nil {
+		t.Fatalf("stop of a purged allocation = %v; want it stopped", err)
+	}
+	if len(requests) != 1 || requests[0] != "GET /v1/allocation/alloc-purged" {
+		t.Fatalf("requests = %v, want the allocation read only", requests)
+	}
+}
+
 func TestDispatchTimeoutDeregisters(t *testing.T) {
 	adapter, ctx := devAdapter(t)
 	run := testRun("dispatch-timeout")

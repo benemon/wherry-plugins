@@ -775,6 +775,10 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 		return err
 	}
 	alloc, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
+	// A purged or garbage-collected allocation has stopped.
+	if notFound(err) {
+		return nil
+	}
 	if err != nil {
 		return adapter.failed("read allocation", err)
 	}

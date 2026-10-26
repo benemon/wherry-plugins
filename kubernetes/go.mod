@@ -3,7 +3,7 @@ module github.com/benemon/wherry-plugins/kubernetes
 go 1.27
 
 require (
-	github.com/benemon/wherry/adapter v0.7.0-rc.1
+	github.com/benemon/wherry/adapter v0.7.0-rc.2
 	github.com/go-logr/logr v1.4.4
 	github.com/hashicorp/go-hclog v1.6.3
 	go.yaml.in/yaml/v3 v3.0.5
