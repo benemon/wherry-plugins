@@ -1,16 +1,21 @@
 # wherry-plugins
 
-Adapter plugins for [wherry](https://github.com/benemon/wherry) receivers.
-A receiver ships with no adapters; it runs `wherry-plugin-<type>` from its
-plugin directory for each adapter type in its configuration.
+Plugins for [wherry](https://github.com/benemon/wherry) receivers, each the
+adapter for one kind of platform. A receiver ships with no plugins; it runs
+`wherry-plugin-<type>` from its plugin directory for each plugin type in its
+configuration, and configures each of that plugin's profiles in it. See
+[Plugins](https://benemon.github.io/wherry/commands#plugins) for the
+protocol and [Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
+for their installation.
 
-| Directory | Plugin | Adapter type |
+| Directory | Plugin | Plugin type |
 | --- | --- | --- |
 | [`nomad`](nomad) | `wherry-plugin-nomad` | `nomad` |
 | [`kubernetes`](kubernetes) | `wherry-plugin-kubernetes` | `kubernetes` |
 | [`systemd`](systemd) | `wherry-plugin-systemd` | `systemd` |
 
-The plugins name shared settings alike; units follow each platform:
+The plugins name the settings of a plugin profile's `config` alike; units
+follow each platform:
 
 | Setting | Nomad | Kubernetes | systemd |
 | --- | --- | --- | --- |

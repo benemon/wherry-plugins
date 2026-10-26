@@ -1,5 +1,7 @@
 # Builds a Nomad receiver image from the repository root.
 # docker build -f examples/nomad/Containerfile --build-arg WHERRY_VERSION=<version> .
+# The container's arguments are receiver run --config-file /etc/wherry/config.yaml, with the local configuration
+# examples/nomad/config.yaml and the bundle it names mounted into the container.
 FROM --platform=$BUILDPLATFORM ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d AS cosign
 
 FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS build

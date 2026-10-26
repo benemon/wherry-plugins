@@ -168,7 +168,7 @@ type runLock struct {
 type marker struct {
 	V            int           `json:"v"`
 	Pool         string        `json:"pool"`
-	Adapter      string        `json:"adapter"`
+	Profile      string        `json:"profile"`
 	Agent        string        `json:"agent"`
 	Run          string        `json:"run"`
 	Attempt      int64         `json:"attempt"`
@@ -501,7 +501,7 @@ func (adapter *Adapter) properties(run wherry.Run, job string, credentials []loa
 	}
 	control := filepath.Join(controlRoot, job)
 	properties := []sd.Property{
-		property("Description", "wherry agent "+run.ID+" (adapter "+run.Adapter+")"),
+		property("Description", "wherry agent "+run.ID+" (profile "+run.Profile+")"),
 		property("Slice", "wherry.slice"),
 		property("Type", "exec"),
 		property("RemainAfterExit", true),
@@ -658,7 +658,7 @@ func (adapter *Adapter) start(ctx context.Context, run wherry.Run, job string) (
 	}
 	instance := make([]byte, 16)
 	_, _ = rand.Read(instance)
-	m := &marker{V: 1, Pool: adapter.pool, Adapter: run.Adapter, Agent: run.Agent, Run: run.ID, Attempt: run.Attempt,
+	m := &marker{V: 1, Pool: adapter.pool, Profile: run.Profile, Agent: run.Agent, Run: run.ID, Attempt: run.Attempt,
 		Instance: hex.EncodeToString(instance), Phase: phasePrepared}
 	abandon := func(cause error) (bool, wherry.Outcome, error) {
 		if err := adapter.removeRun(job); err != nil {
@@ -824,7 +824,7 @@ func (adapter *Adapter) fetchAll(ctx context.Context, job string, fetches []wher
 		case err == nil:
 			continue
 		case errors.As(err, &fetchErr):
-			adapter.logger.Warn("input not fetched", "adapter", adapter.name, "job", job, "reason", err.Error())
+			adapter.logger.Warn("input not fetched", "profile", adapter.name, "job", job, "reason", err.Error())
 			return &neverStarted{wherry.ClassFetch, "input " + fetch.Name + ": not fetched"}, nil
 		}
 		var errno syscall.Errno
@@ -1120,7 +1120,7 @@ func (adapter *Adapter) Lookup(ctx context.Context, runID string) (wherry.Job, e
 	if err != nil || state == wherry.JobAbsent {
 		return wherry.Job{}, err
 	}
-	return wherry.Job{State: state, Handle: handle, Attempt: m.Attempt, Adapter: m.Adapter, Agent: m.Agent}, nil
+	return wherry.Job{State: state, Handle: handle, Attempt: m.Attempt, Profile: m.Profile, Agent: m.Agent}, nil
 }
 
 // current decodes a handle and reads its run's marker, refusing one a later Dispatch replaced; an absent marker is nil.
@@ -1530,7 +1530,7 @@ func stale(name string) bool {
 	return err == nil && time.Since(info.ModTime()) >= sweepGrace
 }
 
-// Sweep settles and purges this adapter's ended runs, settles other adapters' expired ones, and removes stale
+// Sweep settles and purges this profile's ended runs, settles other profiles' expired ones, and removes stale
 // material, leftovers and credential files.
 func (adapter *Adapter) Sweep(ctx context.Context) error {
 	prefix := adapter.jobName("")
@@ -1618,7 +1618,7 @@ func (adapter *Adapter) sweepJob(ctx context.Context, job string) (string, error
 	if err != nil {
 		return "", err
 	}
-	own := m.Adapter == adapter.name
+	own := m.Profile == adapter.name
 	if m.Phase == phasePrepared && m.NeverStarted == nil && !u.loaded {
 		if !stale(markerPath(job)) {
 			return "", nil
@@ -1705,7 +1705,7 @@ func (adapter *Adapter) failed(op string, err error) error {
 func (adapter *Adapter) handled(op string, err error) {
 	var failure *wherry.Error
 	if errors.As(adapter.failed(op, err), &failure) && failure.Class != "" {
-		adapter.logger.Warn("systemd call failed", "adapter", adapter.name, "op", failure.Op, "class", failure.Class)
+		adapter.logger.Warn("systemd call failed", "profile", adapter.name, "op", failure.Op, "class", failure.Class)
 	}
 }
 

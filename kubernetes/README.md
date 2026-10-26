@@ -1,9 +1,9 @@
 # wherry-plugin-kubernetes
 
-The wherry adapter plugin for Kubernetes. A wherry receiver starts it from
-its plugin directory for adapters of type `kubernetes`, and runs each of the
-receiver's runs as one pod and one Secret in a namespace. One plugin
-process hosts every `kubernetes` adapter of a receiver.
+The wherry plugin for Kubernetes. A wherry receiver starts it from its
+plugin directory for the plugin profiles of adapter type `kubernetes`, and
+runs each of the receiver's runs as one pod and one Secret in a namespace.
+One plugin process hosts every `kubernetes` plugin profile of a receiver.
 
 Kubernetes 1.31 or later is the platform. The plugin, the receiver image
 and the receiver's manifests also run unchanged on OpenShift 4.18 or later;
@@ -37,13 +37,15 @@ On a receiver outside the cluster:
 1. Download `wherry-plugin-kubernetes` from its
    [release](https://github.com/benemon/wherry-plugins/releases), verify it and
    install it in the receiver's plugin directory, as
-   [Install adapter plugins](https://benemon.github.io/wherry/operations#install-adapter-plugins) describes
+   [Install plugins](https://benemon.github.io/wherry/operations#install-plugins) describes
    with `plugin=kubernetes`. [Build](#build) covers building it from source.
 
-2. Start the receiver with `--plugin-dir` naming that directory:
+2. Name that directory as `plugin_dir` in the receiver's
+   [local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration),
+   `/usr/local/libexec/wherry/plugins` by default, and start the receiver:
 
    ```sh
-   wherry receiver run --bundle-file FILE --state-dir DIR --plugin-dir /usr/local/libexec/wherry/plugins
+   wherry receiver run --config-file /etc/wherry/config.yaml
    ```
 
 Agent pods still run the helper from `helper_image`, which must be the
@@ -55,15 +57,37 @@ The plugin is not run by hand.
 
 ## Credentials
 
-The plugin takes an adapter's API token from the receiver bundle's
-`platform` entry for the adapter's name. Without one, and with `address`
-empty, it uses the receiver pod's service account: the API server from
-`KUBERNETES_SERVICE_HOST` and `KUBERNETES_SERVICE_PORT`, and the token and
-CA the kubelet projects into
-`/var/run/secrets/kubernetes.io/serviceaccount`. The plugin rereads the
-token file, so the kubelet's rotation of it reaches the plugin. With
-`address` set and no platform entry, the receiver exits with
-`address needs a platform credential`.
+The plugin takes a plugin profile's API token as its platform credential:
+the value of the credential the profile's merged `config` names with
+`credential: <name>`, which the receiver resolves from the `credentials` of
+its [local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration)
+and passes when it configures the profile
+([Platform credentials](https://benemon.github.io/wherry/configuration#platform-credentials)).
+The token never reaches `wherry.admin` or the bundle.
+
+With `address` empty, the plugin reaches the API server of the cluster the
+receiver runs in, from `KUBERNETES_SERVICE_HOST` and
+`KUBERNETES_SERVICE_PORT`, with the CA the kubelet projects into
+`/var/run/secrets/kubernetes.io/serviceaccount`. It authenticates with the
+platform credential when the profile names one, and with the receiver pod's
+service account token from that directory otherwise. The plugin rereads the
+service account token file, so the kubelet's rotation of it reaches the
+plugin. With `address` set, the profile must name a platform credential,
+and without one the receiver exits with
+`profile <name>: address needs a platform credential`.
+
+A token for a remote cluster held in a Secret is mounted into the receiver's
+pod with `defaultMode` 0440 or stricter and named as a `file` source:
+
+```yaml
+credentials:
+  kubernetes-token:
+    file: /etc/wherry/kubernetes-token/token
+```
+
+The receiver refuses a credential file that its group can write or others
+can read, write or execute. A rotated token takes effect on the receiver's
+next start.
 
 | Variable | Effect |
 | --- | --- |
@@ -74,7 +98,7 @@ The plugin reads no kubeconfig and no `KUBECONFIG`. A kubeconfig can name
 exec credential plugins and auth providers, which run commands on the
 receiver, and the plugin needs only an address, a CA and a token.
 
-The token needs the [RBAC](#rbac) grants in the adapter's namespace.
+The token needs the [RBAC](#rbac) grants in the plugin profile's namespace.
 
 ## RBAC
 
@@ -135,10 +159,18 @@ Do not:
 
 ## Settings
 
-An adapter's `config` section in the receiver configuration:
+The `config` keys of a plugin profile in the receiver configuration. Each
+key can be set in the plugin's `config`, which every `kubernetes` plugin
+profile of the receiver inherits, or in a plugin profile's `config`. The
+receiver merges the two as
+[Plugin profile merge](https://benemon.github.io/wherry/configuration#plugin-profile-merge)
+describes: maps merge recursively, the plugin profile winning on every key
+it sets; a list on a plugin profile replaces the plugin's whole; and
+`key: null` on a plugin profile deletes the inherited key.
 
 | Field | Default | Content |
 | --- | --- | --- |
+| `credential` | none | the name of a [platform credential](#credentials), which the receiver resolves from its local configuration and removes from the `config` before the plugin sees it |
 | `address` | in-cluster | API server URL; must be `https://` |
 | `ca_file` | the service account's CA when `address` is empty; the system roots otherwise | CA bundle for the API, a path on the receiver |
 | `namespace` | required | namespace for agent pods and their Secrets; a DNS-1123 label |
@@ -151,8 +183,9 @@ An adapter's `config` section in the receiver configuration:
 Kubernetes label keys and values. Each toleration has `key`, `operator`
 (`Equal`, or `Exists` without a `value`), `value` and `effect`
 (`NoSchedule`, `PreferNoSchedule` or `NoExecute`). Unknown fields are
-errors. The plugin checks the section when the receiver configures the
-adapter, and the receiver exits with `adapter <name>: ...` on an error.
+errors. The plugin checks the merged section when the receiver configures
+the plugin profile, and the receiver exits with `profile <name>: ...` on an
+error.
 
 `runtime` has these fields:
 
@@ -183,7 +216,7 @@ The plugin sets `HOME` and the `WHERRY_*` variables over `env`, so a
 variable of these names in `env` is overwritten. Environment targets are
 injected from the run's Secret.
 
-An adapter is ready when the API answers with the namespace, and the
+A plugin profile is ready when the API answers with the namespace, and the
 namespace is active. This proves the address, the token and the namespace.
 Readiness checks nothing else:
 
@@ -198,14 +231,25 @@ Readiness checks nothing else:
 - Images. An agent or helper image that cannot be pulled shows only at
   dispatch, as a pod that never started with class `image`.
 
-An adapter file in a receiver configuration directory:
+In a [receiver configuration directory](https://benemon.github.io/wherry/configuration#receiver-configuration-directory),
+`plugins/kubernetes/plugin.yaml` holds the plugin's settings, here for a
+receiver in the cluster, whose namespace is its own and whose service
+account supplies the token:
 
 ```yaml
-name: kubernetes
-platform: kubernetes
-agent: coder
 labels:
   platform: kubernetes
+config:
+  namespace: wherry
+  helper_image: registry.example.com/wherry-receiver:<version>
+```
+
+and each file in `plugins/kubernetes/profiles` holds one plugin profile,
+such as `plugins/kubernetes/profiles/10-coder.yaml`:
+
+```yaml
+name: coder
+agent: coder
 config:
   runtime:
     image: registry.example.com/agent:1.0
@@ -217,112 +261,106 @@ config:
         exec agent-run --model "$WHERRY_MODEL" < /wherry/prompt.txt
 ```
 
-with `platforms/kubernetes.yaml`, whose namespace is the receiver's own:
-
-```yaml
-name: kubernetes
-type: kubernetes
-config:
-  namespace: wherry
-  helper_image: registry.example.com/wherry-receiver:<version>
-```
-
 ### Receiver configuration
 
-This receiver configuration file holds one platform and two adapters.
-Each adapter's `config` takes the platform's `config` keys at the top level,
-and an adapter that sets one of them again is an error. With `address`
-set, the bundle holds a platform credential for the platform, which
-`wherry admin receiver add --platform-credential-file kubernetes=FILE`
-writes.
+This receiver configuration file holds one plugin and two plugin profiles.
+The plugin's `config` holds the connection settings, the namespace, the
+helper image and an agent environment default, which each plugin profile
+inherits; `shared` overrides the default. With `address` set, the plugin
+names the platform credential `kubernetes-token`, which the receiver's
+local configuration maps to a source on the receiver
+([Credentials](#credentials)).
 [`testdata/receiver.yaml`](testdata/receiver.yaml) holds this file, and
-`TestReadmeReceiverConfigures` configures each adapter from it through
-the plugin's decoding and checks.
+`TestReadmeReceiverConfigures` merges the plugin's `config` into each
+plugin profile's, takes out the `credential` key, and configures each
+plugin profile through the plugin's decoding and checks.
 
 ```yaml
 capacity: 4
-platforms:
-  # Every adapter on this platform takes these keys into its config, and
-  # repeats none of them.
-  - name: kubernetes
-    type: kubernetes
+plugins:
+  kubernetes:
+    # Every plugin profile of this plugin inherits these keys and can override
+    # them.
     config:
-      # Set, the bundle holds a platform credential for this platform. Unset,
-      # the receiver pod's service account applies.
+      # Set, a profile names a platform credential. Unset, the receiver pod's
+      # service account applies.
       address: https://kubernetes.example.com:6443
       # A path on the receiver.
       ca_file: /etc/wherry/kubernetes-ca.pem
+      # A name in the credentials of the receiver's local configuration; its
+      # value is the API token.
+      credential: kubernetes-token
       # Holds the agent pods and their Secrets; the token holds admin here alone.
       namespace: agents
       # The receiver image at the receiver's tag.
       helper_image: registry.example.com/wherry-receiver:1.0.0
-adapters:
-  # An agent on dedicated nodes that writes its reply to a file.
-  - name: dedicated
-    platform: kubernetes
-    agent: coder
-    labels:
-      nodes: dedicated
-    config:
-      node_selector:
-        example.com/pool: agents
-      tolerations:
-        - key: example.com/agents
-          operator: Equal
-          value: "true"
-          effect: NoSchedule
       runtime:
-        image: registry.example.com/agent:1.0
-        # Every container of the pod runs as this UID; quoted, since it is a
-        # string.
-        user: "1001"
-        # The pod's runAsGroup and supplementalGroups.
-        group: "1001"
-        supplementary_groups: ["2001"]
-        command: [/bin/sh, -c]
-        args:
-          - >-
-            test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
-            exec agent-run --model "$WHERRY_MODEL" < /wherry/prompt.txt 2>"$HOME/agent.err"
+        # A profile's env merges into this map by variable name.
         env:
           AGENT_LOG_LEVEL: info
-        # Each is both request and limit.
-        resources:
-          cpu: "2"
-          memory: 4Gi
-          ephemeral_storage: 8Gi
-        # Below ephemeral_storage, so the volume limit applies first.
-        work_limit: 6Gi
-  # An agent on any node that tolerates the taint, with the image's
-  # entrypoint.
-  - name: shared
-    platform: kubernetes
-    agent: reviewer
-    labels:
-      nodes: shared
-    config:
-      tolerations:
-        - key: example.com/agents
-          operator: Exists
-          effect: NoSchedule
-      runtime:
-        image: registry.example.com/reviewer:1.0
-        user: "1002"
-        args: [--prompt-file, /wherry/prompt.txt]
-        env:
-          AGENT_LOG_LEVEL: warn
-        resources:
-          cpu: 500m
-          memory: 2Gi
+    profiles:
+      # An agent on dedicated nodes that writes its reply to a file.
+      - name: dedicated
+        agent: coder
+        labels:
+          nodes: dedicated
+        config:
+          node_selector:
+            example.com/pool: agents
+          tolerations:
+            - key: example.com/agents
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          runtime:
+            image: registry.example.com/agent:1.0
+            # Every container of the pod runs as this UID; quoted, since it is a
+            # string.
+            user: "1001"
+            # The pod's runAsGroup and supplementalGroups.
+            group: "1001"
+            supplementary_groups: ["2001"]
+            command: [/bin/sh, -c]
+            args:
+              - >-
+                test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
+                exec agent-run --model "$WHERRY_MODEL" < /wherry/prompt.txt 2>"$HOME/agent.err"
+            # Each is both request and limit.
+            resources:
+              cpu: "2"
+              memory: 4Gi
+              ephemeral_storage: 8Gi
+            # Below ephemeral_storage, so the volume limit applies first.
+            work_limit: 6Gi
+      # An agent on any node that tolerates the taint, with the image's
+      # entrypoint.
+      - name: shared
+        agent: reviewer
+        labels:
+          nodes: shared
+        config:
+          tolerations:
+            - key: example.com/agents
+              operator: Exists
+              effect: NoSchedule
+          runtime:
+            image: registry.example.com/reviewer:1.0
+            user: "1002"
+            args: [--prompt-file, /wherry/prompt.txt]
+            env:
+              AGENT_LOG_LEVEL: warn
+            resources:
+              cpu: 500m
+              memory: 2Gi
 ```
 
 ## Agent pods
 
 The plugin creates one Secret and one pod per run, both named
-`agent-<pool>-<run>` in the adapter's namespace. `<pool>` is the
+`agent-<pool>-<run>` in the plugin profile's namespace. `<pool>` is the
 first 12 hexadecimal digits of the SHA-256 of the pool name, as the Nomad
 plugin names its jobs. Both carry the labels `wherry.io/pool`,
-`wherry.io/adapter`, `wherry.io/agent` and `wherry.io/run`, and the pod carries the annotation `wherry.io/attempt`
+`wherry.io/profile`, `wherry.io/agent` and `wherry.io/run`, and the pod carries the annotation `wherry.io/attempt`
 with the attempt that created it. The receiver reads the labels to decide
 whether to adopt the pod.
 
@@ -332,7 +370,7 @@ once and nothing replaces its pod. It has three containers:
 - `inputs`, an init container running `wherry-k8s-helper`, copies the
   run's material from its Secret into the pod's volumes, and takes the S3
   inputs the plugin streams in.
-- `agent` runs the adapter's `runtime`.
+- `agent` runs the plugin profile's `runtime`.
 - `outputs` runs `wherry-k8s-helper` as a holder that stays up after the
   agent ends. The plugin execs the helper in it to signal the agent, and
   to list and read the agent's outputs, since Kubernetes has no call that
@@ -494,7 +532,7 @@ running pod.
 ### Sweep
 
 On each sweep the receiver requests
-([adapter plugins](https://benemon.github.io/wherry/commands#adapter-plugins)),
+([plugins](https://benemon.github.io/wherry/commands#plugins)),
 the plugin lists the pool's pods, and the pool's Secrets as metadata, so a
 list never carries a value. It skips objects whose names are not the job
 names their labels give. A pod has ended when its agent container has
@@ -502,18 +540,19 @@ ended, it never started, or it has a `deletionTimestamp`; its end time is
 the `deletionTimestamp`, else the agent's end, else the pod's last
 condition change.
 
-- The adapter's own pods ended for 10 minutes are purged.
-- Other adapters' pods are never purged; a removed adapter's pods stay
-  until an operator deletes them.
-- A Secret is deleted when its pod is the adapter's and has ended, when
-  its pod is any adapter's and has ended 10 minutes ago, or when it has no
-  pod and is more than 10 minutes old.
+- The plugin profile's own pods ended for 10 minutes are purged.
+- Other plugin profiles' pods are never purged; a removed plugin profile's
+  pods stay until an operator deletes them.
+- A Secret is deleted when its pod is the plugin profile's and has ended,
+  when its pod is any plugin profile's and has ended 10 minutes ago, or
+  when it has no pod and is more than 10 minutes old.
 
 An adopter can read an ended pod's log for 10 minutes. A pod stranded on a
 lost node is purged 10 minutes after its deletion began.
 
-Ownership is by adapter name, not by receiver. Two receivers that carry an
-adapter of the same name over one namespace both sweep its pods, and both
+Ownership is by plugin profile name, through the label `wherry.io/profile`.
+Two receivers that carry a plugin profile of the same name over one
+namespace both sweep its pods, and both
 count the same purges, deletions and pending pods, so the metrics count
 them twice.
 
@@ -561,16 +600,16 @@ agent that runs commands of its own can undo this.
 
 ## Metrics
 
-The plugin speaks adapter protocol version 7, and a receiver of another
+The plugin speaks adapter protocol version 9, and a receiver of another
 protocol version refuses it, so upgrade it with the receiver. For each
-adapter it reports these families, which the receiver serves on its
-`/metrics` with the adapter's name as `adapter`:
+plugin profile it reports these families, which the receiver serves on its
+`/metrics` with the plugin profile's name as `profile`:
 
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
 | `wherry_adapter_platform_errors_total` | counter | `class` | failed API calls |
-| `wherry_adapter_cleanup_pending` | gauge | none | the adapter's ended pods the latest sweep left |
-| `wherry_adapter_sweep_deletions_total` | counter | `kind` | the adapter's pods a sweep purged (`job`) and Secrets it deleted (`variable`) |
+| `wherry_adapter_cleanup_pending` | gauge | none | the plugin profile's ended pods the latest sweep left |
+| `wherry_adapter_sweep_deletions_total` | counter | `kind` | the plugin profile's pods a sweep purged (`job`) and Secrets it deleted (`variable`) |
 | `wherry_adapter_placement_seconds` | histogram | none | time from a Dispatch that creates the pod to the plugin seeing its agent container running |
 
 An API call's class comes from its status: 401 and 403 are `denied`, 409
@@ -584,7 +623,7 @@ A failed call the plugin returns reaches the receiver with its operation,
 class and the API's text, and the receiver logs it redacted. A failed call
 the plugin handles itself, such as a poll, a refused signal or a failed
 end of the holder, logs one warning, `kubernetes call failed`, naming the
-adapter, the operation and the class; the line holds no URL, token or
+plugin profile under the key `profile`, the operation and the class; the line holds no URL, token or
 response body. API warnings, such as PodSecurity notices, are logged as
 `kubernetes warning`.
 
@@ -620,7 +659,10 @@ and its agent pods run beside it in the same namespace.
 [`examples/kubernetes/receiver.yaml`](../examples/kubernetes/receiver.yaml) holds its manifests: the
 ServiceAccount, the RoleBinding of `admin` ([RBAC](#rbac)), the state
 PersistentVolumeClaim, the Deployment and the metrics Service. The Secret
-`wherry-receiver-bundle` holds the bundle. Kubernetes and OpenShift take the
+`wherry-receiver-bundle` holds the bundle, and the ConfigMap
+`wherry-receiver-config` holds the receiver's local configuration,
+[`examples/kubernetes/config.yaml`](../examples/kubernetes/config.yaml).
+Kubernetes and OpenShift take the
 same manifests; only the namespace, the image and the Kafka bootstrap
 address differ.
 
@@ -671,9 +713,10 @@ from.
    ```
 
 2. Add the receiver with `wherry admin receiver add`, as the operator guide
-   says, with adapters whose `namespace` is the receiver's and whose
-   `helper_image` is the receiver image ([Settings](#settings)). The
-   in-cluster receiver's adapters take no platform entry in the bundle; the
+   says, with a `kubernetes` plugin whose `config` sets the receiver's
+   `namespace` and the receiver image as `helper_image`
+   ([Settings](#settings)), and the receiver's plugin profiles. The
+   in-cluster receiver's configuration names no platform credential; the
    service account supplies the token.
 
 3. Apply the receiver with [`examples/kubernetes/apply.sh`](../examples/kubernetes/apply.sh):
@@ -688,9 +731,24 @@ from.
 [`examples/kubernetes/apply.sh`](../examples/kubernetes/apply.sh) creates or replaces the Secret
 `wherry-receiver-bundle` from `BUNDLE` with its `broker` replaced by
 `BOOTSTRAP` ([Bundle and Kafka](#bundle-and-kafka)), never writing the
-bundle to disk, then applies `receiver.yaml` with the namespace and the
-image substituted, both with server-side apply. Run it again to change
-either, and restart the Deployment to read a new bundle.
+bundle to disk, and the ConfigMap `wherry-receiver-config` from the
+receiver's local configuration,
+[`examples/kubernetes/config.yaml`](../examples/kubernetes/config.yaml),
+under the key `config.yaml`. It then applies `receiver.yaml` with the
+namespace and the image substituted, all with server-side apply. Run it
+again to change any of them, and restart the Deployment to read a new
+bundle or local configuration.
+
+The receiver runs as
+`wherry receiver run --config-file /etc/wherry/config/config.yaml`, with
+the ConfigMap mounted read-only at `/etc/wherry/config`. The local
+configuration names the bundle at `/etc/wherry/bundle/bundle.yaml`, the
+state directory `/var/lib/wherry/state`, the plugin directory
+`/usr/local/libexec/wherry/plugins` and the metrics address `:9464`, and
+holds no `credentials`. A platform credential, such as a token for a
+remote cluster, comes from a Secret mounted with `defaultMode` 0440 or
+stricter and named in `credentials` as a `file` source
+([Credentials](#credentials)).
 
 - One replica with the `Recreate` strategy: a receiver is one principal
   with one key pair, and a rolling update would briefly run two.
@@ -701,7 +759,7 @@ either, and restart the Deployment to read a new bundle.
 - `/tmp` is a writable memory volume, and `TMPDIR` and `HOME` point at it.
   The root filesystem is read-only, and the plugin creates its socket for
   the receiver in `$TMPDIR`; without it the plugin cannot start, and the
-  receiver exits with `adapter <name>: plugin ...` and restarts in a loop.
+  receiver exits with `profile <name>: plugin ...` and restarts in a loop.
 - State lives on the PVC, in the `state` subdirectory, which the receiver
   creates at 0700 with its signing key at 0600. The volume's root must be
   writable by the receiver. The pod sets no fsGroup, so use a storage
@@ -714,7 +772,8 @@ either, and restart the Deployment to read a new bundle.
 - The bundle Secret is mounted at 0440, owned by group 0, the receiver's
   group.
 - The receiver has no health endpoint, so the pod has no probes.
-- The metrics address binds the pod's own addresses, with no TLS or
+- The metrics address, `metrics_addr` in the local configuration, binds
+  the pod's own addresses, with no TLS or
   authentication. Scrape the Service `wherry-receiver-metrics`, port
   `metrics`, path `/metrics`. Whoever reads the scrape sees every tenant of
   the pool; where the CNI enforces NetworkPolicy, admit only the scraper to
@@ -754,19 +813,19 @@ Strimzi renews its cluster CA, and nothing renews the receiver's copy:
 
 Put the in-cluster receiver in a pool of its own, and Nomad-hosted receivers in
 another, and entitle the tenant to both. A submit places the task in a pool
-whose live adapters satisfy its selector, so a task meant for one platform is
+whose live plugin profiles satisfy its selector, so a task meant for one platform is
 never delivered to the other's receivers. In one pool, a receiver with no
-matching adapter takes the task and hands it back, spending its delivery
+matching plugin profile takes the task and hands it back, spending its delivery
 budget, and a task both platforms accept can be redelivered to a receiver that
 cannot see its running job and start a second one.
 
-A run is adopted only by a receiver with the same adapter. For a Kubernetes
+A run is adopted only by a receiver with the same plugin profile. For a Kubernetes
 run that is the in-cluster receiver itself, restarted: the new pod mounts the
 same state volume, is the same principal, and finds the run's pod.
 
 ## OpenShift
 
-The image, `receiver.yaml` and `apply.sh` are the same on OpenShift, which
+The image, `receiver.yaml`, `config.yaml` and `apply.sh` are the same on OpenShift, which
 ships `kubectl` beside `oc`. What differs:
 
 - Create the namespace with `oc new-project wherry`. OpenShift sets the
@@ -878,9 +937,13 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
 2. `02-wherry.sh` fetches the wherry CLI of `WHERRY_VERSION` through the
    receiver image's verifying fetch stage.
 3. `03-provision.sh` runs `wherry admin` from the machine: the pool, the
-   tenant, the host and the receiver, whose adapters run a fake agent and a
-   missing image. It writes the host's configuration with a generated dummy
-   credential and runs `wherry init`.
+   tenant, the host and the receiver, from the receiver configuration
+   directory `test/e2e/receiver`: `receiver.yaml`,
+   `plugins/kubernetes/plugin.yaml`, and the plugin profiles
+   `plugins/kubernetes/profiles/10-fake.yaml`, which runs a fake agent, and
+   `20-broken.yaml`, which runs a missing image. It writes the host's
+   configuration, `config.yaml`, with a generated dummy credential and runs
+   `wherry init`.
 4. `04-deploy.sh` builds the receiver image with `make image` and the fake
    agent's image, loads both into kind, and deploys the receiver as
    [Deploy](#deploy) says, into a namespace enforcing Pod Security

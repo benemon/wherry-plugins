@@ -1,5 +1,6 @@
 # The in-cluster receiver. apply.sh applies this file unchanged but for the namespace and the image, on Kubernetes and
-# OpenShift alike, beside the Secret wherry-receiver-bundle. Agent pods run in the same namespace.
+# OpenShift alike, beside the Secret wherry-receiver-bundle and the ConfigMap wherry-receiver-config, which holds the
+# receiver's local configuration config.yaml. Agent pods run in the same namespace.
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: wherry-receiver}
@@ -36,8 +37,7 @@ spec:
       containers:
         - name: receiver
           image: wherry-receiver
-          args: [receiver, run, --bundle-file, /etc/wherry/bundle/bundle.yaml, --state-dir, /var/lib/wherry/state,
-                 --plugin-dir, /usr/local/libexec/wherry/plugins, --metrics-addr, ":9464"]
+          args: [receiver, run, --config-file, /etc/wherry/config/config.yaml]
           env:
             - {name: TMPDIR, value: /tmp}
             - {name: HOME, value: /tmp}
@@ -45,10 +45,12 @@ spec:
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, readOnlyRootFilesystem: true}
           resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 512Mi}}
           volumeMounts:
+            - {name: config, mountPath: /etc/wherry/config, readOnly: true}
             - {name: bundle, mountPath: /etc/wherry/bundle, readOnly: true}
             - {name: state, mountPath: /var/lib/wherry}
             - {name: tmp, mountPath: /tmp}
       volumes:
+        - {name: config, configMap: {name: wherry-receiver-config}}
         - {name: bundle, secret: {secretName: wherry-receiver-bundle, defaultMode: 0440}}
         - {name: state, persistentVolumeClaim: {claimName: wherry-receiver-state}}
         - {name: tmp, emptyDir: {medium: Memory, sizeLimit: 16Mi}}

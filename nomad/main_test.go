@@ -52,8 +52,27 @@ func TestFactoryDecodesStrictly(t *testing.T) {
 	}
 }
 
-// TestReadmeReceiverConfigures configures each adapter of the README's receiver configuration as the receiver does,
-// with the platform's config keys merged into the adapter's.
+// merge returns base with over merged onto it as wherry merges a plugin profile's config onto its plugin's: maps merge
+// recursively, and over wins on every other key.
+func merge(base, over map[string]any) map[string]any {
+	merged := make(map[string]any, len(base)+len(over))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range over {
+		inherited, inheritedMap := merged[key].(map[string]any)
+		overriding, overridingMap := value.(map[string]any)
+		if inheritedMap && overridingMap {
+			merged[key] = merge(inherited, overriding)
+			continue
+		}
+		merged[key] = value
+	}
+	return merged
+}
+
+// TestReadmeReceiverConfigures configures each plugin profile of the README's receiver configuration as the receiver
+// does, with the plugin's config merged under the profile's and the credential key resolved and removed.
 func TestReadmeReceiverConfigures(t *testing.T) {
 	example, err := os.ReadFile("testdata/receiver.yaml")
 	if err != nil {
@@ -67,29 +86,27 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 		t.Fatal("README.md does not hold testdata/receiver.yaml")
 	}
 	var receiver struct {
-		Capacity  int64 `yaml:"capacity"`
-		Platforms []struct {
-			Name   string         `yaml:"name"`
-			Type   string         `yaml:"type"`
-			Config map[string]any `yaml:"config"`
-		} `yaml:"platforms"`
-		Adapters []struct {
-			Name     string            `yaml:"name"`
-			Platform string            `yaml:"platform"`
-			Agent    string            `yaml:"agent"`
+		Capacity int64 `yaml:"capacity"`
+		Plugins  map[string]struct {
 			Labels   map[string]string `yaml:"labels"`
 			Config   map[string]any    `yaml:"config"`
-		} `yaml:"adapters"`
+			Profiles []struct {
+				Name   string            `yaml:"name"`
+				Agent  string            `yaml:"agent"`
+				Labels map[string]string `yaml:"labels"`
+				Config map[string]any    `yaml:"config"`
+			} `yaml:"profiles"`
+		} `yaml:"plugins"`
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(example))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&receiver); err != nil {
 		t.Fatal(err)
 	}
-	if len(receiver.Platforms) != 1 || receiver.Platforms[0].Type != "nomad" || len(receiver.Adapters) < 2 {
-		t.Fatal("want one nomad platform and at least two adapters")
+	plugin, ok := receiver.Plugins["nomad"]
+	if len(receiver.Plugins) != 1 || !ok || len(plugin.Profiles) < 2 {
+		t.Fatal("want one nomad plugin and at least two profiles")
 	}
-	platform := receiver.Platforms[0]
 	// ca_file names a path on the receiver; the client reads the CA when the adapter is built.
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
@@ -97,24 +114,28 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	platform.Config["ca_file"] = caFile
-	for _, adapter := range receiver.Adapters {
-		if adapter.Platform != platform.Name {
-			t.Fatalf("adapter %s: platform %q, want %q", adapter.Name, adapter.Platform, platform.Name)
-		}
-		for key, value := range platform.Config {
-			if _, ok := adapter.Config[key]; ok {
-				t.Fatalf("adapter %s: config key %q is also set by the platform", adapter.Name, key)
+	if plugin.Config == nil {
+		plugin.Config = map[string]any{}
+	}
+	plugin.Config["ca_file"] = caFile
+	for _, profile := range plugin.Profiles {
+		config := merge(plugin.Config, profile.Config)
+		s := wherry.Settings{Name: profile.Name, Pool: testPool, Agent: profile.Agent}
+		// The receiver sends the plugin the credential's value and never its name.
+		if name, ok := config["credential"]; ok {
+			if _, ok := name.(string); !ok {
+				t.Fatalf("profile %s: credential %v, want a name", profile.Name, name)
 			}
-			adapter.Config[key] = value
+			delete(config, "credential")
+			s.Credential = "readme-nomad-token"
 		}
-		encoded, err := json.Marshal(adapter.Config)
+		encoded, err := json.Marshal(config)
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := wherry.Settings{Name: adapter.Name, Pool: testPool, Agent: adapter.Agent, Config: encoded}
+		s.Config = encoded
 		if _, err := newAdapter(s, hclog.NewNullLogger()); err != nil {
-			t.Fatalf("adapter %s: %v", adapter.Name, err)
+			t.Fatalf("profile %s: %v", profile.Name, err)
 		}
 	}
 }
@@ -130,7 +151,7 @@ func TestFactoryGivesTheAdapterServesLogger(t *testing.T) {
 	}
 }
 
-func TestFactoryTokenFallsBackToNomadToken(t *testing.T) {
+func TestFactoryTokenFromCredentialElseNomadToken(t *testing.T) {
 	t.Setenv("NOMAD_TOKEN", "workload-identity-token")
 	tokens := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -138,9 +159,9 @@ func TestFactoryTokenFallsBackToNomadToken(t *testing.T) {
 		_, _ = response.Write([]byte("[]"))
 	}))
 	defer server.Close()
-	withBundle := settings(t, "bundle", execConfig(server.URL, "/bin/true"))
-	withBundle.Platform = "bundle-token"
-	for _, s := range []wherry.Settings{settings(t, "environment", execConfig(server.URL, "/bin/true")), withBundle} {
+	withCredential := settings(t, "credential", execConfig(server.URL, "/bin/true"))
+	withCredential.Credential = "platform-credential"
+	for _, s := range []wherry.Settings{settings(t, "environment", execConfig(server.URL, "/bin/true")), withCredential} {
 		a, err := newAdapter(s, hclog.NewNullLogger())
 		if err != nil {
 			t.Fatal(err)
@@ -149,8 +170,8 @@ func TestFactoryTokenFallsBackToNomadToken(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := []string{<-tokens, <-tokens}; got[0] != "workload-identity-token" || got[1] != "bundle-token" {
-		t.Fatalf("tokens %v; want the environment's without a bundle token, else the bundle's", got)
+	if got := []string{<-tokens, <-tokens}; got[0] != "workload-identity-token" || got[1] != "platform-credential" {
+		t.Fatalf("tokens %v; want the environment's without a platform credential, else the credential", got)
 	}
 }
 

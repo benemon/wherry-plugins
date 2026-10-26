@@ -9,9 +9,7 @@ After=network-online.target
 
 [Service]
 Type=exec
-ExecStart=/usr/local/bin/wherry receiver run --bundle-file /etc/wherry/receiver.bundle \
-  --state-dir /var/lib/wherry/state --plugin-dir /usr/local/libexec/wherry/plugins \
-  --metrics-addr :9465
+ExecStart=/usr/local/bin/wherry receiver run --config-file /etc/wherry/config.yaml
 Restart=on-failure
 RestartSec=5s
 StateDirectory=wherry

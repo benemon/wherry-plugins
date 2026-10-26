@@ -1,5 +1,5 @@
-# The wherry receiver image for Kubernetes and OpenShift: wherry from its verified release, the Kubernetes adapter
-# plugin, and the helper agent pods run. Build it with make image from a checkout of a kubernetes/v* tag.
+# The wherry receiver image for Kubernetes and OpenShift: wherry from its verified release, the Kubernetes plugin, and
+# the helper agent pods run. Build it with make image from a checkout of a kubernetes/v* tag.
 # The bases are pinned by digest, since cosign verifies wherry's release; dependabot moves the pins.
 FROM --platform=$BUILDPLATFORM ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d AS cosign
 

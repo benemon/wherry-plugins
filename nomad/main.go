@@ -20,8 +20,8 @@ func newAdapter(settings wherry.Settings, logger hclog.Logger) (wherry.Adapter, 
 	if err := json.Unmarshal(settings.Config, &config, json.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
-	// Without a token in the bundle, the receiver's environment supplies one, as Nomad workload identity does.
-	token := settings.Platform
+	// Without a platform credential, the receiver's environment supplies a token, as Nomad workload identity does.
+	token := settings.Credential
 	if token == "" {
 		token = os.Getenv("NOMAD_TOKEN")
 	}

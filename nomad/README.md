@@ -1,9 +1,10 @@
 # wherry-plugin-nomad
 
-The wherry adapter plugin for [HashiCorp Nomad](https://developer.hashicorp.com/nomad).
-A wherry receiver starts it from its plugin directory for adapters of type
-`nomad`, and runs each of the receiver's runs as one Nomad batch job. One
-plugin process hosts every `nomad` adapter of a receiver.
+The wherry plugin for [HashiCorp Nomad](https://developer.hashicorp.com/nomad).
+A wherry receiver starts it from its plugin directory for its `nomad`
+plugin entry, and runs each of the receiver's runs as one Nomad batch job.
+One plugin process hosts every plugin profile of a receiver's `nomad`
+plugin.
 
 ## Build
 
@@ -24,13 +25,16 @@ archives and `checksums.txt` into `dist`.
 1. Download `wherry-plugin-nomad` from its
    [release](https://github.com/benemon/wherry-plugins/releases), verify it and
    install it in the receiver's plugin directory, as
-   [Install adapter plugins](https://benemon.github.io/wherry/operations#install-adapter-plugins) describes
+   [Install plugins](https://benemon.github.io/wherry/operations#install-plugins) describes
    with `plugin=nomad`. [Build](#build) covers building it from source.
 
-2. Start the receiver with `--plugin-dir` naming that directory:
+2. Name that directory as `plugin_dir` in the receiver's
+   [local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration),
+   whose default is `/usr/local/libexec/wherry/plugins`, and start the
+   receiver with it:
 
    ```sh
-   wherry receiver run --bundle-file FILE --state-dir DIR --plugin-dir /usr/local/libexec/wherry/plugins
+   wherry receiver run --config-file /etc/wherry/config.yaml
    ```
 
 The receiver checks the plugin directory and binary before it runs them;
@@ -39,17 +43,30 @@ The plugin is not run by hand.
 
 ## Credentials
 
-The plugin takes an adapter's Nomad token from the receiver bundle's
-`platform` entry for the adapter's name, or else from `NOMAD_TOKEN`. The
-plugin inherits the receiver's environment, so a receiver running as a
-Nomad job with
+A plugin profile's Nomad token is the
+[platform credential](https://benemon.github.io/wherry/configuration#platform-credentials)
+its merged `config` names with `credential: <name>`. The receiver resolves
+the name from the `credentials` of its
+[local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration),
+a `file`, `env` or `command` source, and passes the value to the plugin
+when it configures the plugin profile:
+
+```yaml
+credentials:
+  nomad-token:
+    file: /etc/wherry/nomad-token
+```
+
+`env: NOMAD_TOKEN` in place of `file` takes the token from the receiver's
+environment. A plugin profile that names no credential takes `NOMAD_TOKEN`
+from the receiver's environment, which the plugin inherits, so a receiver
+running as a Nomad job with
 [workload identity](https://developer.hashicorp.com/nomad/docs/concepts/workload-identity)
-supplies `NOMAD_TOKEN` to it. The token needs the
-[ACL policy](#acl-policy).
+supplies it. The token needs the [ACL policy](#acl-policy).
 
 | Variable | Effect |
 | --- | --- |
-| `NOMAD_TOKEN` | Nomad token for adapters without a platform credential in the bundle |
+| `NOMAD_TOKEN` | Nomad token for plugin profiles that name no platform credential |
 | `NOMAD_ADDR` | Nomad address when `address` is empty |
 | `NOMAD_REGION` | Nomad region for API requests |
 | `NOMAD_HTTP_AUTH` | HTTP basic auth for API requests |
@@ -98,11 +115,20 @@ node_pool "default" {
   [Nomad variables](https://developer.hashicorp.com/nomad/docs/concepts/variables)
   for the access rules.
 - `node` read: find a ready node with the runtime's driver healthy.
-- `node_pool` read: register jobs in the node pools the adapters name.
+- `node_pool` read: register jobs in the node pools the plugin profiles name.
 
 ## Settings
 
-An adapter's `config` section in the receiver configuration:
+The `config` keys below are set on the `nomad` plugin's `config` in the
+receiver configuration, which every plugin profile inherits, or on a plugin
+profile's `config`. wherry merges the two as
+[Plugin profile merge](https://benemon.github.io/wherry/configuration#plugin-profile-merge)
+describes: maps merge recursively and the plugin profile wins on every leaf
+it sets, a list replaces the inherited list whole, and `key: null` on a
+plugin profile deletes the inherited key. `credential` names a
+[platform credential](#credentials); the receiver resolves it from its
+local configuration and removes the key before the plugin sees the
+`config`. The plugin reads the merged `config`:
 
 | Field | Default | Content |
 | --- | --- | --- |
@@ -115,7 +141,8 @@ An adapter's `config` section in the receiver configuration:
 
 Names in `runtime.env` match `[A-Za-z_][A-Za-z0-9_]*`. Unknown fields are
 errors. The plugin checks the section when the receiver configures the
-adapter, and the receiver exits with `adapter <name>: ...` on an error.
+plugin profile, and the receiver exits with `profile <name>: ...` on an
+error.
 
 `runtime` has these fields:
 
@@ -162,48 +189,48 @@ job it builds.
 
 ```yaml
 capacity: 2
-platforms:
-  - name: nomad
-    type: nomad
-adapters:
-  - name: container
-    platform: nomad
-    agent: coder
-    labels:
-      isolation: container
+plugins:
+  nomad:
     config:
       address: https://nomad.example.com:4646
       ca_file: /secrets/nomad-ca.pem
       namespace: agents
-      runtime:
-        driver: docker
+      credential: nomad-token
+    profiles:
+      - name: container
+        agent: coder
+        labels:
+          isolation: container
         config:
-          image: registry.example.com/agent:1.0
-          command: /bin/sh
-          args:
-            - -c
-            - exec agent-run < "$NOMAD_TASK_DIR/prompt.txt"
-        resources:
-          cpu: 1000
-          memory_mb: 2048
+          runtime:
+            driver: docker
+            config:
+              image: registry.example.com/agent:1.0
+              command: /bin/sh
+              args:
+                - -c
+                - exec agent-run < "$NOMAD_TASK_DIR/prompt.txt"
+            resources:
+              cpu: 1000
+              memory_mb: 2048
 ```
 
 ### Receiver configuration
 
-This receiver configuration file holds one platform and two adapters.
-Each adapter's `config` takes the platform's `config` keys at the top level,
-and an adapter that sets one of them again is an error.
+This receiver configuration file holds the `nomad` plugin and two plugin
+profiles. The plugin's `config` holds the connection settings and the
+credential name every plugin profile inherits, and plugin profile `host`
+overrides the inherited `node_pool`.
 [`testdata/receiver.yaml`](testdata/receiver.yaml) holds this file, and
-`TestReadmeReceiverConfigures` configures each adapter from it through
-the plugin's decoding and checks.
+`TestReadmeReceiverConfigures` merges each plugin profile's `config` onto
+the plugin's as wherry does and configures the plugin profile from it
+through the plugin's decoding and checks.
 
 ```yaml
 capacity: 4
-platforms:
-  # Every adapter on this platform takes these keys into its config, and
-  # repeats none of them.
-  - name: nomad
-    type: nomad
+plugins:
+  nomad:
+    # Every plugin profile of this plugin inherits these keys and can override them.
     config:
       # Unset, NOMAD_ADDR, else http://127.0.0.1:4646.
       address: https://nomad.example.com:4646
@@ -211,64 +238,65 @@ platforms:
       ca_file: /etc/wherry/nomad-ca.pem
       # Holds the agent jobs and their variables; the ACL policy names it.
       namespace: agents
+      # The ACL policy grants node_pool read on this pool.
+      node_pool: agents
       # Unset, every datacenter.
       datacenters:
         - dc1
         - dc2
-adapters:
-  # A container agent that writes its reply to a file.
-  - name: container
-    platform: nomad
-    agent: coder
-    labels:
-      isolation: container
-    config:
-      # The ACL policy grants node_pool read on this pool.
-      node_pool: agents
-      runtime:
-        driver: docker
-        # Numeric, so the credential files belong to UID 1001 and GID 1002
-        # with mode 0600.
-        user: "1001"
-        group: "1002"
-        # The docker driver's group_add carries these.
-        supplementary_groups: [video]
+      # The receiver's local configuration gives this name a source.
+      credential: nomad-token
+    profiles:
+      # A container agent that writes its reply to a file.
+      - name: container
+        agent: coder
+        labels:
+          isolation: container
         config:
-          image: registry.example.com/agent:1.0
-          command: /bin/sh
-          args:
-            - -c
-            - >-
-              test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
-              exec agent-run --model "$WHERRY_MODEL" < "$NOMAD_TASK_DIR/prompt.txt" 2>"$HOME/agent.err"
-        env:
-          AGENT_LOG_LEVEL: info
-        resources:
-          cpu: 2000
-          memory_mb: 4096
-  # A host agent under exec, which looks the user up by name on the client.
-  - name: host
-    platform: nomad
-    agent: reviewer
-    labels:
-      isolation: host
-    config:
-      node_pool: agents-host
-      runtime:
-        driver: exec
-        # A name, so the credential files keep the client's owner and mode
-        # 0644.
-        user: agent
+          runtime:
+            driver: docker
+            # Numeric, so the credential files belong to UID 1001 and GID 1002
+            # with mode 0600.
+            user: "1001"
+            group: "1002"
+            # The docker driver's group_add carries these.
+            supplementary_groups: [video]
+            config:
+              image: registry.example.com/agent:1.0
+              command: /bin/sh
+              args:
+                - -c
+                - >-
+                  test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
+                  exec agent-run --model "$WHERRY_MODEL" < "$NOMAD_TASK_DIR/prompt.txt" 2>"$HOME/agent.err"
+            env:
+              AGENT_LOG_LEVEL: info
+            resources:
+              cpu: 2000
+              memory_mb: 4096
+      # A host agent under exec, which looks the user up by name on the client.
+      - name: host
+        agent: reviewer
+        labels:
+          isolation: host
         config:
-          command: /bin/sh
-          args:
-            - -c
-            - exec agent-run < "$NOMAD_TASK_DIR/prompt.txt" 2>"$HOME/agent.err"
-        env:
-          AGENT_LOG_LEVEL: warn
-        resources:
-          cpu: 1000
-          memory_mb: 2048
+          # Overrides the inherited pool; the ACL policy grants node_pool read on it too.
+          node_pool: agents-host
+          runtime:
+            driver: exec
+            # A name, so the credential files keep the client's owner and mode
+            # 0644.
+            user: agent
+            config:
+              command: /bin/sh
+              args:
+                - -c
+                - exec agent-run < "$NOMAD_TASK_DIR/prompt.txt" 2>"$HOME/agent.err"
+            env:
+              AGENT_LOG_LEVEL: warn
+            resources:
+              cpu: 1000
+              memory_mb: 2048
 ```
 
 ## Agent jobs
@@ -277,9 +305,9 @@ The plugin registers one batch job per run, `agent-<pool>-<run>`,
 in its namespace, node pool and datacenters, with restarts and rescheduling
 disabled. `<pool>` is the first 12 hexadecimal digits of the SHA-256 of the
 pool name, since Nomad limits a variable path to 128 characters. The job's
-task group `agent` holds the task `agent`, built from the adapter's
+task group `agent` holds the task `agent`, built from the plugin profile's
 `runtime`, alone. The job's metadata holds `run_id`, `attempt`,
-`adapter` and `agent`, which the receiver reads to decide whether to adopt
+`profile` and `agent`, which the receiver reads to decide whether to adopt
 the job.
 
 An agent task in a terminal allocation with neither a `Started` event nor a
@@ -287,7 +315,7 @@ start time never started, and the plugin reports the job as never started.
 The message of the task event that kept it from starting goes to the receiver
 as the terminal's reason.
 
-An adapter is ready when some ready, eligible node in its node pool and
+A plugin profile is ready when some ready, eligible node in its node pool and
 datacenters has the runtime's driver detected and healthy.
 
 The plugin stops a job by sending `SIGTERM` to the agent task and waiting
@@ -381,14 +409,14 @@ variables when the run ends.
 ### Sweep
 
 On each sweep the receiver requests
-([adapter plugins](https://benemon.github.io/wherry/commands#adapter-plugins)),
+([plugins](https://benemon.github.io/wherry/commands#plugins)),
 the plugin deletes the variables of jobs that have stopped, and of jobs
 never registered within 10 minutes, and purges agent jobs that have been
 dead for 10 minutes. A receiver sweeps only its own pool's jobs and
-variables, and treats as an agent job only one with `run_id` meta. Each adapter purges and counts only the jobs whose `adapter`
+variables, and treats as an agent job only one with `run_id` meta. Each plugin profile purges and counts only the jobs whose `profile`
 meta names it, and deletes the variables of any of the pool's jobs dead
 for 10 minutes, since they hold the prompt and credentials. A dead job
-whose adapter is no longer in the receiver's configuration stays until
+whose plugin profile is no longer in the receiver's configuration stays until
 Nomad's garbage collection or a manual purge; its variables are swept. The
 sweep needs a Nomad server that returns job `Meta` in list responses,
 `GET /v1/jobs?meta=true`. The 10 minutes run from a job's last allocation
@@ -433,16 +461,18 @@ undo this.
 
 ## Metrics
 
-The plugin speaks adapter protocol version 7, and a receiver of another
-protocol version refuses it, so upgrade it with the receiver. For each
-adapter it reports these families, which the receiver serves on its
-`/metrics` with the adapter's name as `adapter`:
+The plugin speaks adapter protocol version 9, and a receiver of another
+protocol version refuses it at its start, as
+[Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
+upgrade it with the receiver. For each plugin profile it reports these
+families, which the receiver serves on its `/metrics` with the plugin
+profile's name as `profile`:
 
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
 | `wherry_adapter_platform_errors_total` | counter | `class` | failed Nomad API calls |
-| `wherry_adapter_cleanup_pending` | gauge | none | the adapter's dead agent jobs the latest sweep left |
-| `wherry_adapter_sweep_deletions_total` | counter | `kind` | the adapter's jobs a sweep purged (`job`) and variables it deleted (`variable`) |
+| `wherry_adapter_cleanup_pending` | gauge | none | the plugin profile's dead agent jobs the latest sweep left |
+| `wherry_adapter_sweep_deletions_total` | counter | `kind` | the plugin profile's jobs a sweep purged (`job`) and variables it deleted (`variable`) |
 | `wherry_adapter_placement_seconds` | histogram | none | time from a Dispatch that registers the job to the plugin seeing its agent task started |
 
 An API call's class comes from its status code: 401 and 403 are `denied`,
@@ -456,7 +486,7 @@ class and text, and the receiver logs it redacted. A log stream the API
 cannot decode fails as `log stream not decodable`, since the API's own error
 quotes the agent's output. A failed call the plugin handles itself, such as
 a refused signal or a poll of the allocation, logs one warning, `nomad call
-failed`, naming the adapter, the operation and the class; the line holds no
+failed`, naming the plugin profile as `profile`, the operation and the class; the line holds no
 URL, token or response body.
 
 A dead job counts as pending while it is inside the 10-minute
@@ -478,7 +508,7 @@ or the network the runtime's `config` names in `network_mode`.
 1. Enable [Nomad ACLs](https://developer.hashicorp.com/nomad/docs/secure/acl).
    An agent that shares the host's network reaches the client's HTTP API
    on loopback, and without ACLs that API serves every job, URLs included.
-2. Place agents in their own node pool (the adapter's `node_pool`), on
+2. Place agents in their own node pool (the plugin profile's `node_pool`), on
    hosts that run nothing else, so a host firewall can carry the policy.
 3. Use `exec` or Podman. Avoid `raw_exec`: a `raw_exec` task has no filesystem
    isolation and runs as the client's user, often root, so no rule can tell it
@@ -510,10 +540,20 @@ client host's egress separately.
 The [Nomad example Containerfile](../examples/nomad/Containerfile) builds
 from the repository root. It downloads and verifies the wherry release,
 builds `wherry-plugin-nomad`, and places both binaries in a UBI minimal
-image. The receiver needs the Nomad API address and token for this plugin.
-Set the address with the adapter's `address` setting or `NOMAD_ADDR`; supply
-the token in the bundle's platform entry or `NOMAD_TOKEN`, as described in
-[Credentials](#credentials).
+image whose entrypoint is `wherry`. The container runs the receiver as
+`wherry receiver run --config-file FILE`, with `FILE` the receiver's local
+configuration mounted in the container.
+[`examples/nomad/config.yaml`](../examples/nomad/config.yaml) is one for
+this image, naming the bundle, state directory, plugin directory and
+metrics address, and a source for the `nomad-token` credential.
+
+The plugin needs the Nomad API address and token. Set the address with the
+`address` setting, on the plugin's or a plugin profile's `config`, or with
+`NOMAD_ADDR`. The plugin's `config` names the token with
+`credential: nomad-token`, and the local configuration resolves it with
+`env: NOMAD_TOKEN` from the container's environment, or with `file:` from a
+file mounted in the container that its group cannot write and others
+cannot read, as described in [Credentials](#credentials).
 
 Build it with Docker and a wherry release version:
 

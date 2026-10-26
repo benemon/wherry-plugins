@@ -1,74 +1,76 @@
 capacity: 4
-platforms:
-  # Every adapter on this platform takes these keys into its config, and
-  # repeats none of them.
-  - name: kubernetes
-    type: kubernetes
+plugins:
+  kubernetes:
+    # Every plugin profile of this plugin inherits these keys and can override
+    # them.
     config:
-      # Set, the bundle holds a platform credential for this platform. Unset,
-      # the receiver pod's service account applies.
+      # Set, a profile names a platform credential. Unset, the receiver pod's
+      # service account applies.
       address: https://kubernetes.example.com:6443
       # A path on the receiver.
       ca_file: /etc/wherry/kubernetes-ca.pem
+      # A name in the credentials of the receiver's local configuration; its
+      # value is the API token.
+      credential: kubernetes-token
       # Holds the agent pods and their Secrets; the token holds admin here alone.
       namespace: agents
       # The receiver image at the receiver's tag.
       helper_image: registry.example.com/wherry-receiver:1.0.0
-adapters:
-  # An agent on dedicated nodes that writes its reply to a file.
-  - name: dedicated
-    platform: kubernetes
-    agent: coder
-    labels:
-      nodes: dedicated
-    config:
-      node_selector:
-        example.com/pool: agents
-      tolerations:
-        - key: example.com/agents
-          operator: Equal
-          value: "true"
-          effect: NoSchedule
       runtime:
-        image: registry.example.com/agent:1.0
-        # Every container of the pod runs as this UID; quoted, since it is a
-        # string.
-        user: "1001"
-        # The pod's runAsGroup and supplementalGroups.
-        group: "1001"
-        supplementary_groups: ["2001"]
-        command: [/bin/sh, -c]
-        args:
-          - >-
-            test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
-            exec agent-run --model "$WHERRY_MODEL" < /wherry/prompt.txt 2>"$HOME/agent.err"
+        # A profile's env merges into this map by variable name.
         env:
           AGENT_LOG_LEVEL: info
-        # Each is both request and limit.
-        resources:
-          cpu: "2"
-          memory: 4Gi
-          ephemeral_storage: 8Gi
-        # Below ephemeral_storage, so the volume limit applies first.
-        work_limit: 6Gi
-  # An agent on any node that tolerates the taint, with the image's
-  # entrypoint.
-  - name: shared
-    platform: kubernetes
-    agent: reviewer
-    labels:
-      nodes: shared
-    config:
-      tolerations:
-        - key: example.com/agents
-          operator: Exists
-          effect: NoSchedule
-      runtime:
-        image: registry.example.com/reviewer:1.0
-        user: "1002"
-        args: [--prompt-file, /wherry/prompt.txt]
-        env:
-          AGENT_LOG_LEVEL: warn
-        resources:
-          cpu: 500m
-          memory: 2Gi
+    profiles:
+      # An agent on dedicated nodes that writes its reply to a file.
+      - name: dedicated
+        agent: coder
+        labels:
+          nodes: dedicated
+        config:
+          node_selector:
+            example.com/pool: agents
+          tolerations:
+            - key: example.com/agents
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          runtime:
+            image: registry.example.com/agent:1.0
+            # Every container of the pod runs as this UID; quoted, since it is a
+            # string.
+            user: "1001"
+            # The pod's runAsGroup and supplementalGroups.
+            group: "1001"
+            supplementary_groups: ["2001"]
+            command: [/bin/sh, -c]
+            args:
+              - >-
+                test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;
+                exec agent-run --model "$WHERRY_MODEL" < /wherry/prompt.txt 2>"$HOME/agent.err"
+            # Each is both request and limit.
+            resources:
+              cpu: "2"
+              memory: 4Gi
+              ephemeral_storage: 8Gi
+            # Below ephemeral_storage, so the volume limit applies first.
+            work_limit: 6Gi
+      # An agent on any node that tolerates the taint, with the image's
+      # entrypoint.
+      - name: shared
+        agent: reviewer
+        labels:
+          nodes: shared
+        config:
+          tolerations:
+            - key: example.com/agents
+              operator: Exists
+              effect: NoSchedule
+          runtime:
+            image: registry.example.com/reviewer:1.0
+            user: "1002"
+            args: [--prompt-file, /wherry/prompt.txt]
+            env:
+              AGENT_LOG_LEVEL: warn
+            resources:
+              cpu: 500m
+              memory: 2Gi

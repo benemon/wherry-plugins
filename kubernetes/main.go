@@ -23,7 +23,7 @@ func newAdapter(settings wherry.Settings, logger hclog.Logger) (wherry.Adapter, 
 	if err := json.Unmarshal(settings.Config, &config, json.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
-	client, err := newClient(config, settings.Platform)
+	client, err := newClient(config, settings.Credential)
 	if err != nil {
 		return nil, err
 	}

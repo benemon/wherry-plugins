@@ -54,7 +54,7 @@ func hostPool(t *testing.T) string {
 func hostAdapter(t *testing.T, config Config) *Adapter {
 	t.Helper()
 	onSystemd(t)
-	adapter, err := New(config, testAdapter, hostPool(t), hclog.NewNullLogger())
+	adapter, err := New(config, testProfile, hostPool(t), hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,7 +604,7 @@ func TestAdoptionOnSystemd(t *testing.T) {
 	}
 	cancel()
 	<-followed
-	second, err := New(config, testAdapter, first.pool, hclog.NewNullLogger())
+	second, err := New(config, testProfile, first.pool, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -53,7 +53,7 @@ const (
 	cleanupWait  = 10 * time.Second
 
 	labelPool         = "wherry.io/pool"
-	labelAdapter      = "wherry.io/adapter"
+	labelProfile      = "wherry.io/profile"
 	labelAgent        = "wherry.io/agent"
 	labelRun          = "wherry.io/run"
 	annotationAttempt = "wherry.io/attempt"
@@ -309,7 +309,7 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 		groups = append(groups, id)
 	}
 	client = rest.CopyConfig(client)
-	client.WarningHandler = warnings{logger: logger, adapter: name}
+	client.WarningHandler = warnings{logger: logger, profile: name}
 	httpClient, err := rest.HTTPClientFor(client)
 	if err != nil {
 		return nil, err
@@ -339,11 +339,11 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 // warnings logs the API server's warnings, which client-go would otherwise write to stderr.
 type warnings struct {
 	logger  hclog.Logger
-	adapter string
+	profile string
 }
 
 func (w warnings) HandleWarningHeader(_ int, _ string, text string) {
-	w.logger.Warn("kubernetes warning", "adapter", w.adapter, "warning", text)
+	w.logger.Warn("kubernetes warning", "profile", w.profile, "warning", text)
 }
 
 // remote execs through the API server, over WebSocket or else SPDY.
@@ -452,7 +452,7 @@ func secretData(run wherry.Run) (map[string][]byte, error) {
 
 func (adapter *Adapter) labels(run wherry.Run) map[string]string {
 	return map[string]string{
-		labelPool: adapter.pool, labelAdapter: run.Adapter, labelAgent: run.Agent, labelRun: run.ID,
+		labelPool: adapter.pool, labelProfile: run.Profile, labelAgent: run.Agent, labelRun: run.ID,
 	}
 }
 
@@ -681,7 +681,7 @@ func (adapter *Adapter) deliver(ctx context.Context, name string, fetches []wher
 			var exit *exitError
 			var fetchErr *fetchError
 			if errors.As(err, &exit) || errors.As(err, &fetchErr) {
-				adapter.logger.Warn("input not fetched", "adapter", adapter.name, "pod", name, "reason", err.Error())
+				adapter.logger.Warn("input not fetched", "profile", adapter.name, "pod", name, "reason", err.Error())
 			}
 			if err := adapter.exec.exec(ctx, name, "inputs", command("inputs", "fail", fetch.Name), nil, io.Discard); err != nil {
 				return adapter.failed("exec inputs fail", err)
@@ -922,7 +922,7 @@ func (adapter *Adapter) Lookup(ctx context.Context, runID string) (wherry.Job, e
 	}
 	// A pod created without the annotation reads as attempt 0.
 	attempt, _ := strconv.ParseInt(pod.Annotations[annotationAttempt], 10, 64)
-	return wherry.Job{State: state, Handle: handle, Attempt: attempt, Adapter: pod.Labels[labelAdapter], Agent: pod.Labels[labelAgent]}, nil
+	return wherry.Job{State: state, Handle: handle, Attempt: attempt, Profile: pod.Labels[labelProfile], Agent: pod.Labels[labelAgent]}, nil
 }
 
 // agentPod reports whether pod is this pool's agent pod.
@@ -1094,7 +1094,7 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 	if err := adapter.deletePod(ctx, h.Pod); err != nil {
 		return err
 	}
-	adapter.logger.Warn("agent outlived SIGKILL; pod deleted", "adapter", adapter.name, "pod", h.Pod)
+	adapter.logger.Warn("agent outlived SIGKILL; pod deleted", "profile", adapter.name, "pod", h.Pod)
 	return nil
 }
 
@@ -1321,7 +1321,7 @@ func endOf(pod *corev1.Pod) (bool, time.Time) {
 	return true, at
 }
 
-// Sweep purges this adapter's pods ended for the grace period and deletes the Secrets no live run needs.
+// Sweep purges this profile's pods ended for the grace period and deletes the Secrets no live run needs.
 func (adapter *Adapter) Sweep(ctx context.Context) error {
 	selector := metav1.ListOptions{LabelSelector: labelPool + "=" + adapter.pool}
 	pods, err := adapter.pods().List(ctx, selector)
@@ -1343,7 +1343,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 			continue
 		}
 		expired := time.Since(at) >= sweepGrace
-		if pod.Labels[labelAdapter] != adapter.name {
+		if pod.Labels[labelProfile] != adapter.name {
 			releasable[pod.Name] = expired
 			continue
 		}
@@ -1378,7 +1378,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 				errs = append(errs, err)
 				continue
 			}
-			if secret.Labels[labelAdapter] == adapter.name {
+			if secret.Labels[labelProfile] == adapter.name {
 				deleted++
 			}
 		}
@@ -1425,7 +1425,7 @@ func (adapter *Adapter) failed(op string, err error) error {
 func (adapter *Adapter) handled(op string, err error) {
 	var failure *wherry.Error
 	if errors.As(adapter.failed(op, err), &failure) && failure.Class != "" {
-		adapter.logger.Warn("kubernetes call failed", "adapter", adapter.name, "op", failure.Op, "class", failure.Class)
+		adapter.logger.Warn("kubernetes call failed", "profile", adapter.name, "op", failure.Op, "class", failure.Class)
 	}
 }
 

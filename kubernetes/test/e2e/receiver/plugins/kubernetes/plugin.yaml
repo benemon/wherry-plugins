@@ -1,0 +1,6 @@
+config:
+  namespace: wherry
+  helper_image: wherry-receiver:e2e
+  runtime:
+    user: "1001"
+    resources: {cpu: 100m, memory: 64Mi}

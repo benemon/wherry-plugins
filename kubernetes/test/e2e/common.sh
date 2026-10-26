@@ -6,7 +6,7 @@ e2e=$repo/kubernetes/test/e2e
 work=${E2E_WORK:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/wherry-e2e}
 cluster=wherry-e2e
 namespace=wherry
-host_config=$work/host/config.json
+host_config=$work/host/config.yaml
 export KUBECONFIG=$work/kubeconfig PATH=$work/bin:$PATH
 
 # mask hides a secret in the GitHub Actions log; the steps never print one.

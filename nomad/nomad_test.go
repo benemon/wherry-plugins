@@ -51,16 +51,16 @@ func testConfig(address string) Config {
 	}
 }
 
-// testAdapter is the adapter build names, as testRun's runs do.
-const testAdapter = "container"
+// testProfile is the adapter build names, as testRun's runs do.
+const testProfile = "container"
 
-// build is newAdapter's path to one adapter named testAdapter, from a Config rather than settings.
+// build is newAdapter's path to one adapter named testProfile, from a Config rather than settings.
 func build(config Config, pool, token string) (*Adapter, error) {
 	client, err := newClient(config, token)
 	if err != nil {
 		return nil, err
 	}
-	return New(config, testAdapter, pool, client, hclog.NewNullLogger())
+	return New(config, testProfile, pool, client, hclog.NewNullLogger())
 }
 
 func devAdapter(t *testing.T) (*Adapter, context.Context) {
@@ -81,7 +81,7 @@ func devAdapter(t *testing.T) (*Adapter, context.Context) {
 func testRun(name string) wherry.Run {
 	id := fmt.Sprintf("run-%s-%d", name, time.Now().UnixNano())
 	return wherry.Run{
-		ID: id, Adapter: testAdapter, Agent: "coder", Attempt: 2,
+		ID: id, Profile: testProfile, Agent: "coder", Attempt: 2,
 		Prompt: []byte("hello-prompt"), Credentials: []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("test-credential")}},
 	}
 }
@@ -172,7 +172,7 @@ func TestBuildJobFromRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantMeta := map[string]string{"run_id": run.ID, "attempt": "2", "adapter": "container", "agent": "coder"}
+	wantMeta := map[string]string{"run_id": run.ID, "attempt": "2", "profile": "container", "agent": "coder"}
 	if *job.ID != adapter.jobID(run.ID) || *job.Name != adapter.jobID(run.ID) || *job.Namespace != "default" || *job.Type != api.JobTypeBatch ||
 		*job.NodePool != "default" || !reflect.DeepEqual(job.Datacenters, []string{"dc1"}) || !reflect.DeepEqual(job.Meta, wantMeta) {
 		t.Fatalf("unexpected job identity or placement: %#v", job)
@@ -950,13 +950,13 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 		case "DELETE /v1/job/agent-44575cf5b285-run-urls":
 			_, _ = response.Write([]byte(`{"EvalID":""}`))
 		case "GET /v1/jobs":
-			_, _ = response.Write([]byte(`[{"ID":"agent-44575cf5b285-run-urls","Status":"dead","SubmitTime":0,"Meta":{"adapter":"container","run_id":"r"}}]`))
+			_, _ = response.Write([]byte(`[{"ID":"agent-44575cf5b285-run-urls","Status":"dead","SubmitTime":0,"Meta":{"profile":"container","run_id":"r"}}]`))
 		case "GET /v1/job/agent-44575cf5b285-run-urls":
 			if !registered {
 				http.Error(response, "job not found", http.StatusNotFound)
 				return
 			}
-			_, _ = response.Write([]byte(`{"ID":"agent-44575cf5b285-run-urls","Status":"dead","Stop":false,"Meta":{"adapter":"container","run_id":"r"},"TaskGroups":[{"Tasks":[{"Name":"agent","Driver":"raw_exec"}]}]}`))
+			_, _ = response.Write([]byte(`{"ID":"agent-44575cf5b285-run-urls","Status":"dead","Stop":false,"Meta":{"profile":"container","run_id":"r"},"TaskGroups":[{"Tasks":[{"Name":"agent","Driver":"raw_exec"}]}]}`))
 		case "GET /v1/vars":
 			_, _ = response.Write([]byte(`[{"Path":"nomad/jobs/agent-44575cf5b285-run-urls"},{"Path":"nomad/jobs/agent-44575cf5b285-run-urls/agent"}]`))
 		case "PUT /v1/jobs":
@@ -1548,14 +1548,14 @@ func TestLookupReadsDispatchMetadata(t *testing.T) {
 		"GET /v1/job/agent-44575cf5b285-run-meta/allocations": serve(captured(t, "clean.allocations.json")),
 	})
 	run := testRun("meta")
-	run.ID, run.Attempt, run.Adapter, run.Agent = "run-meta", 3, "container", "coder"
+	run.ID, run.Attempt, run.Profile, run.Agent = "run-meta", 3, "container", "coder"
 	outcome, dispatched, err := adapter.Dispatch(context.Background(), run)
 	if err != nil || outcome != wherry.OutcomeCreated || dispatched.Name != "agent-44575cf5b285-run-meta" {
 		t.Fatalf("dispatch = %v, %q, %v; want created with the job ID as its name", outcome, dispatched.Name, err)
 	}
 	job, err := adapter.Lookup(context.Background(), run.ID)
-	if err != nil || job.State != wherry.JobEnded || job.Attempt != 3 || job.Adapter != "container" || job.Agent != "coder" || job.Handle.Name != "agent-44575cf5b285-run-meta" {
-		t.Fatalf("lookup = %#v, %v; want the ended job named agent-44575cf5b285-run-meta with attempt 3, adapter container, agent coder", job, err)
+	if err != nil || job.State != wherry.JobEnded || job.Attempt != 3 || job.Profile != "container" || job.Agent != "coder" || job.Handle.Name != "agent-44575cf5b285-run-meta" {
+		t.Fatalf("lookup = %#v, %v; want the ended job named agent-44575cf5b285-run-meta with attempt 3, profile container, agent coder", job, err)
 	}
 }
 
@@ -1575,7 +1575,7 @@ func TestLookupMapsCapturedAllocations(t *testing.T) {
 				"GET /v1/job/" + id + "/allocations": serve(captured(t, test.capture+".allocations.json")),
 			})
 			job, err := adapter.Lookup(context.Background(), runID)
-			if err != nil || job.State != test.want || job.Attempt != 1 || job.Adapter != "container" || job.Agent != "coder" {
+			if err != nil || job.State != test.want || job.Attempt != 1 || job.Profile != "container" || job.Agent != "coder" {
 				t.Fatalf("lookup = %#v, %v; want state %v from the capture's metadata", job, err, test.want)
 			}
 			if h := decoded(t, job.Handle); h.Job != id || h.Alloc == "" {
@@ -1634,7 +1634,7 @@ func TestSweepPurgesJobsDeadPastTheGrace(t *testing.T) {
 	old, recent := time.Now().Add(-2*sweepGrace).UnixNano(), time.Now().UnixNano()
 	const mine, otherPool = poolPrefix + "old", "agent-8934303dc131-old" // pool-a's digest
 	// Every agent job carries run_id meta; a job under the prefix without it is not the adapter's.
-	jobs := fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"old"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"recent"}},{"ID":%q,"Status":"running","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"live"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"old"}}]`,
+	jobs := fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"profile":"container","run_id":"old"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"profile":"container","run_id":"recent"}},{"ID":%q,"Status":"running","SubmitTime":%d,"Meta":{"profile":"container","run_id":"live"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"profile":"container"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"profile":"container","run_id":"old"}}]`,
 		mine, old, poolPrefix+"recent", old, poolPrefix+"live", old, poolPrefix+"other", old, otherPool, old)
 	routes := map[string]http.HandlerFunc{
 		// The server ignores the prefix query, so the adapter's own pool filter is what is tested.
@@ -2308,7 +2308,7 @@ func TestSweepReportsDeletionsAndPendingJobs(t *testing.T) {
 	old, recent := time.Now().Add(-2*sweepGrace).UnixNano(), time.Now().UnixNano()
 	const dead, gone = poolPrefix + "old", poolPrefix + "gone"
 	routes := map[string]http.HandlerFunc{
-		"GET /v1/jobs":                                     serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"r"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"r"}}]`, dead, old, poolPrefix+"recent", recent)),
+		"GET /v1/jobs":                                     serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"profile":"container","run_id":"r"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"profile":"container","run_id":"r"}}]`, dead, old, poolPrefix+"recent", recent)),
 		"GET /v1/job/" + dead + "/allocations":             serve([]byte(`[]`)),
 		"GET /v1/job/" + poolPrefix + "recent/allocations": serve([]byte(`[]`)),
 		"DELETE /v1/job/" + dead:                           serve([]byte(`{"EvalID":""}`)),
@@ -2370,18 +2370,18 @@ func TestJobEnvCarriesTheModelOnlyWhenSet(t *testing.T) {
 	}
 }
 
-// Every adapter of a pool lists the pool's jobs; each counts and sweeps only the jobs its meta names.
-func TestSweepCountsOnlyThisAdaptersJobs(t *testing.T) {
+// Every profile of a pool lists the pool's jobs; each counts and sweeps only the jobs its meta names.
+func TestSweepCountsOnlyThisProfilesJobs(t *testing.T) {
 	old, recent := time.Now().Add(-2*sweepGrace).UnixNano(), time.Now().UnixNano()
 	const waiting, expired = poolPrefix + "waiting", poolPrefix + "expired"
 	routes := map[string]http.HandlerFunc{
-		"GET /v1/jobs": serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"r"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"r"}}]`,
+		"GET /v1/jobs": serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"profile":"container","run_id":"r"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"profile":"container","run_id":"r"}}]`,
 			waiting, recent, expired, old)),
 		"GET /v1/job/" + waiting + "/allocations": serve([]byte(`[]`)),
 		"GET /v1/job/" + expired + "/allocations": serve([]byte(`[]`)),
 		"DELETE /v1/job/" + expired:               serve([]byte(`{"EvalID":""}`)),
 		"GET /v1/vars":                            serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d}]`, waiting, old)),
-		"GET /v1/job/" + waiting:                  serve([]byte(`{"ID":"` + waiting + `","Status":"dead","Stop":false,"Meta":{"adapter":"container","run_id":"r"}}`)),
+		"GET /v1/job/" + waiting:                  serve([]byte(`{"ID":"` + waiting + `","Status":"dead","Stop":false,"Meta":{"profile":"container","run_id":"r"}}`)),
 	}
 	for _, path := range []string{waiting, expired, expired + "/agent"} {
 		routes["DELETE /v1/var/nomad/jobs/"+path] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
@@ -2402,6 +2402,33 @@ func TestSweepCountsOnlyThisAdaptersJobs(t *testing.T) {
 	}
 	if deleted := deletes(requestsOfB()); len(deleted) != 0 {
 		t.Fatalf("host's sweep deleted %v of container's jobs", deleted)
+	}
+}
+
+// A job is this profile's by its profile meta alone; a job whose meta names it under any other key is another's.
+func TestSweepOwnsAJobByItsProfileMetaAlone(t *testing.T) {
+	old := time.Now().Add(-2 * sweepGrace).UnixNano()
+	const own, other = poolPrefix + "own", poolPrefix + "other"
+	routes := map[string]http.HandlerFunc{
+		"GET /v1/jobs": serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"profile":"container","run_id":"r"}},{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"container","run_id":"r"}}]`,
+			own, old, other, old)),
+		"GET /v1/job/" + own + "/allocations":   serve([]byte(`[]`)),
+		"GET /v1/job/" + other + "/allocations": serve([]byte(`[]`)),
+		"DELETE /v1/job/" + own:                 serve([]byte(`{"EvalID":""}`)),
+		"GET /v1/vars":                          serve([]byte(`[]`)),
+	}
+	for _, path := range []string{own, own + "/agent"} {
+		routes["DELETE /v1/var/nomad/jobs/"+path] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
+	}
+	adapter, requests := nomadServer(t, routes)
+	if err := adapter.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if deleted := deletes(requests()); !slices.Contains(deleted, "DELETE /v1/job/"+own) || slices.Contains(deleted, "DELETE /v1/job/"+other) {
+		t.Fatalf("deletes %v; want the job whose profile meta is container purged and the other kept", deleted)
+	}
+	if got := samples(t, adapter)["wherry_adapter_sweep_deletions_total/job"].Value; got != 1 {
+		t.Fatalf("job deletions %v; want 1", got)
 	}
 }
 
@@ -2438,17 +2465,17 @@ func TestHandledPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
 	}
 }
 
-// The variables of another adapter's job dead for the grace period, such as one whose adapter has left the receiver's
-// configuration, hold its prompt and credentials, so any adapter's sweep deletes them; the job and its count stay its
-// adapter's.
-func TestSweepDeletesVariablesOfAnotherAdaptersExpiredJob(t *testing.T) {
+// The variables of another profile's job dead for the grace period, such as one whose profile has left the receiver's
+// configuration, hold its prompt and credentials, so any profile's sweep deletes them; the job and its count stay its
+// profile's.
+func TestSweepDeletesVariablesOfAnotherProfilesExpiredJob(t *testing.T) {
 	old := time.Now().Add(-2 * sweepGrace).UnixNano()
 	const expired = poolPrefix + "removed"
 	routes := map[string]http.HandlerFunc{
-		"GET /v1/jobs": serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"adapter":"removed","run_id":"r"}}]`, expired, old)),
+		"GET /v1/jobs": serve(fmt.Appendf(nil, `[{"ID":%q,"Status":"dead","SubmitTime":%d,"Meta":{"profile":"removed","run_id":"r"}}]`, expired, old)),
 		"GET /v1/job/" + expired + "/allocations": serve([]byte(`[]`)),
 		"GET /v1/vars":           serve(fmt.Appendf(nil, `[{"Path":"nomad/jobs/%s","ModifyTime":%d},{"Path":"nomad/jobs/%s/agent","ModifyTime":%d}]`, expired, old, expired, old)),
-		"GET /v1/job/" + expired: serve([]byte(`{"ID":"` + expired + `","Status":"dead","Stop":false,"Meta":{"adapter":"removed","run_id":"r"}}`)),
+		"GET /v1/job/" + expired: serve([]byte(`{"ID":"` + expired + `","Status":"dead","Stop":false,"Meta":{"profile":"removed","run_id":"r"}}`)),
 	}
 	for _, path := range []string{expired, expired + "/agent"} {
 		routes["DELETE /v1/var/nomad/jobs/"+path] = func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) }
@@ -2461,7 +2488,7 @@ func TestSweepDeletesVariablesOfAnotherAdaptersExpiredJob(t *testing.T) {
 		t.Fatalf("deletes %v, want the expired job's variables and not the job", got)
 	}
 	if got := samples(t, adapter); got["wherry_adapter_cleanup_pending/"].Value != 0 || got["wherry_adapter_sweep_deletions_total/job"].Value != 0 || got["wherry_adapter_sweep_deletions_total/variable"].Value != 0 {
-		t.Fatalf("samples %+v; want nothing counted for another adapter's job", got)
+		t.Fatalf("samples %+v; want nothing counted for another profile's job", got)
 	}
 }
 
