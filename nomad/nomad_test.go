@@ -51,7 +51,7 @@ func testConfig(address string) Config {
 	}
 }
 
-// testProfile is the adapter build names, as testRun's runs do.
+// testProfile is the plugin profile build names, as testRun's runs do.
 const testProfile = "container"
 
 // build is newAdapter's path to one adapter named testProfile, from a Config rather than settings.

@@ -52,25 +52,6 @@ func TestFactoryDecodesStrictly(t *testing.T) {
 	}
 }
 
-// merge returns base with over merged onto it as wherry merges a plugin profile's config onto its plugin's: maps merge
-// recursively, and over wins on every other key.
-func merge(base, over map[string]any) map[string]any {
-	merged := make(map[string]any, len(base)+len(over))
-	for key, value := range base {
-		merged[key] = value
-	}
-	for key, value := range over {
-		inherited, inheritedMap := merged[key].(map[string]any)
-		overriding, overridingMap := value.(map[string]any)
-		if inheritedMap && overridingMap {
-			merged[key] = merge(inherited, overriding)
-			continue
-		}
-		merged[key] = value
-	}
-	return merged
-}
-
 // TestReadmeReceiverConfigures configures each plugin profile of the README's receiver configuration as the receiver
 // does, with the plugin's config merged under the profile's and the credential key resolved and removed.
 func TestReadmeReceiverConfigures(t *testing.T) {
@@ -138,6 +119,25 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 			t.Fatalf("profile %s: %v", profile.Name, err)
 		}
 	}
+}
+
+// merge returns base with over merged onto it as wherry merges a plugin profile's config onto its plugin's: maps merge
+// recursively, and over wins on every other key.
+func merge(base, over map[string]any) map[string]any {
+	merged := make(map[string]any, len(base)+len(over))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range over {
+		inherited, inheritedMap := merged[key].(map[string]any)
+		overriding, overridingMap := value.(map[string]any)
+		if inheritedMap && overridingMap {
+			merged[key] = merge(inherited, overriding)
+			continue
+		}
+		merged[key] = value
+	}
+	return merged
 }
 
 func TestFactoryGivesTheAdapterServesLogger(t *testing.T) {

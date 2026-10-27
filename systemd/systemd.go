@@ -115,7 +115,7 @@ type manager interface {
 	Connected() bool
 }
 
-// Config is the adapter's section of the receiver configuration.
+// Config is the plugin's config with the plugin profile's merged onto it and its credential key removed.
 type Config struct {
 	Runtime Runtime `json:"runtime"`
 }
@@ -223,7 +223,7 @@ func validID(value string) bool {
 	return idNumber.MatchString(value) && err == nil
 }
 
-// New builds the adapter named name for a pool's runs, after checking the host it runs on.
+// New builds the adapter for the plugin profile name, for a pool's runs, after checking the host it runs on.
 func New(config Config, name, pool string, logger hclog.Logger) (*Adapter, error) {
 	command := config.Runtime.Command
 	switch {
