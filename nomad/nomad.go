@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/api"
 )
@@ -49,7 +49,7 @@ const (
 const inputsSuffix = "/" + taskName
 
 // credentialItem is the run variable's item holding the value of a credential, keyed by its target.
-func credentialItem(secret wherry.Secret) string {
+func credentialItem(secret pluginsdk.Secret) string {
 	if secret.Env != "" {
 		return "env/" + secret.Env
 	}
@@ -62,13 +62,13 @@ type Config struct {
 	CAFile    string  `json:"ca_file"`
 	Namespace string  `json:"namespace"`
 	Runtime   Runtime `json:"runtime"`
-	// NodePool and Datacenters bound where Nomad may place the adapter's
+	// NodePool and Datacenters bound where Nomad may place the profile's
 	// jobs; unset, Nomad's defaults apply.
 	NodePool    string   `json:"node_pool,omitzero"`
 	Datacenters []string `json:"datacenters,omitzero"`
 }
 
-// Runtime defines the agent task the adapter launches.
+// Runtime defines the agent task the plugin launches.
 type Runtime struct {
 	Driver              string            `json:"driver"`
 	Config              map[string]any    `json:"config"`
@@ -85,8 +85,8 @@ type Resources struct {
 	MemoryMB *int `json:"memory_mb"`
 }
 
-// Adapter registers per-run agent jobs in one namespace.
-type Adapter struct {
+// Nomad registers per-run agent jobs in one namespace.
+type Nomad struct {
 	// name is the profile's name, which its jobs' profile meta records.
 	name        string
 	client      *api.Client
@@ -96,7 +96,7 @@ type Adapter struct {
 	datacenters []string
 	// uid and gid own the task's credential files when the runtime's user is numeric.
 	uid, gid *int
-	// prefix starts every job ID of the adapter's pool; agentJob matches those IDs and runVariable the variables of those
+	// prefix starts every job ID of the profile's pool; agentJob matches those IDs and runVariable the variables of those
 	// jobs. A job is an agent job only with run_id meta, since a run ID is any DNS label.
 	prefix      string
 	agentJob    *regexp.Regexp
@@ -106,13 +106,13 @@ type Adapter struct {
 }
 
 // metrics holds the values Metrics reports: API errors by class, sweep deletions by kind, the dead jobs the latest sweep
-// left, and placement latency over wherry.PlacementBuckets.
+// left, and placement latency over pluginsdk.PlacementBuckets.
 type metrics struct {
 	mu        sync.Mutex
 	errors    map[string]float64
 	deletions map[string]float64
 	pending   float64
-	placement wherry.Histogram
+	placement pluginsdk.Histogram
 }
 
 // inlineLimit is the inline input bytes Dispatch accepts: maxVariable holds the inputs' names and base64 values, so
@@ -120,7 +120,7 @@ type metrics struct {
 const inlineLimit = maxVariable*3/4 - 4<<10
 
 // InlineLimit reports inlineLimit.
-func (adapter *Adapter) InlineLimit() int64 { return inlineLimit }
+func (profile *Nomad) InlineLimit() int64 { return inlineLimit }
 
 // defaultCPU and defaultMemoryMB match the Kubernetes plugin's defaults: 2 GiB, and about half a core of a 2 GHz node.
 const (
@@ -152,8 +152,8 @@ func newClient(config Config, token string) (*api.Client, error) {
 	return api.NewClient(apiConfig)
 }
 
-// New builds the adapter for the plugin profile name, for a pool's jobs on client.
-func New(config Config, name, pool string, client *api.Client, logger hclog.Logger) (*Adapter, error) {
+// New builds the plugin profile name, for a pool's jobs on client.
+func New(config Config, name, pool string, client *api.Client, logger hclog.Logger) (*Nomad, error) {
 	for variable := range config.Runtime.Env {
 		if !envName.MatchString(variable) {
 			return nil, errors.New("runtime env names must be environment variable names")
@@ -211,13 +211,13 @@ func New(config Config, name, pool string, client *api.Client, logger hclog.Logg
 	// 128-character variable path limit.
 	sum := sha256.Sum256([]byte(pool))
 	prefix := jobPrefix + hex.EncodeToString(sum[:])[:12] + "-"
-	return &Adapter{
+	return &Nomad{
 		name: name, client: client, namespace: config.Namespace, runtime: config.Runtime, nodePool: config.NodePool, datacenters: datacenters,
 		uid: uid, gid: gid,
 		prefix:      prefix,
 		agentJob:    regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `.+$`),
 		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+?)(` + regexp.QuoteMeta(inputsSuffix) + `)?$`),
-		metrics:     metrics{errors: map[string]float64{}, deletions: map[string]float64{}, placement: wherry.Histogram{Buckets: make([]uint64, len(wherry.PlacementBuckets))}},
+		metrics:     metrics{errors: map[string]float64{}, deletions: map[string]float64{}, placement: pluginsdk.Histogram{Buckets: make([]uint64, len(pluginsdk.PlacementBuckets))}},
 		logger:      logger,
 	}, nil
 }
@@ -226,35 +226,35 @@ func New(config Config, name, pool string, client *api.Client, logger hclog.Logg
 var isolated = []string{"docker", "exec", "java", "podman"}
 
 // Directories reports /local and /secrets paths for a driver that isolates the task's filesystem. Any other driver's
-// task sees host paths that depend on its allocation, so the adapter reports Nomad's variables for them, which the
+// task sees host paths that depend on its allocation, so the plugin reports Nomad's variables for them, which the
 // prompt's template resolves from the task's environment.
-func (adapter *Adapter) Directories() wherry.Directories {
+func (profile *Nomad) Directories() pluginsdk.Directories {
 	task, secrets := "${NOMAD_TASK_DIR}", "${NOMAD_SECRETS_DIR}"
-	if slices.Contains(isolated, adapter.runtime.Driver) {
+	if slices.Contains(isolated, profile.runtime.Driver) {
 		task, secrets = "/local", "/secrets"
 	}
-	return wherry.Directories{Input: task + "/inputs", Output: task + "/outputs", Credentials: secrets + "/credentials"}
+	return pluginsdk.Directories{Input: task + "/inputs", Output: task + "/outputs", Credentials: secrets + "/credentials"}
 }
 
-// Ready reports whether some ready, eligible node in the adapter's node pool
+// Ready reports whether some ready, eligible node in the profile's node pool
 // and datacenters has the runtime's driver healthy.
-func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
-	nodes, _, err := adapter.client.Nodes().List((&api.QueryOptions{}).WithContext(ctx))
+func (profile *Nomad) Ready(ctx context.Context) (bool, error) {
+	nodes, _, err := profile.client.Nodes().List((&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return false, adapter.failed("list nodes", err)
+		return false, profile.failed("list nodes", err)
 	}
 	for _, node := range nodes {
 		if node.Status != api.NodeStatusReady || node.SchedulingEligibility != api.NodeSchedulingEligible {
 			continue
 		}
 		// A job without a node pool lands in Nomad's default pool.
-		if pool := cmp.Or(adapter.nodePool, "default"); node.NodePool != pool {
+		if pool := cmp.Or(profile.nodePool, "default"); node.NodePool != pool {
 			continue
 		}
-		if !slices.Contains(adapter.datacenters, "*") && !slices.Contains(adapter.datacenters, node.Datacenter) {
+		if !slices.Contains(profile.datacenters, "*") && !slices.Contains(profile.datacenters, node.Datacenter) {
 			continue
 		}
-		if info := node.Drivers[adapter.runtime.Driver]; info != nil && info.Detected && info.Healthy {
+		if info := node.Drivers[profile.runtime.Driver]; info != nil && info.Detected && info.Healthy {
 			return true, nil
 		}
 	}
@@ -264,18 +264,18 @@ func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 // Dispatch starts one run idempotently and returns once its task has started or ended. It removes the
 // run's material only when Info confirms that no job exists. Inputs and task credentials travel base64-encoded,
 // which the templates decode, so binary files arrive intact.
-func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Outcome, wherry.Handle, error) {
+func (profile *Nomad) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
 	began := time.Now()
-	path := adapter.variablePath(run.ID)
-	job, err := adapter.buildJob(run, path)
+	path := profile.variablePath(run.ID)
+	job, err := profile.buildJob(run, path)
 	if err != nil {
-		return wherry.OutcomeNothingCreated, wherry.Handle{}, err
+		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, err
 	}
 	inputs, size := map[string]string{}, 0
 	for _, input := range run.Inputs {
 		inputs[input.Name] = base64.StdEncoding.EncodeToString(input.Data)
 		if size += len(input.Name) + len(inputs[input.Name]); size > maxVariable {
-			return wherry.OutcomeNothingCreated, wherry.Handle{}, &wherry.InputTooLargeError{Name: input.Name}
+			return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, &pluginsdk.InputTooLargeError{Name: input.Name}
 		}
 	}
 	jobID := *job.ID
@@ -283,72 +283,72 @@ func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Ou
 	for _, secret := range run.Credentials {
 		items[credentialItem(secret)] = base64.StdEncoding.EncodeToString(secret.Value)
 	}
-	variable := &api.Variable{Namespace: adapter.namespace, Path: path, Items: items}
-	if _, _, err := adapter.client.Variables().Update(variable, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-		return adapter.notStarted(ctx, run, adapter.failed("write variable "+path, err))
+	variable := &api.Variable{Namespace: profile.namespace, Path: path, Items: items}
+	if _, _, err := profile.client.Variables().Update(variable, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+		return profile.notStarted(ctx, run, profile.failed("write variable "+path, err))
 	}
 	if len(inputs) > 0 {
 		inputsPath := path + inputsSuffix
-		if _, _, err := adapter.client.Variables().Update(&api.Variable{Namespace: adapter.namespace, Path: inputsPath, Items: inputs}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-			return adapter.notStarted(ctx, run, adapter.failed("write variable "+inputsPath, err))
+		if _, _, err := profile.client.Variables().Update(&api.Variable{Namespace: profile.namespace, Path: inputsPath, Items: inputs}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+			return profile.notStarted(ctx, run, profile.failed("write variable "+inputsPath, err))
 		}
 	}
 	registered := false
-	if _, _, err := adapter.client.Jobs().Info(jobID, (&api.QueryOptions{}).WithContext(ctx)); err != nil {
+	if _, _, err := profile.client.Jobs().Info(jobID, (&api.QueryOptions{}).WithContext(ctx)); err != nil {
 		if !notFound(err) {
-			return wherry.OutcomeUnknown, wherry.Handle{}, adapter.failed("read job", err)
+			return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, profile.failed("read job", err)
 		}
-		if _, _, err := adapter.client.Jobs().RegisterOpts(job, &api.RegisterOptions{EnforceIndex: true, ModifyIndex: 0}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
-			return adapter.notStarted(ctx, run, adapter.failed("register job "+jobID, err))
+		if _, _, err := profile.client.Jobs().RegisterOpts(job, &api.RegisterOptions{EnforceIndex: true, ModifyIndex: 0}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+			return profile.notStarted(ctx, run, profile.failed("register job "+jobID, err))
 		}
 		registered = true
 	}
-	handle, state, err := adapter.wait(ctx, jobID, job.TaskGroups[0].Tasks[0].Driver)
+	handle, state, err := profile.wait(ctx, jobID, job.TaskGroups[0].Tasks[0].Driver)
 	if err != nil {
-		return wherry.OutcomeUnknown, wherry.Handle{}, err
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, err
 	}
 	// Placement runs from this dispatch only for a job it registered, to when wait sees the agent task started.
-	if registered && state != wherry.JobNeverStarted {
-		adapter.metrics.placed(time.Since(began).Seconds())
+	if registered && state != pluginsdk.JobNeverStarted {
+		profile.metrics.placed(time.Since(began).Seconds())
 	}
-	return wherry.OutcomeCreated, handle, nil
+	return pluginsdk.OutcomeCreated, handle, nil
 }
 
 // notStarted returns OutcomeNothingCreated, with the turn's material released, when Info finds no job;
 // otherwise OutcomeUnknown with cause and everything left in place. A failed release is an error, which
 // the core resolves with Lookup.
-func (adapter *Adapter) notStarted(ctx context.Context, run wherry.Run, cause error) (wherry.Outcome, wherry.Handle, error) {
-	if _, _, err := adapter.client.Jobs().Info(adapter.jobID(run.ID), (&api.QueryOptions{}).WithContext(ctx)); !notFound(err) {
-		adapter.handled("read job", err)
-		return wherry.OutcomeUnknown, wherry.Handle{}, cause
+func (profile *Nomad) notStarted(ctx context.Context, run pluginsdk.Run, cause error) (pluginsdk.Outcome, pluginsdk.Handle, error) {
+	if _, _, err := profile.client.Jobs().Info(profile.jobID(run.ID), (&api.QueryOptions{}).WithContext(ctx)); !notFound(err) {
+		profile.handled("read job", err)
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, cause
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
 	defer cancel()
-	return wherry.OutcomeNothingCreated, wherry.Handle{}, adapter.Release(cleanupCtx, run.ID)
+	return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, profile.Release(cleanupCtx, run.ID)
 }
 
 // Lookup finds a run's existing job and waits for it as Dispatch does.
-func (adapter *Adapter) Lookup(ctx context.Context, runID string) (wherry.Job, error) {
-	job, _, err := adapter.client.Jobs().Info(adapter.jobID(runID), (&api.QueryOptions{}).WithContext(ctx))
+func (profile *Nomad) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
+	job, _, err := profile.client.Jobs().Info(profile.jobID(runID), (&api.QueryOptions{}).WithContext(ctx))
 	if notFound(err) {
-		return wherry.Job{}, nil
+		return pluginsdk.Job{}, nil
 	}
 	if err != nil {
-		return wherry.Job{}, adapter.failed("read job", err)
+		return pluginsdk.Job{}, profile.failed("read job", err)
 	}
 	if len(job.TaskGroups) != 1 || len(job.TaskGroups[0].Tasks) != 1 || job.TaskGroups[0].Tasks[0].Name != taskName {
-		return wherry.Job{}, errors.New("existing job is not an agent job")
+		return pluginsdk.Job{}, errors.New("existing job is not an agent job")
 	}
-	handle, state, err := adapter.wait(ctx, *job.ID, job.TaskGroups[0].Tasks[0].Driver)
+	handle, state, err := profile.wait(ctx, *job.ID, job.TaskGroups[0].Tasks[0].Driver)
 	if err != nil {
-		return wherry.Job{}, err
+		return pluginsdk.Job{}, err
 	}
 	// A job registered without the key reads as attempt 0.
 	attempt, _ := strconv.ParseInt(job.Meta["attempt"], 10, 64)
-	return wherry.Job{State: state, Handle: handle, Attempt: attempt, Profile: job.Meta["profile"], Agent: job.Meta["agent"]}, nil
+	return pluginsdk.Job{State: state, Handle: handle, Attempt: attempt, Profile: job.Meta["profile"], Agent: job.Meta["agent"]}, nil
 }
 
-// handle is the version 1 encoding of wherry.Handle.Data.
+// handle is the version 1 encoding of pluginsdk.Handle.Data.
 type handle struct {
 	V      int    `json:"v"`
 	Job    string `json:"job"`
@@ -356,7 +356,7 @@ type handle struct {
 	Format string `json:"format"`
 }
 
-func decodeHandle(encoded wherry.Handle) (handle, error) {
+func decodeHandle(encoded pluginsdk.Handle) (handle, error) {
 	var decoded handle
 	if err := json.Unmarshal(encoded.Data, &decoded); err != nil {
 		return handle{}, err
@@ -368,49 +368,49 @@ func decodeHandle(encoded wherry.Handle) (handle, error) {
 }
 
 // wait returns once the job's agent task has started or ended; a wait cut short deregisters the job.
-func (adapter *Adapter) wait(ctx context.Context, jobID, driver string) (wherry.Handle, wherry.JobState, error) {
+func (profile *Nomad) wait(ctx context.Context, jobID, driver string) (pluginsdk.Handle, pluginsdk.JobState, error) {
 	format := ""
 	if driver == "podman" {
 		format = formatCRI
 	}
 	for {
-		allocs, _, err := adapter.client.Jobs().Allocations(jobID, false, (&api.QueryOptions{}).WithContext(ctx))
+		allocs, _, err := profile.client.Jobs().Allocations(jobID, false, (&api.QueryOptions{}).WithContext(ctx))
 		if err != nil {
 			if ctx.Err() != nil {
-				return wherry.Handle{}, 0, adapter.deregisterTimedOut(ctx, jobID)
+				return pluginsdk.Handle{}, 0, profile.deregisterTimedOut(ctx, jobID)
 			}
-			return wherry.Handle{}, 0, adapter.failed("list allocations", err)
+			return pluginsdk.Handle{}, 0, profile.failed("list allocations", err)
 		}
 		alloc := current(allocs)
 		// The logs API answers 404 until the task has started.
 		if alloc != nil && (terminal(alloc.ClientStatus) || started(alloc.TaskStates[taskName])) {
 			data, _ := json.Marshal(handle{V: 1, Job: jobID, Alloc: alloc.ID, Format: format}) // strings always encode
-			return wherry.Handle{Data: data, Name: jobID}, jobState(alloc), nil
+			return pluginsdk.Handle{Data: data, Name: jobID}, jobState(alloc), nil
 		}
 		select {
 		case <-ctx.Done():
-			return wherry.Handle{}, 0, adapter.deregisterTimedOut(ctx, jobID)
+			return pluginsdk.Handle{}, 0, profile.deregisterTimedOut(ctx, jobID)
 		case <-time.After(2 * time.Second):
 		}
 	}
 }
 
 // jobState keys never-started on a terminal allocation whose agent task has no Started event.
-func jobState(alloc *api.AllocationListStub) wherry.JobState {
+func jobState(alloc *api.AllocationListStub) pluginsdk.JobState {
 	switch {
 	case !terminal(alloc.ClientStatus):
-		return wherry.JobRunning
+		return pluginsdk.JobRunning
 	case started(alloc.TaskStates[taskName]):
-		return wherry.JobEnded
+		return pluginsdk.JobEnded
 	}
-	return wherry.JobNeverStarted
+	return pluginsdk.JobNeverStarted
 }
 
 // buildJob builds the run's batch job, whose templates read the run's material from the variables at path.
-func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) {
-	runtime := adapter.runtime
-	jobID := adapter.jobID(run.ID)
-	env := wherry.AgentEnv(runtime.Env)
+func (profile *Nomad) buildJob(run pluginsdk.Run, path string) (*api.Job, error) {
+	runtime := profile.runtime
+	jobID := profile.jobID(run.ID)
+	env := pluginsdk.AgentEnv(runtime.Env)
 	env["HOME"] = "${NOMAD_TASK_DIR}"
 	env["WHERRY_INPUT_DIR"] = "${NOMAD_TASK_DIR}/inputs"
 	env["WHERRY_OUTPUT_DIR"] = "${NOMAD_TASK_DIR}/outputs"
@@ -453,8 +453,8 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 			EmbeddedTmpl: new(`{{ with nomadVar "` + path + `" }}{{ (index . "` + credentialItem(secret) + `").Value | base64Decode }}{{ end }}`),
 			DestPath:     new("${NOMAD_SECRETS_DIR}/credentials/" + secret.File), ChangeMode: new("noop"),
 		}
-		if adapter.uid != nil {
-			template.Uid, template.Gid, template.Perms = adapter.uid, adapter.gid, new("0600")
+		if profile.uid != nil {
+			template.Uid, template.Gid, template.Perms = profile.uid, profile.gid, new("0600")
 		}
 		templates = append(templates, template)
 	}
@@ -479,8 +479,8 @@ func (adapter *Adapter) buildJob(run wherry.Run, path string) (*api.Job, error) 
 		Templates: templates, Artifacts: artifacts,
 	}}
 	return &api.Job{
-		ID: new(jobID), Name: new(jobID), Namespace: new(adapter.namespace), Type: new(api.JobTypeBatch),
-		NodePool: nodePool(adapter.nodePool), Datacenters: adapter.datacenters,
+		ID: new(jobID), Name: new(jobID), Namespace: new(profile.namespace), Type: new(api.JobTypeBatch),
+		NodePool: nodePool(profile.nodePool), Datacenters: profile.datacenters,
 		Meta: map[string]string{
 			"run_id": run.ID, "attempt": strconv.FormatInt(run.Attempt, 10),
 			"profile": run.Profile, "agent": run.Agent,
@@ -501,12 +501,12 @@ func nodePool(name string) *string {
 	return &name
 }
 
-func (adapter *Adapter) jobID(runID string) string {
-	return adapter.prefix + runID
+func (profile *Nomad) jobID(runID string) string {
+	return profile.prefix + runID
 }
 
-func (adapter *Adapter) variablePath(runID string) string {
-	return jobVariablePrefix + adapter.jobID(runID)
+func (profile *Nomad) variablePath(runID string) string {
+	return jobVariablePrefix + profile.jobID(runID)
 }
 
 func notFound(err error) bool {
@@ -514,12 +514,12 @@ func notFound(err error) bool {
 	return errors.As(err, &response) && response.StatusCode() == 404
 }
 
-func (adapter *Adapter) deregisterTimedOut(ctx context.Context, jobID string) error {
+func (profile *Nomad) deregisterTimedOut(ctx context.Context, jobID string) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
 	defer cancel()
-	_, _, err := adapter.client.Jobs().Deregister(jobID, true, (&api.WriteOptions{}).WithContext(cleanupCtx))
+	_, _, err := profile.client.Jobs().Deregister(jobID, true, (&api.WriteOptions{}).WithContext(cleanupCtx))
 	if err != nil {
-		return errors.Join(ctx.Err(), fmt.Errorf("deregister timed-out job: %w", adapter.failed("deregister job", err)))
+		return errors.Join(ctx.Err(), fmt.Errorf("deregister timed-out job: %w", profile.failed("deregister job", err)))
 	}
 	return ctx.Err()
 }
@@ -556,14 +556,14 @@ var failureClasses = map[string]string{
 	api.TaskDriverFailure:          "driver",
 	api.TaskSetupFailure:           "setup",
 	api.TaskFailedValidation:       "validation",
-	api.TaskArtifactDownloadFailed: wherry.ClassFetch,
+	api.TaskArtifactDownloadFailed: pluginsdk.ClassFetch,
 }
 
 // terminalOf reads the agent task's final state; the class is that of its last failure event, and the reason that
 // event's message.
-func terminalOf(alloc *api.Allocation) wherry.Terminal {
+func terminalOf(alloc *api.Allocation) pluginsdk.Terminal {
 	state := alloc.TaskStates[taskName]
-	result := wherry.Terminal{Started: started(state), Node: alloc.NodeName}
+	result := pluginsdk.Terminal{Started: started(state), Node: alloc.NodeName}
 	if state == nil {
 		return result
 	}
@@ -583,14 +583,14 @@ func terminalOf(alloc *api.Allocation) wherry.Terminal {
 }
 
 // Follow streams stdout lines from a byte offset until the task ends, then returns its final state.
-func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, offset int64, lines chan<- wherry.Line) (wherry.Terminal, error) {
+func (profile *Nomad) Follow(ctx context.Context, encoded pluginsdk.Handle, offset int64, lines chan<- pluginsdk.Line) (pluginsdk.Terminal, error) {
 	handle, err := decodeHandle(encoded)
 	if err != nil {
-		return wherry.Terminal{}, err
+		return pluginsdk.Terminal{}, err
 	}
-	alloc, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
+	alloc, _, err := profile.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return wherry.Terminal{}, adapter.failed("read allocation", err)
+		return pluginsdk.Terminal{}, profile.failed("read allocation", err)
 	}
 	// The logs API answers 404 for a task that never started.
 	if alloc.ClientTerminalStatus() && !started(alloc.TaskStates[taskName]) {
@@ -599,7 +599,7 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, offse
 	reader := lineReader{lines: lines, position: offset, cri: handle.Format == formatCRI}
 	streamCtx, stopStream := context.WithCancel(ctx)
 	defer stopStream()
-	frames, errs := adapter.logs(streamCtx, alloc, taskName, true, offset)
+	frames, errs := profile.logs(streamCtx, alloc, taskName, true, offset)
 	// A followed stream can stay open with no frames after the task ends, can close before the task ends,
 	// and can lag a task that ended before it opened; completion is polled instead.
 	poll := time.NewTicker(followPoll)
@@ -607,14 +607,14 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, offse
 	for {
 		select {
 		case <-ctx.Done():
-			return wherry.Terminal{}, ctx.Err()
+			return pluginsdk.Terminal{}, ctx.Err()
 		case err := <-errs:
-			return wherry.Terminal{}, adapter.failed("read logs", logsError(err))
+			return pluginsdk.Terminal{}, profile.failed("read logs", logsError(err))
 		case <-poll.C:
-			if final := adapter.finished(ctx, handle.Alloc); final != nil {
+			if final := profile.finished(ctx, handle.Alloc); final != nil {
 				stopStream()
-				if err := adapter.drain(ctx, final, &reader); err != nil {
-					return wherry.Terminal{}, err
+				if err := profile.drain(ctx, final, &reader); err != nil {
+					return pluginsdk.Terminal{}, err
 				}
 				return terminalOf(final), nil
 			}
@@ -624,7 +624,7 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, offse
 				continue
 			}
 			if err := reader.take(ctx, frame.Data); err != nil {
-				return wherry.Terminal{}, err
+				return pluginsdk.Terminal{}, err
 			}
 		}
 	}
@@ -632,16 +632,16 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, offse
 
 // drain re-reads the finished task's log from the last line boundary to its end;
 // a non-follow read is finite, so nothing written before exit can be missed.
-func (adapter *Adapter) drain(ctx context.Context, alloc *api.Allocation, reader *lineReader) error {
+func (profile *Nomad) drain(ctx context.Context, alloc *api.Allocation, reader *lineReader) error {
 	reader.pending, reader.partial, reader.consumed = nil, nil, 0
-	frames, errs := adapter.logs(ctx, alloc, taskName, false, reader.position)
+	frames, errs := profile.logs(ctx, alloc, taskName, false, reader.position)
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case err := <-errs:
 			if err != nil {
-				return adapter.failed("read logs", logsError(err))
+				return profile.failed("read logs", logsError(err))
 			}
 		case frame, ok := <-frames:
 			if !ok {
@@ -665,15 +665,15 @@ func logsError(err error) error {
 	return errors.New("log stream not decodable")
 }
 
-func (adapter *Adapter) logs(ctx context.Context, alloc *api.Allocation, task string, follow bool, offset int64) (<-chan *api.StreamFrame, <-chan error) {
+func (profile *Nomad) logs(ctx context.Context, alloc *api.Allocation, task string, follow bool, offset int64) (<-chan *api.StreamFrame, <-chan error) {
 	cancel := make(chan struct{})
 	go func() { <-ctx.Done(); close(cancel) }()
-	return adapter.client.AllocFS().Logs(alloc, follow, task, "stdout", api.OriginStart, offset, cancel, (&api.QueryOptions{}).WithContext(ctx))
+	return profile.client.AllocFS().Logs(alloc, follow, task, "stdout", api.OriginStart, offset, cancel, (&api.QueryOptions{}).WithContext(ctx))
 }
 
 // lineReader splits log bytes into lines; position is the offset after the last emitted line.
 type lineReader struct {
-	lines    chan<- wherry.Line
+	lines    chan<- pluginsdk.Line
 	position int64
 	pending  []byte
 	cri      bool
@@ -746,7 +746,7 @@ func (reader *lineReader) emitPartial(ctx context.Context) error {
 }
 
 func (reader *lineReader) emit(ctx context.Context, data []byte, advance int64) error {
-	line := wherry.Line{Offset: reader.position, Next: reader.position + advance, Data: append([]byte(nil), data...)}
+	line := pluginsdk.Line{Offset: reader.position, Next: reader.position + advance, Data: append([]byte(nil), data...)}
 	select {
 	case reader.lines <- line:
 		reader.position = line.Next
@@ -757,10 +757,10 @@ func (reader *lineReader) emit(ctx context.Context, data []byte, advance int64) 
 }
 
 // finished returns the allocation once it is terminal, else nil.
-func (adapter *Adapter) finished(ctx context.Context, allocID string) *api.Allocation {
-	alloc, _, err := adapter.client.Allocations().Info(allocID, (&api.QueryOptions{}).WithContext(ctx))
+func (profile *Nomad) finished(ctx context.Context, allocID string) *api.Allocation {
+	alloc, _, err := profile.client.Allocations().Info(allocID, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil || !alloc.ClientTerminalStatus() {
-		adapter.handled("read allocation", err)
+		profile.handled("read allocation", err)
 		return nil
 	}
 	return alloc
@@ -769,29 +769,29 @@ func (adapter *Adapter) finished(ctx context.Context, allocID string) *api.Alloc
 // Stop sends SIGTERM and stops the job if the task outlives the grace period;
 // stopping a batch allocation instead would migrate it to a replacement.
 // Requires the alloc-lifecycle and submit-job capabilities.
-func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
+func (profile *Nomad) Stop(ctx context.Context, encoded pluginsdk.Handle) error {
 	handle, err := decodeHandle(encoded)
 	if err != nil {
 		return err
 	}
-	alloc, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
+	alloc, _, err := profile.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	// A purged or garbage-collected allocation has stopped.
 	if notFound(err) {
 		return nil
 	}
 	if err != nil {
-		return adapter.failed("read allocation", err)
+		return profile.failed("read allocation", err)
 	}
 	if alloc.ClientTerminalStatus() {
 		return nil
 	}
 	// Nomad refuses to signal a task that has just exited, and the server learns of the exit only when the client
 	// next reports, so a refused signal waits for the allocation like a delivered one.
-	signalErr := adapter.client.Allocations().Signal(alloc, (&api.QueryOptions{}).WithContext(ctx), taskName, "SIGTERM")
+	signalErr := profile.client.Allocations().Signal(alloc, (&api.QueryOptions{}).WithContext(ctx), taskName, "SIGTERM")
 	poll := time.NewTicker(time.Second)
 	defer poll.Stop()
 	for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); {
-		if adapter.finished(ctx, handle.Alloc) != nil {
+		if profile.finished(ctx, handle.Alloc) != nil {
 			return nil
 		}
 		select {
@@ -801,20 +801,20 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 		}
 	}
 	if signalErr != nil {
-		adapter.handled("signal allocation", signalErr)
+		profile.handled("signal allocation", signalErr)
 	}
-	_, _, err = adapter.client.Jobs().Deregister(handle.Job, false, (&api.WriteOptions{}).WithContext(ctx))
-	return adapter.failed("deregister job", err)
+	_, _, err = profile.client.Jobs().Deregister(handle.Job, false, (&api.WriteOptions{}).WithContext(ctx))
+	return profile.failed("deregister job", err)
 }
 
 // Release deletes the run's variables holding the credentials, the prompt and the inputs.
-func (adapter *Adapter) Release(ctx context.Context, runID string) error {
-	return adapter.release(ctx, adapter.jobID(runID))
+func (profile *Nomad) Release(ctx context.Context, runID string) error {
+	return profile.release(ctx, profile.jobID(runID))
 }
 
-func (adapter *Adapter) release(ctx context.Context, jobID string) error {
+func (profile *Nomad) release(ctx context.Context, jobID string) error {
 	path := jobVariablePrefix + jobID
-	return joined([]error{adapter.deleteVariable(ctx, path), adapter.deleteVariable(ctx, path+inputsSuffix)})
+	return joined([]error{profile.deleteVariable(ctx, path), profile.deleteVariable(ctx, path+inputsSuffix)})
 }
 
 // joined returns the one non-nil error in errs as it is, so it reaches the receiver with its op and class, and joins
@@ -830,38 +830,38 @@ func joined(errs []error) error {
 // Collect lists the outputs directory once the allocation is terminal. The listing's modes are lstat's, and the API's
 // stat and read follow links and block on a FIFO, so it reads only listed regular files within the limits, after
 // counting the whole tree.
-func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limits wherry.Limits, outputs chan<- wherry.Output) error {
+func (profile *Nomad) Collect(ctx context.Context, encoded pluginsdk.Handle, limits pluginsdk.Limits, outputs chan<- pluginsdk.Output) error {
 	handle, err := decodeHandle(encoded)
 	if err != nil {
 		return err
 	}
-	alloc, _, err := adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
+	alloc, _, err := profile.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	for err == nil && !alloc.ClientTerminalStatus() {
 		select {
 		case <-ctx.Done():
 			return errors.New("the allocation is still running")
 		case <-time.After(collectPoll):
 		}
-		alloc, _, err = adapter.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
+		alloc, _, err = profile.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	}
 	if err != nil {
-		return adapter.failed("read allocation", err)
+		return profile.failed("read allocation", err)
 	}
 	// A lost allocation's client is gone, and its filesystem with it.
 	if alloc.ClientStatus == api.AllocClientStatusLost {
 		return errors.New("the allocation was lost")
 	}
-	var found []wherry.Output
+	var found []pluginsdk.Output
 	pending, listed := []string{""}, 0
 	for len(pending) > 0 {
 		dir := pending[0]
 		pending = pending[1:]
-		entries, _, err := adapter.client.AllocFS().List(alloc, path.Join(outputsDir, dir), (&api.QueryOptions{}).WithContext(ctx))
+		entries, _, err := profile.client.AllocFS().List(alloc, path.Join(outputsDir, dir), (&api.QueryOptions{}).WithContext(ctx))
 		if notFound(err) && dir == "" {
 			return nil
 		}
 		if err != nil {
-			return adapter.failed("list outputs "+outputsDir, err)
+			return profile.failed("list outputs "+outputsDir, err)
 		}
 		for _, entry := range entries {
 			name, mode := path.Join(dir, entry.Name), fileMode(entry.FileMode)
@@ -872,22 +872,22 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 				pending = append(pending, name)
 				continue
 			}
-			found = append(found, wherry.Output{Name: name, Size: entry.Size, Mode: mode.Type()})
+			found = append(found, pluginsdk.Output{Name: name, Size: entry.Size, Mode: mode.Type()})
 		}
 	}
-	slices.SortFunc(found, func(a, b wherry.Output) int { return strings.Compare(a.Name, b.Name) })
+	slices.SortFunc(found, func(a, b pluginsdk.Output) int { return strings.Compare(a.Name, b.Name) })
 	var total int64
 	for _, output := range found {
 		switch {
 		case output.Mode == 0 && slices.Contains(limits.Stream, output.Name):
 			if output.Size <= limits.StreamBytes {
-				if output.Body, err = adapter.open(ctx, alloc, output.Name, output.Size); err != nil {
+				if output.Body, err = profile.open(ctx, alloc, output.Name, output.Size); err != nil {
 					return err
 				}
 			}
 		case output.Mode == 0 && output.Size <= limits.FileBytes && total+output.Size <= limits.TotalBytes:
 			total += output.Size
-			if output.Data, err = adapter.read(ctx, alloc, output.Name, output.Size); err != nil {
+			if output.Data, err = profile.read(ctx, alloc, output.Name, output.Size); err != nil {
 				return err
 			}
 		}
@@ -905,13 +905,13 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 
 // read reads a listed regular file of size bytes; the API answers some failures with an error text as the body, so a
 // body of any other length fails the read.
-func (adapter *Adapter) read(ctx context.Context, alloc *api.Allocation, name string, size int64) ([]byte, error) {
+func (profile *Nomad) read(ctx context.Context, alloc *api.Allocation, name string, size int64) ([]byte, error) {
 	if size == 0 {
 		return []byte{}, nil
 	}
-	body, err := adapter.client.AllocFS().ReadAt(alloc, path.Join(outputsDir, name), 0, size, (&api.QueryOptions{}).WithContext(ctx))
+	body, err := profile.client.AllocFS().ReadAt(alloc, path.Join(outputsDir, name), 0, size, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return nil, adapter.failed("read output "+outputsDir, err)
+		return nil, profile.failed("read output "+outputsDir, err)
 	}
 	defer body.Close()
 	data, err := io.ReadAll(io.LimitReader(body, size+1))
@@ -925,13 +925,13 @@ func (adapter *Adapter) read(ctx context.Context, alloc *api.Allocation, name st
 }
 
 // open streams the first size bytes of a listed regular file; the receiver of the Output checks the length it reads.
-func (adapter *Adapter) open(ctx context.Context, alloc *api.Allocation, name string, size int64) (io.ReadCloser, error) {
+func (profile *Nomad) open(ctx context.Context, alloc *api.Allocation, name string, size int64) (io.ReadCloser, error) {
 	if size == 0 {
 		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
-	body, err := adapter.client.AllocFS().ReadAt(alloc, path.Join(outputsDir, name), 0, size, (&api.QueryOptions{}).WithContext(ctx))
+	body, err := profile.client.AllocFS().ReadAt(alloc, path.Join(outputsDir, name), 0, size, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return nil, adapter.failed("read output "+outputsDir, err)
+		return nil, profile.failed("read output "+outputsDir, err)
 	}
 	return body, nil
 }
@@ -965,41 +965,41 @@ func fileMode(text string) fs.FileMode {
 }
 
 // Purge deregisters the run's job with purge, then deletes its variables.
-func (adapter *Adapter) Purge(ctx context.Context, runID string) error {
-	return adapter.purge(ctx, adapter.jobID(runID))
+func (profile *Nomad) Purge(ctx context.Context, runID string) error {
+	return profile.purge(ctx, profile.jobID(runID))
 }
 
-func (adapter *Adapter) purge(ctx context.Context, jobID string) error {
-	if _, _, err := adapter.client.Jobs().Deregister(jobID, true, (&api.WriteOptions{}).WithContext(ctx)); err != nil && !notFound(err) {
-		return adapter.failed("purge job", err)
+func (profile *Nomad) purge(ctx context.Context, jobID string) error {
+	if _, _, err := profile.client.Jobs().Deregister(jobID, true, (&api.WriteOptions{}).WithContext(ctx)); err != nil && !notFound(err) {
+		return profile.failed("purge job", err)
 	}
-	return adapter.release(ctx, jobID)
+	return profile.release(ctx, jobID)
 }
 
 // Sweep purges this profile's agent jobs dead for the grace period, and deletes per-run variables whose job is this
 // profile's and has ended or been stopped, is any profile's and dead for the grace period, or never registered. Every
 // profile of the pool shares the job prefix, so a job's profile meta decides whose it is; variables hold the prompt
 // and credentials, so a removed profile's are swept too. Pending jobs and deletions count this profile's jobs only.
-func (adapter *Adapter) Sweep(ctx context.Context) error {
-	jobs, _, err := adapter.client.Jobs().ListOptions(&api.JobListOptions{Fields: &api.JobListFields{Meta: true}}, (&api.QueryOptions{Prefix: adapter.prefix}).WithContext(ctx))
+func (profile *Nomad) Sweep(ctx context.Context) error {
+	jobs, _, err := profile.client.Jobs().ListOptions(&api.JobListOptions{Fields: &api.JobListFields{Meta: true}}, (&api.QueryOptions{Prefix: profile.prefix}).WithContext(ctx))
 	if err != nil {
-		return adapter.failed("list jobs "+adapter.prefix, err)
+		return profile.failed("list jobs "+profile.prefix, err)
 	}
 	var errs []error
 	pending, purged := 0, 0
 	// expired holds other profiles' jobs dead for the grace period.
 	expired := map[string]bool{}
 	for _, job := range jobs {
-		if job.Status != "dead" || !adapter.agentJob.MatchString(job.ID) || job.Meta["run_id"] == "" {
+		if job.Status != "dead" || !profile.agentJob.MatchString(job.ID) || job.Meta["run_id"] == "" {
 			continue
 		}
-		own := job.Meta["profile"] == adapter.name
+		own := job.Meta["profile"] == profile.name
 		if own {
 			pending++
 		}
-		allocs, _, err := adapter.client.Jobs().Allocations(job.ID, true, (&api.QueryOptions{}).WithContext(ctx))
+		allocs, _, err := profile.client.Jobs().Allocations(job.ID, true, (&api.QueryOptions{}).WithContext(ctx))
 		if err != nil {
-			errs = append(errs, adapter.failed("list allocations of "+job.ID, err))
+			errs = append(errs, profile.failed("list allocations of "+job.ID, err))
 			continue
 		}
 		// An adopter may still read a dead job's log, so its age runs from its last allocation change.
@@ -1014,28 +1014,28 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 			expired[job.ID] = true
 			continue
 		}
-		if err := adapter.purge(ctx, job.ID); err != nil {
+		if err := profile.purge(ctx, job.ID); err != nil {
 			errs = append(errs, err)
 			continue
 		}
 		pending--
 		purged++
 	}
-	adapter.metrics.mu.Lock()
-	adapter.metrics.pending = float64(pending)
-	adapter.metrics.deletions["job"] += float64(purged)
-	adapter.metrics.mu.Unlock()
-	prefix := jobVariablePrefix + adapter.prefix
-	variables, _, err := adapter.client.Variables().PrefixList(prefix, (&api.QueryOptions{}).WithContext(ctx))
+	profile.metrics.mu.Lock()
+	profile.metrics.pending = float64(pending)
+	profile.metrics.deletions["job"] += float64(purged)
+	profile.metrics.mu.Unlock()
+	prefix := jobVariablePrefix + profile.prefix
+	variables, _, err := profile.client.Variables().PrefixList(prefix, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
-		return joined(append(errs, adapter.failed("list variables "+prefix, err)))
+		return joined(append(errs, profile.failed("list variables "+prefix, err)))
 	}
 	for _, variable := range variables {
-		match := adapter.runVariable.FindStringSubmatch(variable.Path)
+		match := profile.runVariable.FindStringSubmatch(variable.Path)
 		if match == nil {
 			continue
 		}
-		job, _, err := adapter.client.Jobs().Info(match[1], (&api.QueryOptions{}).WithContext(ctx))
+		job, _, err := profile.client.Jobs().Info(match[1], (&api.QueryOptions{}).WithContext(ctx))
 		own := true
 		switch {
 		case notFound(err):
@@ -1043,9 +1043,9 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 				continue
 			}
 		case err != nil:
-			errs = append(errs, adapter.failed("sweep read job of "+variable.Path, err))
+			errs = append(errs, profile.failed("sweep read job of "+variable.Path, err))
 			continue
-		case job.Meta["profile"] != adapter.name:
+		case job.Meta["profile"] != profile.name:
 			own = false
 			if !expired[match[1]] {
 				continue
@@ -1053,31 +1053,31 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 		case *job.Status != "dead" && !*job.Stop:
 			continue
 		}
-		if err := adapter.deleteVariable(ctx, variable.Path); err != nil {
+		if err := profile.deleteVariable(ctx, variable.Path); err != nil {
 			errs = append(errs, err)
 			continue
 		}
 		if !own {
 			continue
 		}
-		adapter.metrics.mu.Lock()
-		adapter.metrics.deletions["variable"]++
-		adapter.metrics.mu.Unlock()
+		profile.metrics.mu.Lock()
+		profile.metrics.deletions["variable"]++
+		profile.metrics.mu.Unlock()
 	}
 	return joined(errs)
 }
 
-func (adapter *Adapter) deleteVariable(ctx context.Context, path string) error {
-	if _, err := adapter.client.Variables().Delete(path, (&api.WriteOptions{}).WithContext(ctx)); err != nil && !errors.Is(err, api.ErrVariablePathNotFound) && !notFound(err) {
-		return adapter.failed("delete variable "+path, err)
+func (profile *Nomad) deleteVariable(ctx context.Context, path string) error {
+	if _, err := profile.client.Variables().Delete(path, (&api.WriteOptions{}).WithContext(ctx)); err != nil && !errors.Is(err, api.ErrVariablePathNotFound) && !notFound(err) {
+		return profile.failed("delete variable "+path, err)
 	}
 	return nil
 }
 
-// failed counts err, from the Nomad API call op, by its class and returns it as a wherry.Error, which the receiver
+// failed counts err, from the Nomad API call op, by its class and returns it as a pluginsdk.Error, which the receiver
 // logs redacted. A not-found answer, which callers read as absence, and a call its caller cancelled count nothing and
 // have no class.
-func (adapter *Adapter) failed(op string, err error) error {
+func (profile *Nomad) failed(op string, err error) error {
 	var response api.UnexpectedResponseError
 	var network net.Error
 	class := "other"
@@ -1085,7 +1085,7 @@ func (adapter *Adapter) failed(op string, err error) error {
 	case err == nil:
 		return nil
 	case notFound(err) || errors.Is(err, context.Canceled):
-		return &wherry.Error{Op: op, Err: err}
+		return &pluginsdk.Error{Op: op, Err: err}
 	case errors.Is(err, context.DeadlineExceeded):
 		class = "timeout"
 	case errors.As(err, &response):
@@ -1104,25 +1104,25 @@ func (adapter *Adapter) failed(op string, err error) error {
 	case errors.As(err, &network):
 		class = "unavailable"
 	}
-	adapter.metrics.mu.Lock()
-	adapter.metrics.errors[class]++
-	adapter.metrics.mu.Unlock()
-	return &wherry.Error{Op: op, Class: class, Err: err}
+	profile.metrics.mu.Lock()
+	profile.metrics.errors[class]++
+	profile.metrics.mu.Unlock()
+	return &pluginsdk.Error{Op: op, Class: class, Err: err}
 }
 
-// handled counts err as failed does and logs its op and class for an error the adapter handles itself and never
+// handled counts err as failed does and logs its op and class for an error the plugin handles itself and never
 // returns. The line leaves out err's text, which can hold a request URL or a response body.
-func (adapter *Adapter) handled(op string, err error) {
-	var failure *wherry.Error
-	if errors.As(adapter.failed(op, err), &failure) && failure.Class != "" {
-		adapter.logger.Warn("nomad call failed", "profile", adapter.name, "op", failure.Op, "class", failure.Class)
+func (profile *Nomad) handled(op string, err error) {
+	var failure *pluginsdk.Error
+	if errors.As(profile.failed(op, err), &failure) && failure.Class != "" {
+		profile.logger.Warn("nomad call failed", "profile", profile.name, "op", failure.Op, "class", failure.Class)
 	}
 }
 
 func (m *metrics) placed(seconds float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for i, bound := range wherry.PlacementBuckets {
+	for i, bound := range pluginsdk.PlacementBuckets {
 		if seconds <= bound {
 			m.placement.Buckets[i]++
 		}
@@ -1131,22 +1131,22 @@ func (m *metrics) placed(seconds float64) {
 	m.placement.Count++
 }
 
-// Metrics reports the adapter's API errors, sweep deletions, cleanup-pending jobs and placement latency.
-func (adapter *Adapter) Metrics(context.Context) ([]wherry.Sample, error) {
-	m := &adapter.metrics
+// Metrics reports the profile's API errors, sweep deletions, cleanup-pending jobs and placement latency.
+func (profile *Nomad) Metrics(context.Context) ([]pluginsdk.Sample, error) {
+	m := &profile.metrics
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	placement := m.placement
 	placement.Buckets = slices.Clone(placement.Buckets)
-	samples := []wherry.Sample{
-		{Family: "wherry_adapter_cleanup_pending", Kind: wherry.KindGauge, Value: m.pending},
-		{Family: "wherry_adapter_placement_seconds", Kind: wherry.KindHistogram, Histogram: placement},
+	samples := []pluginsdk.Sample{
+		{Family: "wherry_plugin_cleanup_pending", Kind: pluginsdk.KindGauge, Value: m.pending},
+		{Family: "wherry_plugin_placement_seconds", Kind: pluginsdk.KindHistogram, Histogram: placement},
 	}
 	for class, count := range m.errors {
-		samples = append(samples, wherry.Sample{Family: "wherry_adapter_platform_errors_total", Labels: map[string]string{"class": class}, Kind: wherry.KindCounter, Value: count})
+		samples = append(samples, pluginsdk.Sample{Family: "wherry_plugin_platform_errors_total", Labels: map[string]string{"class": class}, Kind: pluginsdk.KindCounter, Value: count})
 	}
 	for kind, count := range m.deletions {
-		samples = append(samples, wherry.Sample{Family: "wherry_adapter_sweep_deletions_total", Labels: map[string]string{"kind": kind}, Kind: wherry.KindCounter, Value: count})
+		samples = append(samples, pluginsdk.Sample{Family: "wherry_plugin_sweep_deletions_total", Labels: map[string]string{"kind": kind}, Kind: pluginsdk.KindCounter, Value: count})
 	}
 	return samples, nil
 }

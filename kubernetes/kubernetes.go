@@ -24,7 +24,7 @@ import (
 	"unicode"
 
 	"github.com/benemon/wherry-plugins/kubernetes/helper"
-	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/hashicorp/go-hclog"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -97,7 +97,7 @@ type Toleration struct {
 	Effect   string `json:"effect"`
 }
 
-// Runtime defines the agent container the adapter launches.
+// Runtime defines the agent container the plugin profile launches.
 type Runtime struct {
 	Image               string            `json:"image"`
 	Command             []string          `json:"command"`
@@ -117,15 +117,15 @@ type Resources struct {
 	EphemeralStorage string `json:"ephemeral_storage"`
 }
 
-// inlineLimit is the inline input bytes the adapter declares: the run's Secret holds them beside the prompt and
+// inlineLimit is the inline input bytes the plugin declares: the run's Secret holds them beside the prompt and
 // credentials within maxSecret, so half of it leaves the rest room. secretData keeps its check for the whole.
 const inlineLimit = maxSecret / 2
 
 // InlineLimit reports inlineLimit.
-func (adapter *Adapter) InlineLimit() int64 { return inlineLimit }
+func (profile *Kubernetes) InlineLimit() int64 { return inlineLimit }
 
-// Adapter runs each run as one pod and one Secret in a namespace.
-type Adapter struct {
+// Kubernetes is one plugin profile: it runs each run as one pod and one Secret in a namespace.
+type Kubernetes struct {
 	name, pool, namespace string
 	helperImage           string
 	runtime               Runtime
@@ -217,8 +217,8 @@ func image(value string) bool {
 	return value != "" && !strings.ContainsFunc(value, unicode.IsSpace)
 }
 
-// New builds the adapter for the plugin profile name, for a pool's runs through client.
-func New(config Config, name, pool string, client *rest.Config, logger hclog.Logger) (*Adapter, error) {
+// New builds the plugin profile name, for a pool's runs through client.
+func New(config Config, name, pool string, client *rest.Config, logger hclog.Logger) (*Kubernetes, error) {
 	switch {
 	case len(validation.IsDNS1123Label(config.Namespace)) > 0:
 		return nil, errors.New("namespace must be a DNS-1123 label")
@@ -322,7 +322,7 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 	if err != nil {
 		return nil, err
 	}
-	return &Adapter{
+	return &Kubernetes{
 		name: name, pool: pool, namespace: config.Namespace, helperImage: config.HelperImage,
 		runtime: config.Runtime, nodeSelector: config.NodeSelector, tolerations: tolerations, resources: resources, workLimit: workLimit,
 		uid: uid, gid: gid, groups: groups,
@@ -391,34 +391,34 @@ func jobName(pool, runID string) string {
 	return fmt.Sprintf("%s%s-%s", jobPrefix, hex.EncodeToString(sum[:])[:12], runID)
 }
 
-func (adapter *Adapter) jobName(runID string) string {
-	return jobName(adapter.pool, runID)
+func (profile *Kubernetes) jobName(runID string) string {
+	return jobName(profile.pool, runID)
 }
 
-func (adapter *Adapter) pods() corev1client.PodInterface {
-	return adapter.core.Pods(adapter.namespace)
+func (profile *Kubernetes) pods() corev1client.PodInterface {
+	return profile.core.Pods(profile.namespace)
 }
 
-func (adapter *Adapter) secrets() corev1client.SecretInterface {
-	return adapter.core.Secrets(adapter.namespace)
+func (profile *Kubernetes) secrets() corev1client.SecretInterface {
+	return profile.core.Secrets(profile.namespace)
 }
 
 // Directories reports the fixed paths of the agent container.
-func (adapter *Adapter) Directories() wherry.Directories {
-	return wherry.Directories{Input: inputPath, Output: outputPath, Credentials: credentialsPath}
+func (profile *Kubernetes) Directories() pluginsdk.Directories {
+	return pluginsdk.Directories{Input: inputPath, Output: outputPath, Credentials: credentialsPath}
 }
 
 // Ready reports whether the namespace exists and is active.
-func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
-	namespace, err := adapter.core.Namespaces().Get(ctx, adapter.namespace, metav1.GetOptions{})
+func (profile *Kubernetes) Ready(ctx context.Context) (bool, error) {
+	namespace, err := profile.core.Namespaces().Get(ctx, profile.namespace, metav1.GetOptions{})
 	if err != nil {
-		return false, adapter.failed("read namespace "+adapter.namespace, err)
+		return false, profile.failed("read namespace "+profile.namespace, err)
 	}
 	return namespace.Status.Phase == corev1.NamespaceActive, nil
 }
 
 // secretKey is the run's Secret key holding a credential; the helper copies credentials.* keys alone into files.
-func secretKey(secret wherry.Secret) string {
+func secretKey(secret pluginsdk.Secret) string {
 	if secret.Env != "" {
 		return "env." + secret.Env
 	}
@@ -426,13 +426,13 @@ func secretKey(secret wherry.Secret) string {
 }
 
 // secretData is a run's Secret data, refused when a key or the values together pass the API server's limits.
-func secretData(run wherry.Run) (map[string][]byte, error) {
+func secretData(run pluginsdk.Run) (map[string][]byte, error) {
 	data := map[string][]byte{"prompt": run.Prompt}
 	size := len(run.Prompt)
 	for _, secret := range run.Credentials {
 		key := secretKey(secret)
 		if len(key) > maxKey {
-			return nil, &wherry.InputTooLargeError{Name: cmp.Or(secret.File, secret.Env)}
+			return nil, &pluginsdk.InputTooLargeError{Name: cmp.Or(secret.File, secret.Env)}
 		}
 		data[key] = secret.Value
 		size += len(secret.Value)
@@ -443,16 +443,16 @@ func secretData(run wherry.Run) (map[string][]byte, error) {
 	for _, input := range run.Inputs {
 		key := "inputs." + input.Name
 		if size += len(input.Data); len(key) > maxKey || size > maxSecret {
-			return nil, &wherry.InputTooLargeError{Name: input.Name}
+			return nil, &pluginsdk.InputTooLargeError{Name: input.Name}
 		}
 		data[key] = input.Data
 	}
 	return data, nil
 }
 
-func (adapter *Adapter) labels(run wherry.Run) map[string]string {
+func (profile *Kubernetes) labels(run pluginsdk.Run) map[string]string {
 	return map[string]string{
-		labelPool: adapter.pool, labelProfile: run.Profile, labelAgent: run.Agent, labelRun: run.ID,
+		labelPool: profile.pool, labelProfile: run.Profile, labelAgent: run.Agent, labelRun: run.ID,
 	}
 }
 
@@ -461,8 +461,8 @@ func locked() *corev1.SecurityContext {
 }
 
 // buildPod builds the run's pod, whose init container copies its material from the Secret name.
-func (adapter *Adapter) buildPod(run wherry.Run, name string) *corev1.Pod {
-	env := wherry.AgentEnv(adapter.runtime.Env)
+func (profile *Kubernetes) buildPod(run pluginsdk.Run, name string) *corev1.Pod {
+	env := pluginsdk.AgentEnv(profile.runtime.Env)
 	env["HOME"] = workPath
 	env["WHERRY_INPUT_DIR"] = inputPath
 	env["WHERRY_OUTPUT_DIR"] = outputPath
@@ -500,7 +500,7 @@ func (adapter *Adapter) buildPod(run wherry.Run, name string) *corev1.Pod {
 	memoryLimit := resource.MustParse("1Mi")
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: adapter.namespace, Labels: adapter.labels(run),
+			Name: name, Namespace: profile.namespace, Labels: profile.labels(run),
 			Annotations: map[string]string{annotationAttempt: strconv.FormatInt(run.Attempt, 10)},
 		},
 		Spec: corev1.PodSpec{
@@ -509,14 +509,14 @@ func (adapter *Adapter) buildPod(run wherry.Run, name string) *corev1.Pod {
 			AutomountServiceAccountToken:  new(false),
 			EnableServiceLinks:            new(false),
 			TerminationGracePeriodSeconds: new(int64(graceSeconds)),
-			NodeSelector:                  adapter.nodeSelector,
-			Tolerations:                   adapter.tolerations,
+			NodeSelector:                  profile.nodeSelector,
+			Tolerations:                   profile.tolerations,
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot: new(true), SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-				RunAsUser: adapter.uid, RunAsGroup: adapter.gid, SupplementalGroups: adapter.groups,
+				RunAsUser: profile.uid, RunAsGroup: profile.gid, SupplementalGroups: profile.groups,
 			},
 			InitContainers: []corev1.Container{{
-				Name: "inputs", Image: adapter.helperImage, Command: command("inputs"), Args: args,
+				Name: "inputs", Image: profile.helperImage, Command: command("inputs"), Args: args,
 				Resources: helperResources, SecurityContext: locked(),
 				// The helper writes a failure's message to stderr, which becomes the termination message.
 				TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
@@ -527,14 +527,14 @@ func (adapter *Adapter) buildPod(run wherry.Run, name string) *corev1.Pod {
 				},
 			}},
 			Containers: []corev1.Container{{
-				Name: "agent", Image: adapter.runtime.Image, Command: adapter.runtime.Command, Args: adapter.runtime.Args, Env: vars,
-				Resources: corev1.ResourceRequirements{Requests: adapter.resources, Limits: adapter.resources}, SecurityContext: agentSecurity,
+				Name: "agent", Image: profile.runtime.Image, Command: profile.runtime.Command, Args: profile.runtime.Args, Env: vars,
+				Resources: corev1.ResourceRequirements{Requests: profile.resources, Limits: profile.resources}, SecurityContext: agentSecurity,
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "work", MountPath: workPath},
 					{Name: "credentials", MountPath: "/run/wherry/credentials", ReadOnly: true},
 				},
 			}, {
-				Name: "outputs", Image: adapter.helperImage, Command: command("hold"),
+				Name: "outputs", Image: profile.helperImage, Command: command("hold"),
 				Resources: helperResources, SecurityContext: locked(),
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "work", MountPath: workPath, ReadOnly: true},
@@ -543,7 +543,7 @@ func (adapter *Adapter) buildPod(run wherry.Run, name string) *corev1.Pod {
 			}},
 			Volumes: []corev1.Volume{
 				{Name: "material", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: name, DefaultMode: new(int32(0o444))}}},
-				{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: adapter.workLimit}}},
+				{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: profile.workLimit}}},
 				{Name: "credentials", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &memoryLimit}}},
 				{Name: "hold", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &memoryLimit}}},
 			},
@@ -552,85 +552,85 @@ func (adapter *Adapter) buildPod(run wherry.Run, name string) *corev1.Pod {
 }
 
 // Dispatch starts a turn idempotently and returns once its agent has started or its pod has ended.
-func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Outcome, wherry.Handle, error) {
+func (profile *Kubernetes) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
 	began := time.Now()
-	name := adapter.jobName(run.ID)
+	name := profile.jobName(run.ID)
 	data, err := secretData(run)
 	if err != nil {
-		return wherry.OutcomeNothingCreated, wherry.Handle{}, err
+		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, err
 	}
 	created := false
-	switch existing, err := adapter.pods().Get(ctx, name, metav1.GetOptions{}); {
+	switch existing, err := profile.pods().Get(ctx, name, metav1.GetOptions{}); {
 	case apierrors.IsNotFound(err):
-		if err := adapter.upsertSecret(ctx, name, adapter.labels(run), data); err != nil {
-			return adapter.notStarted(ctx, name, err)
+		if err := profile.upsertSecret(ctx, name, profile.labels(run), data); err != nil {
+			return profile.notStarted(ctx, name, err)
 		}
-		pod, err := adapter.pods().Create(ctx, adapter.buildPod(run, name), metav1.CreateOptions{})
+		pod, err := profile.pods().Create(ctx, profile.buildPod(run, name), metav1.CreateOptions{})
 		switch {
 		case apierrors.IsAlreadyExists(err):
 		case err != nil:
-			return adapter.notStarted(ctx, name, adapter.failed("create pod "+name, err))
+			return profile.notStarted(ctx, name, profile.failed("create pod "+name, err))
 		case !sameUser(pod):
 			refused := errors.New("agent pod containers run as different users; set runtime.user")
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
 			defer cancel()
-			if err := errors.Join(adapter.deletePod(cleanupCtx, name), adapter.deleteSecret(cleanupCtx, name)); err != nil {
-				return wherry.OutcomeUnknown, wherry.Handle{}, errors.Join(refused, err)
+			if err := errors.Join(profile.deletePod(cleanupCtx, name), profile.deleteSecret(cleanupCtx, name)); err != nil {
+				return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, errors.Join(refused, err)
 			}
-			return wherry.OutcomeNothingCreated, wherry.Handle{}, refused
+			return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, refused
 		default:
 			created = true
 		}
 	case err != nil:
-		return wherry.OutcomeUnknown, wherry.Handle{}, adapter.failed("read pod "+name, err)
-	case !adapter.agentPod(existing):
-		return wherry.OutcomeUnknown, wherry.Handle{}, errors.New("existing pod is not an agent pod")
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, profile.failed("read pod "+name, err)
+	case !profile.agentPod(existing):
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, errors.New("existing pod is not an agent pod")
 	}
-	if err := adapter.deliver(ctx, name, run.Fetches); err != nil {
-		return wherry.OutcomeUnknown, wherry.Handle{}, err
+	if err := profile.deliver(ctx, name, run.Fetches); err != nil {
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, err
 	}
-	handle, state, err := adapter.wait(ctx, name)
+	handle, state, err := profile.wait(ctx, name)
 	if err != nil {
-		return wherry.OutcomeUnknown, wherry.Handle{}, err
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, err
 	}
-	if created && state != wherry.JobNeverStarted {
-		adapter.metrics.Placed(time.Since(began).Seconds())
+	if created && state != pluginsdk.JobNeverStarted {
+		profile.metrics.Placed(time.Since(began).Seconds())
 	}
-	return wherry.OutcomeCreated, handle, nil
+	return pluginsdk.OutcomeCreated, handle, nil
 }
 
 // upsertSecret writes the run's Secret over any an earlier attempt left.
-func (adapter *Adapter) upsertSecret(ctx context.Context, name string, labels map[string]string, data map[string][]byte) error {
-	existing, err := adapter.secrets().Get(ctx, name, metav1.GetOptions{})
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: adapter.namespace, Labels: labels}, Type: corev1.SecretTypeOpaque, Data: data}
+func (profile *Kubernetes) upsertSecret(ctx context.Context, name string, labels map[string]string, data map[string][]byte) error {
+	existing, err := profile.secrets().Get(ctx, name, metav1.GetOptions{})
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: profile.namespace, Labels: labels}, Type: corev1.SecretTypeOpaque, Data: data}
 	switch {
 	case apierrors.IsNotFound(err):
-		if _, err := adapter.secrets().Create(ctx, secret, metav1.CreateOptions{}); err != nil {
-			return adapter.failed("create secret "+name, err)
+		if _, err := profile.secrets().Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+			return profile.failed("create secret "+name, err)
 		}
 	case err != nil:
-		return adapter.failed("read secret "+name, err)
+		return profile.failed("read secret "+name, err)
 	default:
 		secret.ResourceVersion = existing.ResourceVersion
-		if _, err := adapter.secrets().Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
-			return adapter.failed("update secret "+name, err)
+		if _, err := profile.secrets().Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+			return profile.failed("update secret "+name, err)
 		}
 	}
 	return nil
 }
 
 // notStarted deletes the Secret and returns OutcomeNothingCreated when no pod exists, else OutcomeUnknown, with cause.
-func (adapter *Adapter) notStarted(ctx context.Context, name string, cause error) (wherry.Outcome, wherry.Handle, error) {
-	if _, err := adapter.pods().Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		adapter.handled("read pod "+name, err)
-		return wherry.OutcomeUnknown, wherry.Handle{}, cause
+func (profile *Kubernetes) notStarted(ctx context.Context, name string, cause error) (pluginsdk.Outcome, pluginsdk.Handle, error) {
+	if _, err := profile.pods().Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		profile.handled("read pod "+name, err)
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, cause
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
 	defer cancel()
-	if err := adapter.deleteSecret(cleanupCtx, name); err != nil {
-		return wherry.OutcomeNothingCreated, wherry.Handle{}, errors.Join(cause, err)
+	if err := profile.deleteSecret(cleanupCtx, name); err != nil {
+		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, errors.Join(cause, err)
 	}
-	return wherry.OutcomeNothingCreated, wherry.Handle{}, cause
+	return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, cause
 }
 
 // sameUser reports whether every container of the admitted pod runs as one UID.
@@ -653,14 +653,14 @@ func sameUser(pod *corev1.Pod) bool {
 }
 
 // deliver streams the run's fetches into the waiting init container; an error means the pod's fate is unknown.
-func (adapter *Adapter) deliver(ctx context.Context, name string, fetches []wherry.Fetch) error {
+func (profile *Kubernetes) deliver(ctx context.Context, name string, fetches []pluginsdk.Fetch) error {
 	if len(fetches) == 0 {
 		return nil
 	}
 	for {
-		pod, err := adapter.pods().Get(ctx, name, metav1.GetOptions{})
+		pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			adapter.handled("read pod "+name, err)
+			profile.handled("read pod "+name, err)
 		} else if inputs := status(pod.Status.InitContainerStatuses, "inputs"); initEnded(pod) {
 			return nil
 		} else if inputs != nil && inputs.State.Running != nil {
@@ -673,7 +673,7 @@ func (adapter *Adapter) deliver(ctx context.Context, name string, fetches []wher
 		}
 	}
 	for _, fetch := range fetches {
-		ended, err := adapter.retried(ctx, name, "exec inputs put", func() error { return adapter.put(ctx, name, fetch) })
+		ended, err := profile.retried(ctx, name, "exec inputs put", func() error { return profile.put(ctx, name, fetch) })
 		switch {
 		case ended || ctx.Err() != nil:
 			return nil
@@ -681,26 +681,26 @@ func (adapter *Adapter) deliver(ctx context.Context, name string, fetches []wher
 			var exit *exitError
 			var fetchErr *fetchError
 			if errors.As(err, &exit) || errors.As(err, &fetchErr) {
-				adapter.logger.Warn("input not fetched", "profile", adapter.name, "pod", name, "reason", err.Error())
+				profile.logger.Warn("input not fetched", "profile", profile.name, "pod", name, "reason", err.Error())
 			}
-			if err := adapter.exec.exec(ctx, name, "inputs", command("inputs", "fail", fetch.Name), nil, io.Discard); err != nil {
-				return adapter.failed("exec inputs fail", err)
+			if err := profile.exec.exec(ctx, name, "inputs", command("inputs", "fail", fetch.Name), nil, io.Discard); err != nil {
+				return profile.failed("exec inputs fail", err)
 			}
 			return nil
 		}
 	}
-	ended, err := adapter.retried(ctx, name, "exec inputs done", func() error {
-		return adapter.exec.exec(ctx, name, "inputs", command("inputs", "done"), nil, io.Discard)
+	ended, err := profile.retried(ctx, name, "exec inputs done", func() error {
+		return profile.exec.exec(ctx, name, "inputs", command("inputs", "done"), nil, io.Discard)
 	})
 	if err != nil && !ended && ctx.Err() == nil {
-		return adapter.failed("exec inputs done", err)
+		return profile.failed("exec inputs done", err)
 	}
 	return nil
 }
 
 // retried calls call up to putAttempts times while it fails in transport or finds the init container not yet waiting,
 // and reports whether the init container ended in between.
-func (adapter *Adapter) retried(ctx context.Context, name, op string, call func() error) (bool, error) {
+func (profile *Kubernetes) retried(ctx context.Context, name, op string, call func() error) (bool, error) {
 	for attempt := 1; ; attempt++ {
 		err := call()
 		var exit *exitError
@@ -708,12 +708,12 @@ func (adapter *Adapter) retried(ctx context.Context, name, op string, call func(
 		if err == nil || errors.As(err, &exit) && exit.code != helper.ExitNotWaiting || errors.As(err, &fetchErr) || ctx.Err() != nil {
 			return false, err
 		}
-		adapter.handled(op, err)
+		profile.handled(op, err)
 		if attempt == putAttempts {
 			return false, err
 		}
-		if pod, err := adapter.pods().Get(ctx, name, metav1.GetOptions{}); err != nil {
-			adapter.handled("read pod "+name, err)
+		if pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{}); err != nil {
+			profile.handled("read pod "+name, err)
 		} else if initEnded(pod) {
 			return true, nil
 		}
@@ -728,12 +728,12 @@ func initEnded(pod *corev1.Pod) bool {
 }
 
 // put fetches one input, refusing a redirect and reading at most one byte past its size, into the helper's put.
-func (adapter *Adapter) put(ctx context.Context, name string, fetch wherry.Fetch) error {
+func (profile *Kubernetes) put(ctx context.Context, name string, fetch pluginsdk.Fetch) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fetch.URL, nil)
 	if err != nil {
 		return &fetchError{fetch.Name, "invalid URL"}
 	}
-	response, err := adapter.fetcher.Do(request)
+	response, err := profile.fetcher.Do(request)
 	if err != nil {
 		var network net.Error
 		var certificate *tls.CertificateVerificationError
@@ -750,17 +750,17 @@ func (adapter *Adapter) put(ctx context.Context, name string, fetch wherry.Fetch
 	if response.StatusCode != http.StatusOK {
 		return &fetchError{fetch.Name, strconv.Itoa(response.StatusCode)}
 	}
-	return adapter.exec.exec(ctx, name, "inputs", command("inputs", "put", fetch.Name), io.LimitReader(response.Body, fetch.Size+1), io.Discard)
+	return profile.exec.exec(ctx, name, "inputs", command("inputs", "put", fetch.Name), io.LimitReader(response.Body, fetch.Size+1), io.Discard)
 }
 
-// handle is the version 1 encoding of wherry.Handle.Data.
+// handle is the version 1 encoding of pluginsdk.Handle.Data.
 type handle struct {
 	V   int    `json:"v"`
 	Pod string `json:"pod"`
 	UID string `json:"uid"`
 }
 
-func decodeHandle(encoded wherry.Handle) (handle, error) {
+func decodeHandle(encoded pluginsdk.Handle) (handle, error) {
 	var decoded handle
 	if err := json.Unmarshal(encoded.Data, &decoded); err != nil {
 		return handle{}, err
@@ -772,10 +772,10 @@ func decodeHandle(encoded wherry.Handle) (handle, error) {
 }
 
 // current reads the handle's pod and refuses one that replaced it.
-func (adapter *Adapter) current(ctx context.Context, h handle) (*corev1.Pod, error) {
-	pod, err := adapter.pods().Get(ctx, h.Pod, metav1.GetOptions{})
+func (profile *Kubernetes) current(ctx context.Context, h handle) (*corev1.Pod, error) {
+	pod, err := profile.pods().Get(ctx, h.Pod, metav1.GetOptions{})
 	if err != nil {
-		return nil, adapter.failed("read pod "+h.Pod, err)
+		return nil, profile.failed("read pod "+h.Pod, err)
 	}
 	if string(pod.UID) != h.UID {
 		return nil, errReplaced
@@ -784,31 +784,31 @@ func (adapter *Adapter) current(ctx context.Context, h handle) (*corev1.Pod, err
 }
 
 // wait returns once the pod is settled; a wait cut short deletes the pod.
-func (adapter *Adapter) wait(ctx context.Context, name string) (wherry.Handle, wherry.JobState, error) {
+func (profile *Kubernetes) wait(ctx context.Context, name string) (pluginsdk.Handle, pluginsdk.JobState, error) {
 	for {
-		pod, err := adapter.pods().Get(ctx, name, metav1.GetOptions{})
+		pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			if ctx.Err() != nil {
-				return wherry.Handle{}, 0, adapter.deleteTimedOut(ctx, name)
+				return pluginsdk.Handle{}, 0, profile.deleteTimedOut(ctx, name)
 			}
-			return wherry.Handle{}, 0, adapter.failed("read pod "+name, err)
+			return pluginsdk.Handle{}, 0, profile.failed("read pod "+name, err)
 		}
 		if state, _, settled := judge(pod); settled {
 			data, _ := json.Marshal(handle{V: 1, Pod: name, UID: string(pod.UID)}) // strings always encode
-			return wherry.Handle{Data: data, Name: name}, state, nil
+			return pluginsdk.Handle{Data: data, Name: name}, state, nil
 		}
 		select {
 		case <-ctx.Done():
-			return wherry.Handle{}, 0, adapter.deleteTimedOut(ctx, name)
+			return pluginsdk.Handle{}, 0, profile.deleteTimedOut(ctx, name)
 		case <-time.After(waitPoll):
 		}
 	}
 }
 
-func (adapter *Adapter) deleteTimedOut(ctx context.Context, name string) error {
+func (profile *Kubernetes) deleteTimedOut(ctx context.Context, name string) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
 	defer cancel()
-	if err := adapter.deletePod(cleanupCtx, name); err != nil {
+	if err := profile.deletePod(cleanupCtx, name); err != nil {
 		return errors.Join(ctx.Err(), fmt.Errorf("delete timed-out pod: %w", err))
 	}
 	return ctx.Err()
@@ -839,9 +839,9 @@ func started(agent *corev1.ContainerStatus) bool {
 }
 
 // judge reads a run's state and terminal from its pod; settled is false while the pod is pending.
-func judge(pod *corev1.Pod) (wherry.JobState, wherry.Terminal, bool) {
+func judge(pod *corev1.Pod) (pluginsdk.JobState, pluginsdk.Terminal, bool) {
 	agent := status(pod.Status.ContainerStatuses, "agent")
-	terminal := wherry.Terminal{Started: started(agent), Node: pod.Spec.NodeName}
+	terminal := pluginsdk.Terminal{Started: started(agent), Node: pod.Spec.NodeName}
 	var ended *corev1.ContainerStateTerminated
 	if agent != nil {
 		ended = agent.State.Terminated
@@ -858,17 +858,17 @@ func judge(pod *corev1.Pod) (wherry.JobState, wherry.Terminal, bool) {
 			terminal.ExitCode = -1
 		}
 		if terminal.Started {
-			return wherry.JobEnded, terminal, true
+			return pluginsdk.JobEnded, terminal, true
 		}
 		terminal.Class, terminal.Reason = "pod", "the pod is being deleted"
-		return wherry.JobNeverStarted, terminal, true
+		return pluginsdk.JobNeverStarted, terminal, true
 	case terminal.Started && ended == nil:
-		return wherry.JobRunning, terminal, true
+		return pluginsdk.JobRunning, terminal, true
 	case terminal.Started:
-		return wherry.JobEnded, terminal, true
+		return pluginsdk.JobEnded, terminal, true
 	}
 	terminal.Class, terminal.Reason = neverStarted(pod, ended)
-	return wherry.JobNeverStarted, terminal, terminal.Class != ""
+	return pluginsdk.JobNeverStarted, terminal, terminal.Class != ""
 }
 
 // neverStarted returns the class and the platform's reason of a pod that ended, or cannot start, before its agent.
@@ -883,7 +883,7 @@ func neverStarted(pod *corev1.Pod, agent *corev1.ContainerStateTerminated) (stri
 	if inputs := status(pod.Status.InitContainerStatuses, "inputs"); inputs != nil && inputs.State.Terminated != nil && inputs.State.Terminated.ExitCode != 0 {
 		ended := inputs.State.Terminated
 		if ended.ExitCode == helper.ExitFetch {
-			return wherry.ClassFetch, ended.Message
+			return pluginsdk.ClassFetch, ended.Message
 		}
 		return "setup", cmp.Or(ended.Message, ended.Reason)
 	}
@@ -904,30 +904,30 @@ func neverStarted(pod *corev1.Pod, agent *corev1.ContainerStateTerminated) (stri
 }
 
 // Lookup finds a run's existing pod and waits for it as Dispatch does.
-func (adapter *Adapter) Lookup(ctx context.Context, runID string) (wherry.Job, error) {
-	name := adapter.jobName(runID)
-	pod, err := adapter.pods().Get(ctx, name, metav1.GetOptions{})
+func (profile *Kubernetes) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
+	name := profile.jobName(runID)
+	pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return wherry.Job{}, nil
+		return pluginsdk.Job{}, nil
 	}
 	if err != nil {
-		return wherry.Job{}, adapter.failed("read pod "+name, err)
+		return pluginsdk.Job{}, profile.failed("read pod "+name, err)
 	}
-	if !adapter.agentPod(pod) {
-		return wherry.Job{}, errors.New("existing pod is not an agent pod")
+	if !profile.agentPod(pod) {
+		return pluginsdk.Job{}, errors.New("existing pod is not an agent pod")
 	}
-	handle, state, err := adapter.wait(ctx, name)
+	handle, state, err := profile.wait(ctx, name)
 	if err != nil {
-		return wherry.Job{}, err
+		return pluginsdk.Job{}, err
 	}
 	// A pod created without the annotation reads as attempt 0.
 	attempt, _ := strconv.ParseInt(pod.Annotations[annotationAttempt], 10, 64)
-	return wherry.Job{State: state, Handle: handle, Attempt: attempt, Profile: pod.Labels[labelProfile], Agent: pod.Labels[labelAgent]}, nil
+	return pluginsdk.Job{State: state, Handle: handle, Attempt: attempt, Profile: pod.Labels[labelProfile], Agent: pod.Labels[labelAgent]}, nil
 }
 
 // agentPod reports whether pod is this pool's agent pod.
-func (adapter *Adapter) agentPod(pod *corev1.Pod) bool {
-	return pod.Labels[labelPool] == adapter.pool && hasContainer(pod.Spec.InitContainers, "inputs") &&
+func (profile *Kubernetes) agentPod(pod *corev1.Pod) bool {
+	return pod.Labels[labelPool] == profile.pool && hasContainer(pod.Spec.InitContainers, "inputs") &&
 		hasContainer(pod.Spec.Containers, "agent") && hasContainer(pod.Spec.Containers, "outputs")
 }
 
@@ -936,19 +936,19 @@ func hasContainer(containers []corev1.Container, name string) bool {
 }
 
 // Follow streams the agent's stdout lines from a byte offset until it ends, then returns its terminal.
-func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, from int64, lines chan<- wherry.Line) (wherry.Terminal, error) {
+func (profile *Kubernetes) Follow(ctx context.Context, encoded pluginsdk.Handle, from int64, lines chan<- pluginsdk.Line) (pluginsdk.Terminal, error) {
 	h, err := decodeHandle(encoded)
 	if err != nil {
-		return wherry.Terminal{}, err
+		return pluginsdk.Terminal{}, err
 	}
-	pod, err := adapter.current(ctx, h)
+	pod, err := profile.current(ctx, h)
 	if err != nil {
-		return wherry.Terminal{}, err
+		return pluginsdk.Terminal{}, err
 	}
 	// The logs API answers 400 for a container that never started and cannot answer for a lost node.
 	for {
 		state, terminal, settled := judge(pod)
-		if settled && (state == wherry.JobNeverStarted || pod.DeletionTimestamp != nil) {
+		if settled && (state == pluginsdk.JobNeverStarted || pod.DeletionTimestamp != nil) {
 			return terminal, nil
 		}
 		if settled {
@@ -956,18 +956,18 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, from 
 		}
 		select {
 		case <-ctx.Done():
-			return wherry.Terminal{}, ctx.Err()
+			return pluginsdk.Terminal{}, ctx.Err()
 		case <-time.After(followPoll):
 		}
-		if pod, err = adapter.current(ctx, h); err != nil {
-			return wherry.Terminal{}, err
+		if pod, err = profile.current(ctx, h); err != nil {
+			return pluginsdk.Terminal{}, err
 		}
 	}
 	reader := LineReader{Lines: lines, Position: from}
 	for {
-		deleting, err := adapter.stream(ctx, h, &reader)
+		deleting, err := profile.stream(ctx, h, &reader)
 		if err != nil {
-			return wherry.Terminal{}, err
+			return pluginsdk.Terminal{}, err
 		}
 		if deleting != nil {
 			_, terminal, _ := judge(deleting)
@@ -976,12 +976,12 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, from 
 		for running := false; !running; {
 			select {
 			case <-ctx.Done():
-				return wherry.Terminal{}, ctx.Err()
+				return pluginsdk.Terminal{}, ctx.Err()
 			case <-time.After(followPoll):
 			}
-			pod, err := adapter.current(ctx, h)
+			pod, err := profile.current(ctx, h)
 			if err != nil {
-				return wherry.Terminal{}, err
+				return pluginsdk.Terminal{}, err
 			}
 			agent := status(pod.Status.ContainerStatuses, "agent")
 			switch _, terminal, _ := judge(pod); {
@@ -989,7 +989,7 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, from 
 				return terminal, nil
 			case agent != nil && agent.State.Terminated != nil:
 				if err := reader.Flush(ctx); err != nil {
-					return wherry.Terminal{}, err
+					return pluginsdk.Terminal{}, err
 				}
 				return terminal, nil
 			case agent != nil && agent.State.Running != nil:
@@ -1002,12 +1002,12 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, from 
 }
 
 // stream reads one follow stream of the agent's log until it closes, or returns the pod once it is being deleted.
-func (adapter *Adapter) stream(ctx context.Context, h handle, reader *LineReader) (*corev1.Pod, error) {
+func (profile *Kubernetes) stream(ctx context.Context, h handle, reader *LineReader) (*corev1.Pod, error) {
 	streamCtx, stop := context.WithCancel(ctx)
 	defer stop()
-	body, err := adapter.pods().GetLogs(h.Pod, &corev1.PodLogOptions{Container: "agent", Follow: true}).Stream(streamCtx)
+	body, err := profile.pods().GetLogs(h.Pod, &corev1.PodLogOptions{Container: "agent", Follow: true}).Stream(streamCtx)
 	if err != nil {
-		return nil, adapter.failed("read logs of "+h.Pod, err)
+		return nil, profile.failed("read logs of "+h.Pod, err)
 	}
 	defer body.Close()
 	chunks, closed := make(chan []byte), make(chan error, 1)
@@ -1045,9 +1045,9 @@ func (adapter *Adapter) stream(ctx context.Context, h handle, reader *LineReader
 				return nil, err
 			}
 		case <-poll.C:
-			pod, err := adapter.pods().Get(ctx, h.Pod, metav1.GetOptions{})
+			pod, err := profile.pods().Get(ctx, h.Pod, metav1.GetOptions{})
 			if err != nil {
-				adapter.handled("read pod "+h.Pod, err)
+				profile.handled("read pod "+h.Pod, err)
 				continue
 			}
 			if pod.DeletionTimestamp != nil {
@@ -1060,16 +1060,16 @@ func (adapter *Adapter) stream(ctx context.Context, h handle, reader *LineReader
 // running reports whether the agent may still run in a live pod; a pod not yet settled may hold a running agent.
 func running(pod *corev1.Pod) bool {
 	state, _, settled := judge(pod)
-	return (!settled || state == wherry.JobRunning) && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed
+	return (!settled || state == pluginsdk.JobRunning) && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed
 }
 
 // Stop signals the agent through the holder, SIGTERM then SIGKILL, and deletes the pod only if the agent outlives both.
-func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
+func (profile *Kubernetes) Stop(ctx context.Context, encoded pluginsdk.Handle) error {
 	h, err := decodeHandle(encoded)
 	if err != nil {
 		return err
 	}
-	pod, err := adapter.current(ctx, h)
+	pod, err := profile.current(ctx, h)
 	switch {
 	case apierrors.IsNotFound(err):
 		return nil
@@ -1079,27 +1079,27 @@ func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
 		return nil
 	}
 	for _, signal := range []string{"TERM", "KILL"} {
-		if err := adapter.exec.exec(ctx, h.Pod, "outputs", command("stop", signal), nil, io.Discard); err != nil {
-			adapter.handled("exec outputs stop "+signal, err)
+		if err := profile.exec.exec(ctx, h.Pod, "outputs", command("stop", signal), nil, io.Discard); err != nil {
+			profile.handled("exec outputs stop "+signal, err)
 			// A transport failure does not show the signal undelivered; only the helper's refusal does.
 			var exit *exitError
 			if errors.As(err, &exit) {
 				break
 			}
 		}
-		if stopped, err := adapter.stopped(ctx, h); err != nil || stopped {
+		if stopped, err := profile.stopped(ctx, h); err != nil || stopped {
 			return err
 		}
 	}
-	if err := adapter.deletePod(ctx, h.Pod); err != nil {
+	if err := profile.deletePod(ctx, h.Pod); err != nil {
 		return err
 	}
-	adapter.logger.Warn("agent outlived SIGKILL; pod deleted", "profile", adapter.name, "pod", h.Pod)
+	profile.logger.Warn("agent outlived SIGKILL; pod deleted", "profile", profile.name, "pod", h.Pod)
 	return nil
 }
 
 // stopped polls the pod for up to the stop grace and reports whether the agent has ended.
-func (adapter *Adapter) stopped(ctx context.Context, h handle) (bool, error) {
+func (profile *Kubernetes) stopped(ctx context.Context, h handle) (bool, error) {
 	poll := time.NewTicker(time.Second)
 	defer poll.Stop()
 	for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); {
@@ -1108,12 +1108,12 @@ func (adapter *Adapter) stopped(ctx context.Context, h handle) (bool, error) {
 			return false, ctx.Err()
 		case <-poll.C:
 		}
-		pod, err := adapter.pods().Get(ctx, h.Pod, metav1.GetOptions{})
+		pod, err := profile.pods().Get(ctx, h.Pod, metav1.GetOptions{})
 		switch {
 		case apierrors.IsNotFound(err):
 			return true, nil
 		case err != nil:
-			adapter.handled("read pod "+h.Pod, err)
+			profile.handled("read pod "+h.Pod, err)
 		case !running(pod):
 			return true, nil
 		}
@@ -1122,14 +1122,14 @@ func (adapter *Adapter) stopped(ctx context.Context, h handle) (bool, error) {
 }
 
 // Collect lists the outputs tree through the holder once the agent has ended, and reads what Select chooses.
-func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limits wherry.Limits, outputs chan<- wherry.Output) error {
+func (profile *Kubernetes) Collect(ctx context.Context, encoded pluginsdk.Handle, limits pluginsdk.Limits, outputs chan<- pluginsdk.Output) error {
 	h, err := decodeHandle(encoded)
 	if err != nil {
 		return err
 	}
 	var pod *corev1.Pod
 	for {
-		if pod, err = adapter.current(ctx, h); err != nil {
+		if pod, err = profile.current(ctx, h); err != nil {
 			if ctx.Err() != nil {
 				return errors.New("the agent is still running")
 			}
@@ -1151,16 +1151,16 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 		return errors.New("the outputs container has ended")
 	}
 	var listing bytes.Buffer
-	if err := adapter.exec.exec(ctx, h.Pod, "outputs", command("list", strconv.Itoa(limits.Files)), nil, &listing); err != nil {
-		return adapter.failed("exec outputs list", err)
+	if err := profile.exec.exec(ctx, h.Pod, "outputs", command("list", strconv.Itoa(limits.Files)), nil, &listing); err != nil {
+		return profile.failed("exec outputs list", err)
 	}
-	var entries []wherry.Output
+	var entries []pluginsdk.Output
 	for line := range bytes.Lines(listing.Bytes()) {
 		var entry helper.Entry
 		if err := json.Unmarshal(line, &entry); err != nil {
 			return errors.New("the outputs listing is not readable")
 		}
-		entries = append(entries, wherry.Output{Name: entry.Name, Size: entry.Size, Mode: entry.Mode})
+		entries = append(entries, pluginsdk.Output{Name: entry.Name, Size: entry.Size, Mode: entry.Mode})
 	}
 	selected, err := Select(entries, limits)
 	if err != nil {
@@ -1170,9 +1170,9 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 		output := chosen.Output
 		switch {
 		case chosen.Stream:
-			output.Body = adapter.open(ctx, h.Pod, output.Name, output.Size)
+			output.Body = profile.open(ctx, h.Pod, output.Name, output.Size)
 		case chosen.Read:
-			if output.Data, err = adapter.read(ctx, h.Pod, output.Name, output.Size); err != nil {
+			if output.Data, err = profile.read(ctx, h.Pod, output.Name, output.Size); err != nil {
 				return err
 			}
 		}
@@ -1200,13 +1200,13 @@ func (b body) Close() error {
 }
 
 // open streams a listed regular file of size bytes through the holder.
-func (adapter *Adapter) open(ctx context.Context, pod, name string, size int64) io.ReadCloser {
+func (profile *Kubernetes) open(ctx context.Context, pod, name string, size int64) io.ReadCloser {
 	ctx, cancel := context.WithCancel(ctx)
 	reader, writer := io.Pipe()
 	go func() {
-		err := adapter.exec.exec(ctx, pod, "outputs", command("read", name, strconv.FormatInt(size, 10)), nil, writer)
+		err := profile.exec.exec(ctx, pod, "outputs", command("read", name, strconv.FormatInt(size, 10)), nil, writer)
 		if err != nil && ctx.Err() == nil {
-			err = adapter.failed("exec outputs read", err)
+			err = profile.failed("exec outputs read", err)
 		}
 		writer.CloseWithError(err)
 	}()
@@ -1214,8 +1214,8 @@ func (adapter *Adapter) open(ctx context.Context, pod, name string, size int64) 
 }
 
 // read reads a listed regular file and refuses a body of another length than its listing.
-func (adapter *Adapter) read(ctx context.Context, pod, name string, size int64) ([]byte, error) {
-	body := adapter.open(ctx, pod, name, size)
+func (profile *Kubernetes) read(ctx context.Context, pod, name string, size int64) ([]byte, error) {
+	body := profile.open(ctx, pod, name, size)
 	defer body.Close()
 	data, err := io.ReadAll(io.LimitReader(body, size+1))
 	if err != nil {
@@ -1228,18 +1228,18 @@ func (adapter *Adapter) read(ctx context.Context, pod, name string, size int64) 
 }
 
 // Release deletes the run's Secret and ends the outputs holder, so the pod frees its node's requests.
-func (adapter *Adapter) Release(ctx context.Context, runID string) error {
-	name := adapter.jobName(runID)
-	secretErr := adapter.deleteSecret(ctx, name)
+func (profile *Kubernetes) Release(ctx context.Context, runID string) error {
+	name := profile.jobName(runID)
+	secretErr := profile.deleteSecret(ctx, name)
 	var podErr error
-	switch pod, err := adapter.pods().Get(ctx, name, metav1.GetOptions{}); {
+	switch pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{}); {
 	case apierrors.IsNotFound(err):
 	case err != nil:
-		podErr = adapter.failed("read pod "+name, err)
+		podErr = profile.failed("read pod "+name, err)
 	default:
 		if holder := status(pod.Status.ContainerStatuses, "outputs"); holder != nil && holder.State.Running != nil && pod.DeletionTimestamp == nil {
-			if err := adapter.exec.exec(ctx, name, "outputs", command("release"), nil, io.Discard); err != nil {
-				adapter.handled("exec outputs release", err)
+			if err := profile.exec.exec(ctx, name, "outputs", command("release"), nil, io.Discard); err != nil {
+				profile.handled("exec outputs release", err)
 			}
 		}
 	}
@@ -1254,22 +1254,22 @@ func (adapter *Adapter) Release(ctx context.Context, runID string) error {
 }
 
 // Purge deletes the run's pod at once, waits for it to go, then deletes its Secret.
-func (adapter *Adapter) Purge(ctx context.Context, runID string) error {
-	return adapter.purge(ctx, adapter.jobName(runID))
+func (profile *Kubernetes) Purge(ctx context.Context, runID string) error {
+	return profile.purge(ctx, profile.jobName(runID))
 }
 
 // purge waits for the pod to go, since a terminating pod still holds its name.
-func (adapter *Adapter) purge(ctx context.Context, name string) error {
-	if err := adapter.deletePod(ctx, name); err != nil {
+func (profile *Kubernetes) purge(ctx context.Context, name string) error {
+	if err := profile.deletePod(ctx, name); err != nil {
 		return err
 	}
 	for {
-		_, err := adapter.pods().Get(ctx, name, metav1.GetOptions{})
+		_, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			break
 		}
 		if err != nil {
-			return adapter.failed("read pod "+name, err)
+			return profile.failed("read pod "+name, err)
 		}
 		select {
 		case <-ctx.Done():
@@ -1277,20 +1277,20 @@ func (adapter *Adapter) purge(ctx context.Context, name string) error {
 		case <-time.After(collectPoll):
 		}
 	}
-	return adapter.deleteSecret(ctx, name)
+	return profile.deleteSecret(ctx, name)
 }
 
 // deletePod deletes a pod with grace 0, which removes it without waiting for its kubelet.
-func (adapter *Adapter) deletePod(ctx context.Context, name string) error {
-	if err := adapter.pods().Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: new(int64(0))}); err != nil && !apierrors.IsNotFound(err) {
-		return adapter.failed("delete pod "+name, err)
+func (profile *Kubernetes) deletePod(ctx context.Context, name string) error {
+	if err := profile.pods().Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: new(int64(0))}); err != nil && !apierrors.IsNotFound(err) {
+		return profile.failed("delete pod "+name, err)
 	}
 	return nil
 }
 
-func (adapter *Adapter) deleteSecret(ctx context.Context, name string) error {
-	if err := adapter.secrets().Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return adapter.failed("delete secret "+name, err)
+func (profile *Kubernetes) deleteSecret(ctx context.Context, name string) error {
+	if err := profile.secrets().Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return profile.failed("delete secret "+name, err)
 	}
 	return nil
 }
@@ -1303,7 +1303,7 @@ func ownName(object metav1.Object) bool {
 
 // endOf reports whether a pod has ended, and when.
 func endOf(pod *corev1.Pod) (bool, time.Time) {
-	if state, _, settled := judge(pod); !settled || state == wherry.JobRunning {
+	if state, _, settled := judge(pod); !settled || state == pluginsdk.JobRunning {
 		return false, time.Time{}
 	}
 	if pod.DeletionTimestamp != nil {
@@ -1322,11 +1322,11 @@ func endOf(pod *corev1.Pod) (bool, time.Time) {
 }
 
 // Sweep purges this profile's pods ended for the grace period and deletes the Secrets no live run needs.
-func (adapter *Adapter) Sweep(ctx context.Context) error {
-	selector := metav1.ListOptions{LabelSelector: labelPool + "=" + adapter.pool}
-	pods, err := adapter.pods().List(ctx, selector)
+func (profile *Kubernetes) Sweep(ctx context.Context) error {
+	selector := metav1.ListOptions{LabelSelector: labelPool + "=" + profile.pool}
+	pods, err := profile.pods().List(ctx, selector)
 	if err != nil {
-		return adapter.failed("list pods", err)
+		return profile.failed("list pods", err)
 	}
 	var errs []error
 	pending, purged, deleted := 0, 0, 0
@@ -1343,7 +1343,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 			continue
 		}
 		expired := time.Since(at) >= sweepGrace
-		if pod.Labels[labelProfile] != adapter.name {
+		if pod.Labels[labelProfile] != profile.name {
 			releasable[pod.Name] = expired
 			continue
 		}
@@ -1352,7 +1352,7 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 			pending++
 			continue
 		}
-		if err := adapter.purge(ctx, pod.Name); err != nil {
+		if err := profile.purge(ctx, pod.Name); err != nil {
 			errs = append(errs, err)
 			pending++
 			continue
@@ -1360,9 +1360,9 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 		purged++
 	}
 	// Secrets are listed as metadata, so a list carries no value.
-	secrets, err := adapter.meta.Resource(corev1.SchemeGroupVersion.WithResource("secrets")).Namespace(adapter.namespace).List(ctx, selector)
+	secrets, err := profile.meta.Resource(corev1.SchemeGroupVersion.WithResource("secrets")).Namespace(profile.namespace).List(ctx, selector)
 	if err != nil {
-		errs = append(errs, adapter.failed("list secrets", err))
+		errs = append(errs, profile.failed("list secrets", err))
 	} else {
 		for i := range secrets.Items {
 			secret := &secrets.Items[i]
@@ -1374,23 +1374,23 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 			case !present[secret.Name] && time.Since(secret.CreationTimestamp.Time) < sweepGrace:
 				continue
 			}
-			if err := adapter.deleteSecret(ctx, secret.Name); err != nil {
+			if err := profile.deleteSecret(ctx, secret.Name); err != nil {
 				errs = append(errs, err)
 				continue
 			}
-			if secret.Labels[labelProfile] == adapter.name {
+			if secret.Labels[labelProfile] == profile.name {
 				deleted++
 			}
 		}
 	}
-	adapter.metrics.Pending(pending)
-	adapter.metrics.Deleted("job", purged)
-	adapter.metrics.Deleted("variable", deleted)
+	profile.metrics.Pending(pending)
+	profile.metrics.Deleted("job", purged)
+	profile.metrics.Deleted("variable", deleted)
 	return errors.Join(errs...)
 }
 
 // failed counts err from the API call op by class and wraps it; a not-found or cancelled call counts nothing.
-func (adapter *Adapter) failed(op string, err error) error {
+func (profile *Kubernetes) failed(op string, err error) error {
 	var status apierrors.APIStatus
 	var network net.Error
 	class := "other"
@@ -1398,7 +1398,7 @@ func (adapter *Adapter) failed(op string, err error) error {
 	case err == nil:
 		return nil
 	case apierrors.IsNotFound(err) || errors.Is(err, context.Canceled):
-		return &wherry.Error{Op: op, Err: err}
+		return &pluginsdk.Error{Op: op, Err: err}
 	case errors.Is(err, context.DeadlineExceeded):
 		class = "timeout"
 	case errors.As(err, &status):
@@ -1417,19 +1417,19 @@ func (adapter *Adapter) failed(op string, err error) error {
 	case errors.As(err, &network):
 		class = "unavailable"
 	}
-	adapter.metrics.Failed(class)
-	return &wherry.Error{Op: op, Class: class, Err: err}
+	profile.metrics.Failed(class)
+	return &pluginsdk.Error{Op: op, Class: class, Err: err}
 }
 
 // handled counts err as failed does and logs its op and class, never its text, which can hold a URL or a response body.
-func (adapter *Adapter) handled(op string, err error) {
-	var failure *wherry.Error
-	if errors.As(adapter.failed(op, err), &failure) && failure.Class != "" {
-		adapter.logger.Warn("kubernetes call failed", "profile", adapter.name, "op", failure.Op, "class", failure.Class)
+func (profile *Kubernetes) handled(op string, err error) {
+	var failure *pluginsdk.Error
+	if errors.As(profile.failed(op, err), &failure) && failure.Class != "" {
+		profile.logger.Warn("kubernetes call failed", "profile", profile.name, "op", failure.Op, "class", failure.Class)
 	}
 }
 
-// Metrics reports the adapter's API errors, sweep deletions, cleanup-pending pods and placement latency.
-func (adapter *Adapter) Metrics(context.Context) ([]wherry.Sample, error) {
-	return adapter.metrics.Samples(), nil
+// Metrics reports the profile's API errors, sweep deletions, cleanup-pending pods and placement latency.
+func (profile *Kubernetes) Metrics(context.Context) ([]pluginsdk.Sample, error) {
+	return profile.metrics.Samples(), nil
 }

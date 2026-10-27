@@ -12,24 +12,24 @@ import (
 	"strings"
 	"sync"
 
-	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/pluginsdk"
 )
 
 // maxPending bounds a line LineReader holds; a longer one is split.
 const maxPending = 1 << 20
 
-// PlatformMetrics holds an adapter's API errors, sweep deletions, cleanup-pending jobs and placement latency.
+// PlatformMetrics holds a plugin profile's API errors, sweep deletions, cleanup-pending jobs and placement latency.
 type PlatformMetrics struct {
 	mu        sync.Mutex
 	errors    map[string]float64
 	deletions map[string]float64
 	pending   float64
-	placement wherry.Histogram
+	placement pluginsdk.Histogram
 }
 
 // NewPlatformMetrics returns empty metrics.
 func NewPlatformMetrics() *PlatformMetrics {
-	return &PlatformMetrics{errors: map[string]float64{}, deletions: map[string]float64{}, placement: wherry.Histogram{Buckets: make([]uint64, len(wherry.PlacementBuckets))}}
+	return &PlatformMetrics{errors: map[string]float64{}, deletions: map[string]float64{}, placement: pluginsdk.Histogram{Buckets: make([]uint64, len(pluginsdk.PlacementBuckets))}}
 }
 
 // Failed counts a failed platform call of class.
@@ -57,7 +57,7 @@ func (m *PlatformMetrics) Pending(n int) {
 func (m *PlatformMetrics) Placed(seconds float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for i, bound := range wherry.PlacementBuckets {
+	for i, bound := range pluginsdk.PlacementBuckets {
 		if seconds <= bound {
 			m.placement.Buckets[i]++
 		}
@@ -66,33 +66,33 @@ func (m *PlatformMetrics) Placed(seconds float64) {
 	m.placement.Count++
 }
 
-// Samples reports the metrics as the adapter families' samples.
-func (m *PlatformMetrics) Samples() []wherry.Sample {
+// Samples reports the metrics as the plugin families' samples.
+func (m *PlatformMetrics) Samples() []pluginsdk.Sample {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	placement := m.placement
 	placement.Buckets = slices.Clone(placement.Buckets)
-	samples := []wherry.Sample{
-		{Family: "wherry_adapter_cleanup_pending", Kind: wherry.KindGauge, Value: m.pending},
-		{Family: "wherry_adapter_placement_seconds", Kind: wherry.KindHistogram, Histogram: placement},
+	samples := []pluginsdk.Sample{
+		{Family: "wherry_plugin_cleanup_pending", Kind: pluginsdk.KindGauge, Value: m.pending},
+		{Family: "wherry_plugin_placement_seconds", Kind: pluginsdk.KindHistogram, Histogram: placement},
 	}
 	for class, count := range m.errors {
-		samples = append(samples, wherry.Sample{Family: "wherry_adapter_platform_errors_total", Labels: map[string]string{"class": class}, Kind: wherry.KindCounter, Value: count})
+		samples = append(samples, pluginsdk.Sample{Family: "wherry_plugin_platform_errors_total", Labels: map[string]string{"class": class}, Kind: pluginsdk.KindCounter, Value: count})
 	}
 	for kind, count := range m.deletions {
-		samples = append(samples, wherry.Sample{Family: "wherry_adapter_sweep_deletions_total", Labels: map[string]string{"kind": kind}, Kind: wherry.KindCounter, Value: count})
+		samples = append(samples, pluginsdk.Sample{Family: "wherry_plugin_sweep_deletions_total", Labels: map[string]string{"kind": kind}, Kind: pluginsdk.KindCounter, Value: count})
 	}
 	return samples
 }
 
 // Selected is one output Select keeps, marked for reading or streaming; an output marked neither is only listed.
 type Selected struct {
-	wherry.Output
+	pluginsdk.Output
 	Read, Stream bool
 }
 
 // Select refuses more than limits.Files entries, drops directories, sorts by name and marks what Collect reads.
-func Select(entries []wherry.Output, limits wherry.Limits) ([]Selected, error) {
+func Select(entries []pluginsdk.Output, limits pluginsdk.Limits) ([]Selected, error) {
 	if len(entries) > limits.Files {
 		return nil, fmt.Errorf("the outputs directory holds more than %d entries", limits.Files)
 	}
@@ -120,7 +120,7 @@ func Select(entries []wherry.Output, limits wherry.Limits) ([]Selected, error) {
 
 // LineReader splits bytes into lines; Position is the offset after the last emitted line.
 type LineReader struct {
-	Lines    chan<- wherry.Line
+	Lines    chan<- pluginsdk.Line
 	Position int64
 	pending  []byte
 }
@@ -155,7 +155,7 @@ func (reader *LineReader) Flush(ctx context.Context) error {
 }
 
 func (reader *LineReader) emit(ctx context.Context, data []byte, advance int64) error {
-	line := wherry.Line{Offset: reader.Position, Next: reader.Position + advance, Data: append([]byte(nil), data...)}
+	line := pluginsdk.Line{Offset: reader.Position, Next: reader.Position + advance, Data: append([]byte(nil), data...)}
 	select {
 	case reader.Lines <- line:
 		reader.Position = line.Next

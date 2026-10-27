@@ -1,6 +1,6 @@
 //go:build linux
 
-// Command wherry-plugin-systemd is the wherry adapter plugin for systemd, which runs each run's agent as a transient
+// Command wherry-plugin-systemd is the wherry plugin for systemd, which runs each run's agent as a transient
 // unit on the receiver's host. The receiver starts it from its plugin directory; it is not run by hand.
 package main
 
@@ -9,15 +9,15 @@ import (
 	"errors"
 	"fmt"
 
-	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/hashicorp/go-hclog"
 )
 
 func main() {
-	wherry.Serve(newAdapter)
+	pluginsdk.Serve(newProfile)
 }
 
-func newAdapter(settings wherry.Settings, logger hclog.Logger) (wherry.Adapter, error) {
+func newProfile(settings pluginsdk.Settings, logger hclog.Logger) (pluginsdk.Plugin, error) {
 	var config Config
 	if err := json.Unmarshal(settings.Config, &config, json.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)

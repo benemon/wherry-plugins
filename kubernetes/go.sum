@@ -1,7 +1,7 @@
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 h1:0CwZNZbxp69SHPdPJAN/hZIm0C4OItdklCFmMRWYpio=
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5/go.mod h1:wHh0iHkYZB8zMSxRWpUBQtwG5a7fFgvEO+odwuTv2gs=
-github.com/benemon/wherry/adapter v0.7.0-rc.2 h1:sATuYAHrEYeO+5tEzU16Y+B0US2G0KP10ADZfrNX1p8=
-github.com/benemon/wherry/adapter v0.7.0-rc.2/go.mod h1:L5VEAbT6d+Ex7eXkIBu+d56tLg7p59E3Xv2S6XLA8H8=
+github.com/benemon/wherry/pluginsdk v0.8.0-rc.1 h1:qbi24YyZK+LAoOd8yT9Mh4b8bn0kF/dAaACqn6euxKw=
+github.com/benemon/wherry/pluginsdk v0.8.0-rc.1/go.mod h1:aG3lWrGIa5pllsZbpZQwZuDW0G8nhX38XyAo+WAL0+Y=
 github.com/bufbuild/protocompile v0.14.1 h1:iA73zAf/fyljNjQKwYzUHD6AD4R8KMasmwa/FBatYVw=
 github.com/bufbuild/protocompile v0.14.1/go.mod h1:ppVdAIhbr2H8asPk6k4pY7t9zB1OU5DoEw9xY/FUi1c=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

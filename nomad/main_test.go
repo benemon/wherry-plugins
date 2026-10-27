@@ -14,19 +14,19 @@ import (
 	"strings"
 	"testing"
 
-	wherry "github.com/benemon/wherry/adapter"
-	"github.com/benemon/wherry/adapter/adaptertest"
+	"github.com/benemon/wherry/pluginsdk"
+	"github.com/benemon/wherry/pluginsdk/pluginsdktest"
 	"github.com/hashicorp/go-hclog"
 	"go.yaml.in/yaml/v3"
 )
 
-func settings(t *testing.T, name string, config map[string]any) wherry.Settings {
+func settings(t *testing.T, name string, config map[string]any) pluginsdk.Settings {
 	t.Helper()
 	encoded, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return wherry.Settings{Name: name, Pool: testPool, Agent: "claude", Config: encoded}
+	return pluginsdk.Settings{Name: name, Pool: testPool, Agent: "claude", Config: encoded}
 }
 
 func execConfig(address string, command string, args ...any) map[string]any {
@@ -39,15 +39,15 @@ func execConfig(address string, command string, args ...any) map[string]any {
 func TestFactoryDecodesStrictly(t *testing.T) {
 	retired := execConfig("http://127.0.0.1:1", "/bin/true")
 	retired["credential_env"] = "MODEL_API_KEY"
-	if _, err := newAdapter(settings(t, "lab", retired), hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "unknown") || !strings.Contains(err.Error(), "credential_env") {
+	if _, err := newProfile(settings(t, "lab", retired), hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "unknown") || !strings.Contains(err.Error(), "credential_env") {
 		t.Fatalf("got %v, want credential_env refused as an unknown member", err)
 	}
 	unknown := execConfig("http://127.0.0.1:1", "/bin/true")
 	unknown["token"] = "x"
-	if _, err := newAdapter(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
-		t.Fatal("accepted adapter config with an unknown member")
+	if _, err := newProfile(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
+		t.Fatal("accepted plugin config with an unknown member")
 	}
-	if _, err := newAdapter(settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true")), hclog.NewNullLogger()); err != nil {
+	if _, err := newProfile(settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true")), hclog.NewNullLogger()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -88,7 +88,7 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 	if len(receiver.Plugins) != 1 || !ok || len(plugin.Profiles) < 2 {
 		t.Fatal("want one nomad plugin and at least two profiles")
 	}
-	// ca_file names a path on the receiver; the client reads the CA when the adapter is built.
+	// ca_file names a path on the receiver; the client reads the CA when the profile is built.
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
 	caFile := filepath.Join(t.TempDir(), "ca.pem")
@@ -101,7 +101,7 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 	plugin.Config["ca_file"] = caFile
 	for _, profile := range plugin.Profiles {
 		config := merge(plugin.Config, profile.Config)
-		s := wherry.Settings{Name: profile.Name, Pool: testPool, Agent: profile.Agent}
+		s := pluginsdk.Settings{Name: profile.Name, Pool: testPool, Agent: profile.Agent}
 		// The receiver sends the plugin the credential's value and never its name.
 		if name, ok := config["credential"]; ok {
 			if _, ok := name.(string); !ok {
@@ -115,7 +115,7 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 			t.Fatal(err)
 		}
 		s.Config = encoded
-		if _, err := newAdapter(s, hclog.NewNullLogger()); err != nil {
+		if _, err := newProfile(s, hclog.NewNullLogger()); err != nil {
 			t.Fatalf("profile %s: %v", profile.Name, err)
 		}
 	}
@@ -140,14 +140,14 @@ func merge(base, over map[string]any) map[string]any {
 	return merged
 }
 
-func TestFactoryGivesTheAdapterServesLogger(t *testing.T) {
+func TestFactoryGivesTheProfileServesLogger(t *testing.T) {
 	logger := hclog.New(&hclog.LoggerOptions{Name: "served"})
-	built, err := newAdapter(settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true")), logger)
+	built, err := newProfile(settings(t, "lab", execConfig("http://127.0.0.1:1", "/bin/true")), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if built.(*Adapter).logger != logger {
-		t.Fatal("adapter logs elsewhere than the logger Serve gave the factory")
+	if built.(*Nomad).logger != logger {
+		t.Fatal("profile logs elsewhere than the logger Serve gave the factory")
 	}
 }
 
@@ -161,8 +161,8 @@ func TestFactoryTokenFromCredentialElseNomadToken(t *testing.T) {
 	defer server.Close()
 	withCredential := settings(t, "credential", execConfig(server.URL, "/bin/true"))
 	withCredential.Credential = "platform-credential"
-	for _, s := range []wherry.Settings{settings(t, "environment", execConfig(server.URL, "/bin/true")), withCredential} {
-		a, err := newAdapter(s, hclog.NewNullLogger())
+	for _, s := range []pluginsdk.Settings{settings(t, "environment", execConfig(server.URL, "/bin/true")), withCredential} {
+		a, err := newProfile(s, hclog.NewNullLogger())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -175,20 +175,20 @@ func TestFactoryTokenFromCredentialElseNomadToken(t *testing.T) {
 	}
 }
 
-func conformanceSettings(t *testing.T) (wherry.Settings, wherry.Settings) {
+func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings) {
 	t.Helper()
 	address := os.Getenv("WHERRY_NOMAD_DEV_ADDR")
 	if address == "" {
 		t.Skip("WHERRY_NOMAD_DEV_ADDR not set")
 	}
-	// The completing job exits 0 only with adaptertest.Credentials delivered at their targets.
+	// The completing job exits 0 only with pluginsdktest.Credentials delivered at their targets.
 	return settings(t, "completes", execConfig(address, "/bin/sh", "-c", `sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`)),
 		settings(t, "never-starts", execConfig(address, "/nonexistent/wherry-conformance"))
 }
 
 func TestConformance(t *testing.T) {
 	completes, neverStarts := conformanceSettings(t)
-	adaptertest.Run(t, newAdapter, completes, neverStarts, inlineLimit)
+	pluginsdktest.Run(t, newProfile, completes, neverStarts, inlineLimit)
 }
 
 // TestConformanceOverTheLink runs the suite against the built plugin, through the receiver's side of the link.
@@ -198,12 +198,12 @@ func TestConformanceOverTheLink(t *testing.T) {
 	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, output)
 	}
-	plugin, err := wherry.Launch(func() (string, error) { return binary, nil }, io.Discard)
+	plugin, err := pluginsdk.Launch(func() (string, error) { return binary, nil }, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer plugin.Close()
-	adaptertest.Run(t, func(settings wherry.Settings, _ hclog.Logger) (wherry.Adapter, error) {
+	pluginsdktest.Run(t, func(settings pluginsdk.Settings, _ hclog.Logger) (pluginsdk.Plugin, error) {
 		return plugin.Configure(settings)
 	}, completes, neverStarts, inlineLimit)
 }

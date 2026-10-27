@@ -8,8 +8,8 @@ plugin.
 
 ## Build
 
-The plugin builds against the tagged adapter protocol module,
-`github.com/benemon/wherry/adapter`. From a clone of this repository:
+The plugin builds against the tagged plugin protocol module,
+`github.com/benemon/wherry/pluginsdk`. From a clone of this repository:
 
 ```sh
 make build
@@ -184,7 +184,7 @@ the field and the driver.
 
 The plugin sets `HOME`, `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR`,
 `WHERRY_CREDENTIALS_DIR`, `WHERRY_MODEL` when the task names a model, and the
-variables of the adapter protocol's `AgentEnvironment` over `env`. [Agent jobs](#agent-jobs) describes the
+variables of the plugin protocol's `AgentEnvironment` over `env`. [Agent jobs](#agent-jobs) describes the
 job it builds.
 
 ```yaml
@@ -365,7 +365,7 @@ The agent task receives:
   as `test -n "$WHERRY_MODEL" || WHERRY_MODEL=haiku;` then
   `--model "$WHERRY_MODEL"`. Nomad interpolates `${...}` in driver `config`
   and fails the task with a validation error on `${WHERRY_MODEL:-haiku}`;
-- the variables of the adapter protocol's `AgentEnvironment`, as described
+- the variables of the plugin protocol's `AgentEnvironment`, as described
   in [Agent environment](#agent-environment);
 - the runtime's `env`, driver `config` and `resources`.
 
@@ -447,13 +447,13 @@ until it expires. Purging the job removes it.
 
 ### Agent environment
 
-The plugin sets the variables of the adapter protocol's `AgentEnvironment`
+The plugin sets the variables of the plugin protocol's `AgentEnvironment`
 over the runtime's `env` and removes those of `AgentUnset` from it, so no
 system, global or environment `git` configuration reaches the agent's
 clones. It removes them from the runtime's `env` only. A `raw_exec` task
 also inherits the Nomad client's environment, a container keeps its
 image's `ENV`, and Nomad offers no way to unset either. Add the variables
-of [`AgentUnset`](https://github.com/benemon/wherry/blob/main/adapter/adapter.go)
+of [`AgentUnset`](https://github.com/benemon/wherry/blob/main/pluginsdk/pluginsdk.go)
 to the client's `env.denylist`, and keep them out of agent images. CA and
 proxy variables pass through as the operator sets them. This protects an
 agent that follows its prompt. An agent that runs commands of its own can
@@ -461,7 +461,7 @@ undo this.
 
 ## Metrics
 
-The plugin speaks adapter protocol version 9, and a receiver of another
+The plugin speaks plugin protocol version 10, and a receiver of another
 protocol version refuses it at its start, as
 [Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
 upgrade it with the receiver. For each plugin profile it reports these
@@ -470,10 +470,10 @@ profile's name as `profile`:
 
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
-| `wherry_adapter_platform_errors_total` | counter | `class` | failed Nomad API calls |
-| `wherry_adapter_cleanup_pending` | gauge | none | the plugin profile's dead agent jobs the latest sweep left |
-| `wherry_adapter_sweep_deletions_total` | counter | `kind` | the plugin profile's jobs a sweep purged (`job`) and variables it deleted (`variable`) |
-| `wherry_adapter_placement_seconds` | histogram | none | time from a Dispatch that registers the job to the plugin seeing its agent task started |
+| `wherry_plugin_platform_errors_total` | counter | `class` | failed Nomad API calls |
+| `wherry_plugin_cleanup_pending` | gauge | none | the plugin profile's dead agent jobs the latest sweep left |
+| `wherry_plugin_sweep_deletions_total` | counter | `kind` | the plugin profile's jobs a sweep purged (`job`) and variables it deleted (`variable`) |
+| `wherry_plugin_placement_seconds` | histogram | none | time from a Dispatch that registers the job to the plugin seeing its agent task started |
 
 An API call's class comes from its status code: 401 and 403 are `denied`,
 409 `conflict`, 408 and 504 `timeout`, and other 5xx codes `unavailable`. A
@@ -570,4 +570,4 @@ make test
 Tests that need a Nomad agent run when `WHERRY_NOMAD_DEV_ADDR` names a dev
 agent with `raw_exec` enabled, such as `http://127.0.0.1:4646`, and skip
 otherwise. They include the protocol's conformance suite,
-`github.com/benemon/wherry/adapter/adaptertest`.
+`github.com/benemon/wherry/pluginsdk/pluginsdktest`.

@@ -1,7 +1,7 @@
 # wherry-plugin-kubernetes
 
 The wherry plugin for Kubernetes. A wherry receiver starts it from its
-plugin directory for the plugin profiles of adapter type `kubernetes`, and
+plugin directory for the plugin profiles of plugin type `kubernetes`, and
 runs each of the receiver's runs as one pod and one Secret in a namespace.
 One plugin process hosts every `kubernetes` plugin profile of a receiver.
 
@@ -11,8 +11,8 @@ and the receiver's manifests also run unchanged on OpenShift 4.18 or later;
 
 ## Build
 
-The plugin builds against the tagged adapter protocol module,
-`github.com/benemon/wherry/adapter`. From a clone of this repository:
+The plugin builds against the tagged plugin protocol module,
+`github.com/benemon/wherry/pluginsdk`. From a clone of this repository:
 
 ```sh
 make build
@@ -439,7 +439,7 @@ The agent sees:
   `/run/wherry/credentials/files`, the same paths the prompt names;
 - `WHERRY_MODEL` set to the task's model when the task has one, and not set
   by the plugin otherwise; the command reads it from the environment;
-- the variables of the adapter protocol's `AgentEnvironment`, as described
+- the variables of the plugin protocol's `AgentEnvironment`, as described
   in [Agent environment](#agent-environment);
 - the runtime's `command`, `args`, `env` and `resources`.
 
@@ -589,9 +589,9 @@ than a download from the pod, and the placement metric includes the time.
 
 ### Agent environment
 
-The plugin sets the variables of the adapter protocol's `AgentEnvironment`
+The plugin sets the variables of the plugin protocol's `AgentEnvironment`
 over the runtime's `env` and removes those of
-[`AgentUnset`](https://github.com/benemon/wherry/blob/main/adapter/adapter.go)
+[`AgentUnset`](https://github.com/benemon/wherry/blob/main/pluginsdk/pluginsdk.go)
 from it, so no system, global or environment `git` configuration reaches
 the agent's clones. It removes them from the runtime's `env` only; keep
 them out of agent images' `ENV`. CA and proxy variables pass through as the
@@ -600,17 +600,17 @@ agent that runs commands of its own can undo this.
 
 ## Metrics
 
-The plugin speaks adapter protocol version 9, and a receiver of another
+The plugin speaks plugin protocol version 10, and a receiver of another
 protocol version refuses it, so upgrade it with the receiver. For each
 plugin profile it reports these families, which the receiver serves on its
 `/metrics` with the plugin profile's name as `profile`:
 
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
-| `wherry_adapter_platform_errors_total` | counter | `class` | failed API calls |
-| `wherry_adapter_cleanup_pending` | gauge | none | the plugin profile's ended pods the latest sweep left |
-| `wherry_adapter_sweep_deletions_total` | counter | `kind` | the plugin profile's pods a sweep purged (`job`) and Secrets it deleted (`variable`) |
-| `wherry_adapter_placement_seconds` | histogram | none | time from a Dispatch that creates the pod to the plugin seeing its agent container running |
+| `wherry_plugin_platform_errors_total` | counter | `class` | failed API calls |
+| `wherry_plugin_cleanup_pending` | gauge | none | the plugin profile's ended pods the latest sweep left |
+| `wherry_plugin_sweep_deletions_total` | counter | `kind` | the plugin profile's pods a sweep purged (`job`) and Secrets it deleted (`variable`) |
+| `wherry_plugin_placement_seconds` | histogram | none | time from a Dispatch that creates the pod to the plugin seeing its agent container running |
 
 An API call's class comes from its status: 401 and 403 are `denied`, 409
 `conflict`, 408, 504 and the `Timeout` and `ServerTimeout` reasons
@@ -902,7 +902,7 @@ otherwise. They read:
 | `WHERRY_KUBERNETES_DEV_USER` | optional; the conformance tests' `runtime.user`, for a cluster that assigns no UID |
 
 They include the protocol's conformance suite,
-`github.com/benemon/wherry/adapter/adaptertest`, in process and against
+`github.com/benemon/wherry/pluginsdk/pluginsdktest`, in process and against
 the built plugin, and `TestRoleSuffices`, which runs the suite and checks
 each pod it dispatches. They set `runtime.user` from
 `WHERRY_KUBERNETES_DEV_USER` and leave it unset without it, so they run on
