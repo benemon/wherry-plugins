@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Provisions as the operator guide does, with wherry admin from the runner: the pool e2e, the tenant e2e, the host
-# runner and the receiver kind-1. Then writes the host's client configuration, with a generated dummy credential and
-# generated S3 storage keys, and registers the host key. The pool has no storage, so the host uses no S3 lane.
+# runner and the receiver kind-1. Then writes the host's client configuration, with a generated dummy credential,
+# and registers the host key.
 . "$(dirname "$0")/common.sh"
 umask 077
 kubectl get secret -n kafka wherry-kafka-cluster-ca-cert -o jsonpath='{.data.ca\.crt}' | base64 -d >"$work/ca.crt"
@@ -22,18 +22,13 @@ for bundle in host receiver; do
 done
 
 mkdir -p "$work/host"
-for name in dummy s3-access-key s3-secret-key; do
-	head -c 24 /dev/urandom | base64 >"$work/host/$name"
-	mask "$(cat "$work/host/$name")"
-done
+head -c 24 /dev/urandom | base64 >"$work/host/dummy"
+mask "$(cat "$work/host/dummy")"
 cat >"$host_config" <<YAML
 bundle: "$work/host.bundle"
 host_key: "$work/host/host.key"
 state_dir: "$work/host/state"
 credentials:
   dummy: {file: "$work/host/dummy"}
-  s3-access-key: {file: "$work/host/s3-access-key"}
-  s3-secret-key: {file: "$work/host/s3-secret-key"}
-storage: {access_key: s3-access-key, secret_key: s3-secret-key}
 YAML
 wherry init --config-file "$host_config"
