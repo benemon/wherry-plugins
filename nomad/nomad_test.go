@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2657,5 +2658,96 @@ func TestJoinedKeepsASingleError(t *testing.T) {
 	other := errors.New("other")
 	if err := joined([]error{single, other}); !errors.Is(err, single) || !errors.Is(err, other) {
 		t.Fatalf("joined two errors = %v; want both", err)
+	}
+}
+
+// A followed log stream cut mid-frame after the task ended is read again whole, and the run's outcome stands.
+func TestBrokenStreamOfAFinishedTaskIsReadWhole(t *testing.T) {
+	raw := testdata(t, "signal.allocation.json")
+	var alloc api.Allocation
+	if err := json.Unmarshal(raw, &alloc); err != nil {
+		t.Fatal(err)
+	}
+	const stdout = "working\n"
+	profile, requests := nomadServer(t, map[string]http.HandlerFunc{
+		"GET /v1/allocation/" + alloc.ID: serve(raw),
+		"GET /v1/client/fs/logs/" + alloc.ID: func(response http.ResponseWriter, request *http.Request) {
+			if request.URL.Query().Get("follow") == "true" {
+				_, _ = io.WriteString(response, `{"Data":"`+base64.StdEncoding.EncodeToString([]byte("work")))
+				return
+			}
+			offset, _ := strconv.Atoi(request.URL.Query().Get("offset"))
+			_ = json.NewEncoder(response).Encode(&api.StreamFrame{Data: []byte(stdout[min(offset, len(stdout)):])})
+		},
+	})
+	data, _ := json.Marshal(handle{V: 1, Job: alloc.JobID, Alloc: alloc.ID})
+	lines := make(chan pluginsdk.Line, 4)
+	terminal, err := profile.Follow(context.Background(), pluginsdk.Handle{Data: data}, 0, lines)
+	want := pluginsdk.Terminal{Started: true, ExitCode: 137, Signal: "9", Node: "dev-node"}
+	if err != nil || terminal != want {
+		t.Fatalf("follow = %#v, %v; want %#v; requests %v", terminal, err, want, requests())
+	}
+	var got []string
+	for _, line := range closeAndRead(lines) {
+		got = append(got, string(line.Data))
+	}
+	if !slices.Equal(got, []string{"working"}) {
+		t.Fatalf("lines %q, want [working]", got)
+	}
+}
+
+// A running task's followed stream that breaks is opened again from the last line boundary: no line is lost or repeated.
+func TestBrokenStreamOfARunningTaskIsFollowedAgain(t *testing.T) {
+	raw := testdata(t, "signal.allocation.json")
+	var alloc api.Allocation
+	if err := json.Unmarshal(raw, &alloc); err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["ClientStatus"] = "running"
+	running, _ := json.Marshal(fields)
+	var infos, follows atomic.Int32
+	var offsets []string
+	var mu sync.Mutex
+	const stdout = "line1\nline2\n"
+	profile, requests := nomadServer(t, map[string]http.HandlerFunc{
+		"GET /v1/allocation/" + alloc.ID: func(response http.ResponseWriter, _ *http.Request) {
+			if infos.Add(1) <= 2 {
+				_, _ = response.Write(running)
+				return
+			}
+			_, _ = response.Write(raw)
+		},
+		"GET /v1/client/fs/logs/" + alloc.ID: func(response http.ResponseWriter, request *http.Request) {
+			offset, _ := strconv.Atoi(request.URL.Query().Get("offset"))
+			mu.Lock()
+			offsets = append(offsets, request.URL.Query().Get("follow")+"@"+strconv.Itoa(offset))
+			mu.Unlock()
+			if request.URL.Query().Get("follow") == "true" && follows.Add(1) == 1 {
+				_ = json.NewEncoder(response).Encode(&api.StreamFrame{Data: []byte("line1\nli")})
+				_, _ = io.WriteString(response, `{"Data":"`+base64.StdEncoding.EncodeToString([]byte("ne2")))
+				return
+			}
+			_ = json.NewEncoder(response).Encode(&api.StreamFrame{Data: []byte(stdout[min(offset, len(stdout)):])})
+		},
+	})
+	data, _ := json.Marshal(handle{V: 1, Job: alloc.JobID, Alloc: alloc.ID})
+	lines := make(chan pluginsdk.Line, 8)
+	terminal, err := profile.Follow(context.Background(), pluginsdk.Handle{Data: data}, 0, lines)
+	if err != nil || !terminal.Started {
+		t.Fatalf("follow = %#v, %v; requests %v", terminal, err, requests())
+	}
+	var got []string
+	for _, line := range closeAndRead(lines) {
+		got = append(got, string(line.Data))
+	}
+	if !slices.Equal(got, []string{"line1", "line2"}) {
+		t.Fatalf("lines %q, want [line1 line2]; log reads %v", got, offsets)
+	}
+	if follows.Load() < 2 || !slices.Contains(offsets, "true@6") {
+		t.Fatalf("log reads %v; want the stream opened again at offset 6", offsets)
 	}
 }
