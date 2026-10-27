@@ -37,9 +37,9 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: docker
-    directories: [/kubernetes, /kubernetes/test/e2e/agent]
+    directories: [/examples/kubernetes, /examples/nomad, /kubernetes/test/e2e/agent]
     schedule:
       interval: weekly
     groups:
-      images-kubernetes:
+      images:
         patterns: ["*"]

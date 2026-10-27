@@ -116,7 +116,7 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 	}
 }
 
-// merge returns base with over merged in as wherry merges a plugin profile's config onto its plugin's: maps merge
+// merge returns base with over merged onto it as wherry merges a plugin profile's config onto its plugin's: maps merge
 // recursively, and over wins on every other key.
 func merge(base, over map[string]any) map[string]any {
 	merged := make(map[string]any, len(base)+len(over))
@@ -124,10 +124,11 @@ func merge(base, over map[string]any) map[string]any {
 		merged[key] = value
 	}
 	for key, value := range over {
-		inner, overMap := value.(map[string]any)
-		inherited, baseMap := merged[key].(map[string]any)
-		if overMap && baseMap {
-			value = merge(inherited, inner)
+		inherited, inheritedMap := merged[key].(map[string]any)
+		overriding, overridingMap := value.(map[string]any)
+		if inheritedMap && overridingMap {
+			merged[key] = merge(inherited, overriding)
+			continue
 		}
 		merged[key] = value
 	}

@@ -78,7 +78,7 @@ var (
 	errReplaced       = errors.New("the pod was replaced")
 )
 
-// Config is the adapter's section of the receiver configuration.
+// Config is the plugin's config with the plugin profile's merged onto it and its credential key removed.
 type Config struct {
 	Address      string            `json:"address"`
 	CAFile       string            `json:"ca_file"`
@@ -217,7 +217,7 @@ func image(value string) bool {
 	return value != "" && !strings.ContainsFunc(value, unicode.IsSpace)
 }
 
-// New builds the adapter named name for a pool's runs through client.
+// New builds the adapter for the plugin profile name, for a pool's runs through client.
 func New(config Config, name, pool string, client *rest.Config, logger hclog.Logger) (*Adapter, error) {
 	switch {
 	case len(validation.IsDNS1123Label(config.Namespace)) > 0:

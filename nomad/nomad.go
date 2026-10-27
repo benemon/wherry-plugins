@@ -56,7 +56,7 @@ func credentialItem(secret wherry.Secret) string {
 	return "credentials/" + secret.File
 }
 
-// Config is the adapter's section of the receiver configuration.
+// Config is the plugin's config with the plugin profile's merged onto it and its credential key removed.
 type Config struct {
 	Address   string  `json:"address"`
 	CAFile    string  `json:"ca_file"`
@@ -152,7 +152,7 @@ func newClient(config Config, token string) (*api.Client, error) {
 	return api.NewClient(apiConfig)
 }
 
-// New builds the adapter named name for a pool's jobs on client.
+// New builds the adapter for the plugin profile name, for a pool's jobs on client.
 func New(config Config, name, pool string, client *api.Client, logger hclog.Logger) (*Adapter, error) {
 	for variable := range config.Runtime.Env {
 		if !envName.MatchString(variable) {
