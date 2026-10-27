@@ -9,18 +9,18 @@ import (
 	"strings"
 	"testing"
 
-	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/hashicorp/go-hclog"
 	"go.yaml.in/yaml/v3"
 )
 
-func settings(t *testing.T, name string, config map[string]any) wherry.Settings {
+func settings(t *testing.T, name string, config map[string]any) pluginsdk.Settings {
 	t.Helper()
 	encoded, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return wherry.Settings{Name: name, Pool: testPool, Agent: "claude", Config: encoded}
+	return pluginsdk.Settings{Name: name, Pool: testPool, Agent: "claude", Config: encoded}
 }
 
 func unitConfig(command ...string) map[string]any {
@@ -31,20 +31,20 @@ func TestFactoryDecodesStrictly(t *testing.T) {
 	newHost(t)
 	unknown := unitConfig("/bin/true")
 	unknown["inaccessible_paths"] = []string{"-/opt/nomad"}
-	if _, err := newAdapter(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
-		t.Fatal("accepted adapter config with an unknown member")
+	if _, err := newProfile(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
+		t.Fatal("accepted plugin config with an unknown member")
 	}
 	unknown = unitConfig("/bin/true")
 	unknown["runtime"].(map[string]any)["image"] = "registry.example.com/agent:1.0"
-	if _, err := newAdapter(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
+	if _, err := newProfile(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
 		t.Fatal("accepted a runtime with an unknown member")
 	}
 	unknown = unitConfig("/bin/true")
 	unknown["runtime"].(map[string]any)["resources"] = map[string]any{"cpu": 1000}
-	if _, err := newAdapter(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
+	if _, err := newProfile(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
 		t.Fatal("accepted resources with an unknown member")
 	}
-	if _, err := newAdapter(settings(t, "lab", unitConfig("/bin/true")), hclog.NewNullLogger()); err != nil {
+	if _, err := newProfile(settings(t, "lab", unitConfig("/bin/true")), hclog.NewNullLogger()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -54,7 +54,7 @@ func TestFactoryRefusesCredentialEnv(t *testing.T) {
 	newHost(t)
 	config := unitConfig("/bin/true")
 	config["credential_env"] = "ANTHROPIC_API_KEY"
-	if _, err := newAdapter(settings(t, "lab", config), hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "credential_env") {
+	if _, err := newProfile(settings(t, "lab", config), hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "credential_env") {
 		t.Fatalf("got %v, want credential_env refused as an unknown member", err)
 	}
 }
@@ -63,20 +63,20 @@ func TestFactoryRefusesAPlatformCredential(t *testing.T) {
 	newHost(t)
 	withPlatform := settings(t, "lab", unitConfig("/bin/true"))
 	withPlatform.Credential = "token"
-	if _, err := newAdapter(withPlatform, hclog.NewNullLogger()); err == nil || err.Error() != "the systemd plugin takes no platform credential" {
+	if _, err := newProfile(withPlatform, hclog.NewNullLogger()); err == nil || err.Error() != "the systemd plugin takes no platform credential" {
 		t.Fatalf("got %v", err)
 	}
 }
 
-func TestFactoryGivesTheAdapterServesLogger(t *testing.T) {
+func TestFactoryGivesTheProfileServesLogger(t *testing.T) {
 	newHost(t)
 	logger := hclog.New(&hclog.LoggerOptions{Name: "served"})
-	built, err := newAdapter(settings(t, "lab", unitConfig("/bin/true")), logger)
+	built, err := newProfile(settings(t, "lab", unitConfig("/bin/true")), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if built.(*Adapter).logger != logger {
-		t.Fatal("adapter logs elsewhere than the logger Serve gave the factory")
+	if built.(*Systemd).logger != logger {
+		t.Fatal("profile logs elsewhere than the logger Serve gave the factory")
 	}
 }
 
@@ -122,8 +122,8 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := wherry.Settings{Name: profile.Name, Pool: testPool, Agent: profile.Agent, Config: encoded}
-		if _, err := newAdapter(s, hclog.NewNullLogger()); err != nil {
+		s := pluginsdk.Settings{Name: profile.Name, Pool: testPool, Agent: profile.Agent, Config: encoded}
+		if _, err := newProfile(s, hclog.NewNullLogger()); err != nil {
 			t.Fatalf("profile %s: %v", profile.Name, err)
 		}
 	}

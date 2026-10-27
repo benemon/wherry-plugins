@@ -12,8 +12,8 @@ private socket, `/run/systemd/private`, and runs as root.
 
 ## Build
 
-The plugin builds against the tagged adapter protocol module,
-`github.com/benemon/wherry/adapter`. From a clone of this repository:
+The plugin builds against the tagged plugin protocol module,
+`github.com/benemon/wherry/pluginsdk`. From a clone of this repository:
 
 ```sh
 make build
@@ -282,7 +282,7 @@ The agent sees:
   the same paths the prompt names;
 - `WHERRY_MODEL` set to the task's model when the task has one, and not set
   by the plugin otherwise;
-- the variables of the adapter protocol's `AgentEnvironment`, as described
+- the variables of the plugin protocol's `AgentEnvironment`, as described
   in [Agent environment](#agent-environment);
 - the runtime's `command` and `args` exactly: systemd expands no `$` in
   them (`no-env-expand`).
@@ -446,9 +446,9 @@ includes the fetch time.
 
 ### Agent environment
 
-The plugin sets the variables of the adapter protocol's `AgentEnvironment`
+The plugin sets the variables of the plugin protocol's `AgentEnvironment`
 over the runtime's `env` and removes those of
-[`AgentUnset`](https://github.com/benemon/wherry/blob/main/adapter/adapter.go)
+[`AgentUnset`](https://github.com/benemon/wherry/blob/main/pluginsdk/pluginsdk.go)
 from it, so no system, global or environment `git` configuration reaches
 the agent's clones. CA and proxy variables pass through as the operator
 sets them. This protects an agent that follows its prompt. An agent that
@@ -461,17 +461,17 @@ the host. Keep material out of `runtime.env`.
 
 ## Metrics
 
-The plugin speaks adapter protocol version 9, and a receiver of another
+The plugin speaks plugin protocol version 10, and a receiver of another
 protocol version refuses it, so upgrade it with the receiver. For each
 plugin profile it reports these families, which the receiver serves on its
 `/metrics` with the plugin profile's name as `profile`:
 
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
-| `wherry_adapter_platform_errors_total` | counter | `class` | failed systemd and filesystem calls |
-| `wherry_adapter_cleanup_pending` | gauge | none | the plugin profile's ended runs the latest sweep left |
-| `wherry_adapter_sweep_deletions_total` | counter | `kind` | the plugin profile's runs a sweep purged (`job`) and stale material of a Dispatch cut short it removed (`variable`) |
-| `wherry_adapter_placement_seconds` | histogram | none | time from a Dispatch that starts the unit to its start job's end, fetches included |
+| `wherry_plugin_platform_errors_total` | counter | `class` | failed systemd and filesystem calls |
+| `wherry_plugin_cleanup_pending` | gauge | none | the plugin profile's ended runs the latest sweep left |
+| `wherry_plugin_sweep_deletions_total` | counter | `kind` | the plugin profile's runs a sweep purged (`job`) and stale material of a Dispatch cut short it removed (`variable`) |
+| `wherry_plugin_placement_seconds` | histogram | none | time from a Dispatch that starts the unit to its start job's end, fetches included |
 
 A D-Bus call's class comes from its error name: `AccessDenied` and
 `InteractiveAuthorizationRequired` are `denied`; `UnitExists`,
@@ -663,7 +663,7 @@ WHERRY_SYSTEMD_DEV=1 WHERRY_SYSTEMD_PLUGIN=/usr/local/libexec/wherry/test/wherry
 ```
 
 They include the protocol's conformance suite,
-`github.com/benemon/wherry/adapter/adaptertest`, in process, against the
+`github.com/benemon/wherry/pluginsdk/pluginsdktest`, in process, against the
 plugin binary, and under the receiver unit's capability bounding set. CI
 builds both binaries and runs them on the GitHub runner's systemd, 255
 on Ubuntu 24.04.

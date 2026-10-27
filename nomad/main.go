@@ -1,4 +1,4 @@
-// Command wherry-plugin-nomad is the wherry adapter plugin for HashiCorp Nomad. The receiver starts it
+// Command wherry-plugin-nomad is the wherry plugin for HashiCorp Nomad. The receiver starts it
 // from its plugin directory; it is not run by hand.
 package main
 
@@ -7,15 +7,15 @@ import (
 	"fmt"
 	"os"
 
-	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/hashicorp/go-hclog"
 )
 
 func main() {
-	wherry.Serve(newAdapter)
+	pluginsdk.Serve(newProfile)
 }
 
-func newAdapter(settings wherry.Settings, logger hclog.Logger) (wherry.Adapter, error) {
+func newProfile(settings pluginsdk.Settings, logger hclog.Logger) (pluginsdk.Plugin, error) {
 	var config Config
 	if err := json.Unmarshal(settings.Config, &config, json.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)

@@ -29,7 +29,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/pluginsdk"
 	sd "github.com/coreos/go-systemd/v22/dbus"
 	"github.com/godbus/dbus/v5"
 	"github.com/hashicorp/go-hclog"
@@ -102,7 +102,7 @@ var (
 	errNotAgent = errors.New("existing unit is not an agent unit")
 )
 
-// manager is the part of go-systemd's connection to PID 1 the adapter uses.
+// manager is the part of go-systemd's connection to PID 1 the plugin uses.
 type manager interface {
 	StartTransientUnitContext(ctx context.Context, name, mode string, properties []sd.Property, ch chan<- string) (int, error)
 	StopUnitContext(ctx context.Context, name, mode string, ch chan<- string) (int, error)
@@ -120,7 +120,7 @@ type Config struct {
 	Runtime Runtime `json:"runtime"`
 }
 
-// Runtime defines the agent command the adapter runs in each unit.
+// Runtime defines the agent command the plugin runs in each unit.
 type Runtime struct {
 	Command             []string          `json:"command"`
 	Args                []string          `json:"args"`
@@ -143,8 +143,8 @@ const (
 	defaultMemoryMB = 2048
 )
 
-// Adapter runs each run as one transient service on the receiver's host.
-type Adapter struct {
+// Systemd runs each run as one transient service on the receiver's host.
+type Systemd struct {
 	name, pool, node string
 	runtime          Runtime
 	user, group      string
@@ -188,14 +188,14 @@ type recorded struct {
 	Signal   string `json:"signal"`
 }
 
-// handle is the version 1 encoding of wherry.Handle.Data.
+// handle is the version 1 encoding of pluginsdk.Handle.Data.
 type handle struct {
 	V        int    `json:"v"`
 	Unit     string `json:"unit"`
 	Instance string `json:"instance"`
 }
 
-// unit is what the adapter reads of a unit; timestamps are microseconds since the epoch, 0 when unset.
+// unit is what the plugin reads of a unit; timestamps are microseconds since the epoch, 0 when unset.
 type unit struct {
 	loaded, transient      bool
 	active, result, cgroup string
@@ -223,8 +223,8 @@ func validID(value string) bool {
 	return idNumber.MatchString(value) && err == nil
 }
 
-// New builds the adapter for the plugin profile name, for a pool's runs, after checking the host it runs on.
-func New(config Config, name, pool string, logger hclog.Logger) (*Adapter, error) {
+// New builds the plugin profile named name, for a pool's runs, after checking the host it runs on.
+func New(config Config, name, pool string, logger hclog.Logger) (*Systemd, error) {
 	command := config.Runtime.Command
 	switch {
 	case len(command) == 0 || !path.IsAbs(command[0]):
@@ -291,7 +291,7 @@ func New(config Config, name, pool string, logger hclog.Logger) (*Adapter, error
 	if !supported(version) {
 		return nil, errors.New("systemd 252 or later is required")
 	}
-	return &Adapter{
+	return &Systemd{
 		name: name, pool: pool, node: node, runtime: config.Runtime,
 		user: user, group: group, cpuQuota: cpuQuota, memoryMB: memoryMB,
 		fetcher: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -341,11 +341,11 @@ func supported(version string) bool {
 }
 
 // InlineLimit reports no limit: inputs are files, so only the pool's inline limit and the link bound them.
-func (adapter *Adapter) InlineLimit() int64 { return 0 }
+func (profile *Systemd) InlineLimit() int64 { return 0 }
 
 // Directories reports the fixed paths each agent unit sees.
-func (adapter *Adapter) Directories() wherry.Directories {
-	return wherry.Directories{Input: inputPath, Output: outputPath, Credentials: credentialsPath}
+func (profile *Systemd) Directories() pluginsdk.Directories {
+	return pluginsdk.Directories{Input: inputPath, Output: outputPath, Credentials: credentialsPath}
 }
 
 // jobName is the name of a run's directories.
@@ -354,8 +354,8 @@ func jobName(pool, runID string) string {
 	return fmt.Sprintf("%s%s-%s", jobPrefix, hex.EncodeToString(sum[:])[:12], runID)
 }
 
-func (adapter *Adapter) jobName(runID string) string {
-	return jobName(adapter.pool, runID)
+func (profile *Systemd) jobName(runID string) string {
+	return jobName(profile.pool, runID)
 }
 
 // unitName is the name of a run's transient unit.
@@ -376,8 +376,8 @@ func workDirs(job string) []string {
 	return []string{filepath.Join(agentRoot(true), job), filepath.Join(agentRoot(false), job)}
 }
 
-func (adapter *Adapter) workDir(job string) string {
-	return filepath.Join(agentRoot(adapter.user == ""), job)
+func (profile *Systemd) workDir(job string) string {
+	return filepath.Join(agentRoot(profile.user == ""), job)
 }
 
 func markerPath(job string) string {
@@ -389,37 +389,37 @@ func stdoutPath(job string) string {
 }
 
 // bus returns the connection to PID 1, dialling again once daemon-reexec or a failure has closed it.
-func (adapter *Adapter) bus(ctx context.Context) (manager, error) {
-	adapter.mu.Lock()
-	defer adapter.mu.Unlock()
-	if adapter.conn != nil && adapter.conn.Connected() {
-		return adapter.conn, nil
+func (profile *Systemd) bus(ctx context.Context) (manager, error) {
+	profile.mu.Lock()
+	defer profile.mu.Unlock()
+	if profile.conn != nil && profile.conn.Connected() {
+		return profile.conn, nil
 	}
 	conn, err := dial(ctx)
 	if err != nil {
-		return nil, adapter.failed("connect to systemd", err)
+		return nil, profile.failed("connect to systemd", err)
 	}
-	adapter.conn = conn
+	profile.conn = conn
 	return conn, nil
 }
 
 // lock takes the lock of a run's job, which Dispatch holds and the sweep skips; without wait it returns false at once
 // when the lock is held.
-func (adapter *Adapter) lock(job string, wait bool) (func(), bool) {
-	adapter.mu.Lock()
-	held := adapter.locks[job]
+func (profile *Systemd) lock(job string, wait bool) (func(), bool) {
+	profile.mu.Lock()
+	held := profile.locks[job]
 	if held == nil {
 		held = &runLock{}
-		adapter.locks[job] = held
+		profile.locks[job] = held
 	}
 	held.users++
-	adapter.mu.Unlock()
+	profile.mu.Unlock()
 	leave := func() {
-		adapter.mu.Lock()
+		profile.mu.Lock()
 		if held.users--; held.users == 0 {
-			delete(adapter.locks, job)
+			delete(profile.locks, job)
 		}
-		adapter.mu.Unlock()
+		profile.mu.Unlock()
 	}
 	if !wait && !held.TryLock() {
 		leave()
@@ -468,9 +468,9 @@ func wrapper(variables []string) string {
 }
 
 // properties builds the run's unit, whose agent reads its credentials from the files LoadCredential= names.
-func (adapter *Adapter) properties(run wherry.Run, job string, credentials []loadCredential) []sd.Property {
+func (profile *Systemd) properties(run pluginsdk.Run, job string, credentials []loadCredential) []sd.Property {
 	name := unitName(job)
-	env := wherry.AgentEnv(adapter.runtime.Env)
+	env := pluginsdk.AgentEnv(profile.runtime.Env)
 	own := []string{"HOME=" + workPath, "WHERRY_INPUT_DIR=" + inputPath, "WHERRY_OUTPUT_DIR=" + outputPath, "WHERRY_CREDENTIALS_DIR=" + credentialsPath}
 	if run.Model != "" {
 		own = append(own, "WHERRY_MODEL="+run.Model)
@@ -489,7 +489,7 @@ func (adapter *Adapter) properties(run wherry.Run, job string, credentials []loa
 		vars = append(vars, variable+"="+env[variable])
 	}
 	vars = append(vars, own...)
-	argv := slices.Concat(adapter.runtime.Command, adapter.runtime.Args)
+	argv := slices.Concat(profile.runtime.Command, profile.runtime.Args)
 	var variables []string
 	for _, secret := range run.Credentials {
 		if secret.Env != "" {
@@ -513,7 +513,7 @@ func (adapter *Adapter) properties(run wherry.Run, job string, credentials []loa
 		property("StandardErrorFileToAppend", filepath.Join(control, "stderr")),
 		property("StateDirectory", []string{"wherry-agents/" + job}),
 		property("StateDirectoryMode", uint32(0o700)),
-		property("BindPaths", []bindPath{{Source: adapter.workDir(job), Destination: workPath, Flags: syscall.MS_REC}}),
+		property("BindPaths", []bindPath{{Source: profile.workDir(job), Destination: workPath, Flags: syscall.MS_REC}}),
 		property("BindReadOnlyPaths", []bindPath{{Source: "/run/credentials/" + name, Destination: credentialsPath, IgnoreMissing: true, Flags: syscall.MS_REC}}),
 		property("InaccessiblePaths", []string{"/var/lib/wherry", "-/etc/wherry", "/run/wherry-systemd", "/run/systemd/transient", "-/run/systemd/journal"}),
 		// A limit of exactly 1 makes the kernel abort a dump to a pipe handler, which would log the environment.
@@ -539,24 +539,24 @@ func (adapter *Adapter) properties(run wherry.Run, job string, credentials []loa
 		property("CapabilityBoundingSet", uint64(0)),
 		property("KeyringMode", "private"),
 		property("UMask", uint32(0o077)),
-		property("CPUQuotaPerSecUSec", uint64(adapter.cpuQuota)*10000),
-		property("MemoryMax", uint64(adapter.memoryMB)<<20),
+		property("CPUQuotaPerSecUSec", uint64(profile.cpuQuota)*10000),
+		property("MemoryMax", uint64(profile.memoryMB)<<20),
 		property("MemorySwapMax", uint64(0)),
 		property("KillMode", "control-group"),
 		property("TimeoutStartUSec", uint64(startTimeout/time.Microsecond)),
 		property("TimeoutStopUSec", uint64(stopTimeout/time.Microsecond)),
 		property("OOMPolicy", "stop"),
 	}
-	if adapter.user == "" {
+	if profile.user == "" {
 		properties = append(properties, property("DynamicUser", true), property("RemoveIPC", true))
 	} else {
 		// RemoveIPC= would remove the IPC objects of every run of a fixed user when one run stops.
-		properties = append(properties, property("User", adapter.user))
+		properties = append(properties, property("User", profile.user))
 	}
-	if adapter.group != "" {
-		properties = append(properties, property("Group", adapter.group))
+	if profile.group != "" {
+		properties = append(properties, property("Group", profile.group))
 	}
-	if groups := adapter.runtime.SupplementaryGroups; len(groups) > 0 {
+	if groups := profile.runtime.SupplementaryGroups; len(groups) > 0 {
 		properties = append(properties, property("SupplementaryGroups", groups))
 	}
 	if len(credentials) > 0 {
@@ -567,14 +567,14 @@ func (adapter *Adapter) properties(run wherry.Run, job string, credentials []loa
 
 // Ready reports whether the manager is running, degraded included, or starting: basic.target is active, which an
 // agent unit's default dependencies wait for, though the boot's other jobs have not all ended.
-func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
-	bus, err := adapter.bus(ctx)
+func (profile *Systemd) Ready(ctx context.Context) (bool, error) {
+	bus, err := profile.bus(ctx)
 	if err != nil {
 		return false, err
 	}
 	state, err := bus.SystemStateContext(ctx)
 	if err != nil {
-		return false, adapter.failed("read system state", err)
+		return false, profile.failed("read system state", err)
 	}
 	value, _ := state.Value.Value().(string)
 	return value == "running" || value == "degraded" || value == "starting", nil
@@ -582,15 +582,15 @@ func (adapter *Adapter) Ready(ctx context.Context) (bool, error) {
 
 // deliverable refuses a run systemd cannot deliver: an input name over NAME_MAX, credentials over systemd's limit, and
 // a credential or model that cannot be an environment value.
-func deliverable(run wherry.Run) error {
+func deliverable(run pluginsdk.Run) error {
 	for _, input := range run.Inputs {
 		if len(input.Name) > maxName {
-			return &wherry.InputTooLargeError{Name: input.Name}
+			return &pluginsdk.InputTooLargeError{Name: input.Name}
 		}
 	}
 	for _, fetch := range run.Fetches {
 		if len(fetch.Name) > maxName {
-			return &wherry.InputTooLargeError{Name: fetch.Name}
+			return &pluginsdk.InputTooLargeError{Name: fetch.Name}
 		}
 	}
 	if credentialTotal(run) > maxCredentials {
@@ -608,102 +608,102 @@ func deliverable(run wherry.Run) error {
 }
 
 // Dispatch starts a run's unit idempotently and returns once its agent has started or its unit has ended.
-func (adapter *Adapter) Dispatch(ctx context.Context, run wherry.Run) (wherry.Outcome, wherry.Handle, error) {
+func (profile *Systemd) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
 	began := time.Now()
 	if err := deliverable(run); err != nil {
-		return wherry.OutcomeNothingCreated, wherry.Handle{}, err
+		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, err
 	}
-	job := adapter.jobName(run.ID)
-	unlock, _ := adapter.lock(job, true)
+	job := profile.jobName(run.ID)
+	unlock, _ := profile.lock(job, true)
 	defer unlock()
 	m, err := readMarker(job)
 	if err != nil {
-		return wherry.OutcomeUnknown, wherry.Handle{}, adapter.failed("read "+markerPath(job), err)
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, profile.failed("read "+markerPath(job), err)
 	}
-	u, err := adapter.unit(ctx, unitName(job))
+	u, err := profile.unit(ctx, unitName(job))
 	if err != nil {
-		return wherry.OutcomeUnknown, wherry.Handle{}, err
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, err
 	}
-	if adapter.foreign(m, u) {
-		return wherry.OutcomeUnknown, wherry.Handle{}, errNotAgent
+	if profile.foreign(m, u) {
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, errNotAgent
 	}
 	started := false
 	if !u.loaded && (m == nil || m.Phase == phasePrepared && m.NeverStarted == nil) {
-		var outcome wherry.Outcome
-		if started, outcome, err = adapter.start(ctx, run, job); err != nil {
-			return outcome, wherry.Handle{}, err
+		var outcome pluginsdk.Outcome
+		if started, outcome, err = profile.start(ctx, run, job); err != nil {
+			return outcome, pluginsdk.Handle{}, err
 		}
 	}
-	handle, _, err := adapter.wait(ctx, job)
+	handle, _, err := profile.wait(ctx, job)
 	if err != nil {
-		return wherry.OutcomeUnknown, wherry.Handle{}, err
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, err
 	}
 	if started {
-		adapter.metrics.Placed(time.Since(began).Seconds())
+		profile.metrics.Placed(time.Since(began).Seconds())
 	}
-	return wherry.OutcomeCreated, handle, nil
+	return pluginsdk.OutcomeCreated, handle, nil
 }
 
 // foreign reports whether a run's marker or unit is not this pool's agent unit.
-func (adapter *Adapter) foreign(m *marker, u unit) bool {
-	return u.loaded && (m == nil || !u.transient) || m != nil && m.Pool != adapter.pool
+func (profile *Systemd) foreign(m *marker, u unit) bool {
+	return u.loaded && (m == nil || !u.transient) || m != nil && m.Pool != profile.pool
 }
 
 // start writes the run's material over any leftover and starts its unit. It reports whether the start job was done,
 // or the outcome and error of a run that never reached its start.
-func (adapter *Adapter) start(ctx context.Context, run wherry.Run, job string) (bool, wherry.Outcome, error) {
+func (profile *Systemd) start(ctx context.Context, run pluginsdk.Run, job string) (bool, pluginsdk.Outcome, error) {
 	name := unitName(job)
-	if err := adapter.removeRun(job); err != nil {
-		return false, wherry.OutcomeNothingCreated, err
+	if err := profile.removeRun(job); err != nil {
+		return false, pluginsdk.OutcomeNothingCreated, err
 	}
 	instance := make([]byte, 16)
 	_, _ = rand.Read(instance)
-	m := &marker{V: 1, Pool: adapter.pool, Profile: run.Profile, Agent: run.Agent, Run: run.ID, Attempt: run.Attempt,
+	m := &marker{V: 1, Pool: profile.pool, Profile: run.Profile, Agent: run.Agent, Run: run.ID, Attempt: run.Attempt,
 		Instance: hex.EncodeToString(instance), Phase: phasePrepared}
-	abandon := func(cause error) (bool, wherry.Outcome, error) {
-		if err := adapter.removeRun(job); err != nil {
-			return false, wherry.OutcomeNothingCreated, errors.Join(cause, err)
+	abandon := func(cause error) (bool, pluginsdk.Outcome, error) {
+		if err := profile.removeRun(job); err != nil {
+			return false, pluginsdk.OutcomeNothingCreated, errors.Join(cause, err)
 		}
-		return false, wherry.OutcomeNothingCreated, cause
+		return false, pluginsdk.OutcomeNothingCreated, cause
 	}
-	if err := adapter.prepare(job, run, m); err != nil {
+	if err := profile.prepare(job, run, m); err != nil {
 		return abandon(err)
 	}
-	if never, err := adapter.fetchAll(ctx, job, run.Fetches); ctx.Err() != nil {
+	if never, err := profile.fetchAll(ctx, job, run.Fetches); ctx.Err() != nil {
 		return abandon(ctx.Err())
 	} else if err != nil {
 		return abandon(err)
 	} else if never != nil {
 		m.NeverStarted = never
-		if err := adapter.writeMarker(job, m); err != nil {
+		if err := profile.writeMarker(job, m); err != nil {
 			return abandon(err)
 		}
-		return false, wherry.OutcomeCreated, nil
+		return false, pluginsdk.OutcomeCreated, nil
 	}
 	credentials, err := writeCredentials(name, run)
 	if err != nil {
-		return abandon(adapter.failed("write credentials of "+name, err))
+		return abandon(profile.failed("write credentials of "+name, err))
 	}
 	defer func() {
 		if err := removeCredentials(name); err != nil {
-			adapter.handled("remove credentials of "+name, err)
+			profile.handled("remove credentials of "+name, err)
 		}
 	}()
 	m.Phase = phaseStarting
-	if err := adapter.writeMarker(job, m); err != nil {
+	if err := profile.writeMarker(job, m); err != nil {
 		return abandon(err)
 	}
-	bus, err := adapter.bus(ctx)
+	bus, err := profile.bus(ctx)
 	if err != nil {
 		return abandon(err)
 	}
 	results := make(chan string, 1)
-	_, err = bus.StartTransientUnitContext(ctx, name, "fail", adapter.properties(run, job, credentials), results)
+	_, err = bus.StartTransientUnitContext(ctx, name, "fail", profile.properties(run, job, credentials), results)
 	switch {
 	case busName(err) == busUnitExists:
-		return false, wherry.OutcomeCreated, nil
+		return false, pluginsdk.OutcomeCreated, nil
 	case err != nil:
-		return adapter.notStarted(ctx, job, adapter.failed("start unit "+name, err))
+		return profile.notStarted(ctx, job, profile.failed("start unit "+name, err))
 	}
 	// A connection lost before the job's end leaves the result to the wait, which reads the unit.
 	var result string
@@ -716,17 +716,17 @@ func (adapter *Adapter) start(ctx context.Context, run wherry.Run, job string) (
 	}
 	switch result {
 	case "":
-		return false, wherry.OutcomeCreated, nil
+		return false, pluginsdk.OutcomeCreated, nil
 	case "done":
 		m.Phase = phaseStarted
-		if err := adapter.writeMarker(job, m); err != nil {
-			adapter.handled("write "+markerPath(job), err)
+		if err := profile.writeMarker(job, m); err != nil {
+			profile.handled("write "+markerPath(job), err)
 		}
-		return true, wherry.OutcomeCreated, nil
+		return true, pluginsdk.OutcomeCreated, nil
 	case "failed":
-		u, err := adapter.unit(ctx, name)
+		u, err := profile.unit(ctx, name)
 		if err != nil {
-			return false, wherry.OutcomeUnknown, err
+			return false, pluginsdk.OutcomeUnknown, err
 		}
 		m.NeverStarted = &neverStarted{"start", result}
 		if class, reason, own := exitClass(u.status); own {
@@ -735,22 +735,22 @@ func (adapter *Adapter) start(ctx context.Context, run wherry.Run, job string) (
 	default:
 		m.NeverStarted = &neverStarted{"start", result}
 	}
-	if err := adapter.writeMarker(job, m); err != nil {
-		return false, wherry.OutcomeUnknown, err
+	if err := profile.writeMarker(job, m); err != nil {
+		return false, pluginsdk.OutcomeUnknown, err
 	}
-	return false, wherry.OutcomeCreated, nil
+	return false, pluginsdk.OutcomeCreated, nil
 }
 
 // notStarted removes the run's material and returns OutcomeNothingCreated when its unit is not loaded, else
 // OutcomeUnknown, with cause.
-func (adapter *Adapter) notStarted(ctx context.Context, job string, cause error) (bool, wherry.Outcome, error) {
-	if u, err := adapter.unit(ctx, unitName(job)); err != nil || u.loaded {
-		return false, wherry.OutcomeUnknown, cause
+func (profile *Systemd) notStarted(ctx context.Context, job string, cause error) (bool, pluginsdk.Outcome, error) {
+	if u, err := profile.unit(ctx, unitName(job)); err != nil || u.loaded {
+		return false, pluginsdk.OutcomeUnknown, cause
 	}
-	if err := adapter.removeRun(job); err != nil {
-		return false, wherry.OutcomeNothingCreated, errors.Join(cause, err)
+	if err := profile.removeRun(job); err != nil {
+		return false, pluginsdk.OutcomeNothingCreated, errors.Join(cause, err)
 	}
-	return false, wherry.OutcomeNothingCreated, cause
+	return false, pluginsdk.OutcomeNothingCreated, cause
 }
 
 // exitClass reports the never-started class and reason of one of systemd's own exit statuses.
@@ -772,35 +772,35 @@ func exitClass(status int32) (string, string, bool) {
 }
 
 // prepare writes the marker, the empty logs, the prompt and the inline inputs, each owner-only.
-func (adapter *Adapter) prepare(job string, run wherry.Run, m *marker) error {
-	control, work := filepath.Join(controlRoot, job), adapter.workDir(job)
+func (profile *Systemd) prepare(job string, run pluginsdk.Run, m *marker) error {
+	control, work := filepath.Join(controlRoot, job), profile.workDir(job)
 	if err := os.Mkdir(control, 0o700); err != nil {
-		return adapter.failed("create "+control, err)
+		return profile.failed("create "+control, err)
 	}
-	if err := adapter.writeMarker(job, m); err != nil {
+	if err := profile.writeMarker(job, m); err != nil {
 		return err
 	}
 	for _, file := range []string{filepath.Join(control, "stdout"), filepath.Join(control, "stderr")} {
 		if err := os.WriteFile(file, nil, 0o600); err != nil {
-			return adapter.failed("write "+file, err)
+			return profile.failed("write "+file, err)
 		}
 	}
 	for _, dir := range []string{work, filepath.Join(work, "inputs")} {
 		if err := os.Mkdir(dir, 0o700); err != nil {
-			return adapter.failed("create "+dir, err)
+			return profile.failed("create "+dir, err)
 		}
 	}
 	if err := os.WriteFile(filepath.Join(work, "prompt.txt"), run.Prompt, 0o600); err != nil {
-		return adapter.failed("write "+filepath.Join(work, "prompt.txt"), err)
+		return profile.failed("write "+filepath.Join(work, "prompt.txt"), err)
 	}
 	inputs, err := os.OpenRoot(filepath.Join(work, "inputs"))
 	if err != nil {
-		return adapter.failed("open "+filepath.Join(work, "inputs"), err)
+		return profile.failed("open "+filepath.Join(work, "inputs"), err)
 	}
 	defer inputs.Close()
 	for _, input := range run.Inputs {
 		if err := inputs.WriteFile(input.Name, input.Data, 0o600); err != nil {
-			return adapter.failed("write "+filepath.Join(work, "inputs", input.Name), err)
+			return profile.failed("write "+filepath.Join(work, "inputs", input.Name), err)
 		}
 	}
 	return nil
@@ -808,24 +808,24 @@ func (adapter *Adapter) prepare(job string, run wherry.Run, m *marker) error {
 
 // fetchAll fetches each S3 input into the run's inputs; a fetch that fails or does not verify, or a local write that
 // fails, returns the never-started record it leaves the run with.
-func (adapter *Adapter) fetchAll(ctx context.Context, job string, fetches []wherry.Fetch) (*neverStarted, error) {
+func (profile *Systemd) fetchAll(ctx context.Context, job string, fetches []pluginsdk.Fetch) (*neverStarted, error) {
 	if len(fetches) == 0 {
 		return nil, nil
 	}
-	inputs, err := os.OpenRoot(filepath.Join(adapter.workDir(job), "inputs"))
+	inputs, err := os.OpenRoot(filepath.Join(profile.workDir(job), "inputs"))
 	if err != nil {
-		return nil, adapter.failed("open "+filepath.Join(adapter.workDir(job), "inputs"), err)
+		return nil, profile.failed("open "+filepath.Join(profile.workDir(job), "inputs"), err)
 	}
 	defer inputs.Close()
 	for _, fetch := range fetches {
-		err := adapter.fetch(ctx, inputs, fetch)
+		err := profile.fetch(ctx, inputs, fetch)
 		var fetchErr *fetchError
 		switch {
 		case err == nil:
 			continue
 		case errors.As(err, &fetchErr):
-			adapter.logger.Warn("input not fetched", "profile", adapter.name, "job", job, "reason", err.Error())
-			return &neverStarted{wherry.ClassFetch, "input " + fetch.Name + ": not fetched"}, nil
+			profile.logger.Warn("input not fetched", "profile", profile.name, "job", job, "reason", err.Error())
+			return &neverStarted{pluginsdk.ClassFetch, "input " + fetch.Name + ": not fetched"}, nil
 		}
 		var errno syscall.Errno
 		reason := "write failed"
@@ -839,12 +839,12 @@ func (adapter *Adapter) fetchAll(ctx context.Context, job string, fetches []wher
 
 // fetch reads one input, refusing a redirect and reading at most one byte past its size, into a temporary file it
 // renames into place once its size and SHA-256 verify.
-func (adapter *Adapter) fetch(ctx context.Context, inputs *os.Root, fetch wherry.Fetch) error {
+func (profile *Systemd) fetch(ctx context.Context, inputs *os.Root, fetch pluginsdk.Fetch) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fetch.URL, nil)
 	if err != nil {
 		return &fetchError{fetch.Name, "invalid URL"}
 	}
-	response, err := adapter.fetcher.Do(request)
+	response, err := profile.fetcher.Do(request)
 	if err != nil {
 		var network net.Error
 		var certificate *tls.CertificateVerificationError
@@ -910,10 +910,10 @@ func readMarker(job string) (*marker, error) {
 	return &m, nil
 }
 
-func (adapter *Adapter) writeMarker(job string, m *marker) error {
+func (profile *Systemd) writeMarker(job string, m *marker) error {
 	data, _ := json.Marshal(m) // strings and numbers always encode
 	if err := replace(filepath.Join(controlRoot, job), "job.json", data); err != nil {
-		return adapter.failed("write "+markerPath(job), err)
+		return profile.failed("write "+markerPath(job), err)
 	}
 	return nil
 }
@@ -939,13 +939,13 @@ func replace(dir, name string, data []byte) error {
 
 // removeRun removes a run's marker first, then its work directory, systemd's symlink, its credential files and its
 // control directory.
-func (adapter *Adapter) removeRun(job string) error {
+func (profile *Systemd) removeRun(job string) error {
 	if err := os.Remove(markerPath(job)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return adapter.failed("remove "+markerPath(job), err)
+		return profile.failed("remove "+markerPath(job), err)
 	}
 	for _, dir := range slices.Concat(workDirs(job), []string{filepath.Join(credentialRoot, unitName(job)), filepath.Join(controlRoot, job)}) {
 		if err := os.RemoveAll(dir); err != nil {
-			return adapter.failed("remove "+dir, err)
+			return profile.failed("remove "+dir, err)
 		}
 	}
 	return nil
@@ -953,14 +953,14 @@ func (adapter *Adapter) removeRun(job string) error {
 
 // unit reads a unit's state; a unit systemd does not know reads as not loaded. A unit that failed to load again, as
 // systemd before 254 leaves an agent unit after daemon-reload, still holds its name and its running agent.
-func (adapter *Adapter) unit(ctx context.Context, name string) (unit, error) {
-	bus, err := adapter.bus(ctx)
+func (profile *Systemd) unit(ctx context.Context, name string) (unit, error) {
+	bus, err := profile.bus(ctx)
 	if err != nil {
 		return unit{}, err
 	}
 	props, err := bus.GetUnitPropertiesContext(ctx, name)
 	if err != nil {
-		return unit{}, adapter.failed("read unit "+name, err)
+		return unit{}, profile.failed("read unit "+name, err)
 	}
 	u := unit{loaded: props["LoadState"] != "not-found"}
 	if !u.loaded {
@@ -968,7 +968,7 @@ func (adapter *Adapter) unit(ctx context.Context, name string) (unit, error) {
 	}
 	service, err := bus.GetUnitTypePropertiesContext(ctx, name, "Service")
 	if err != nil {
-		return unit{}, adapter.failed("read unit "+name, err)
+		return unit{}, profile.failed("read unit "+name, err)
 	}
 	u.transient, _ = props["Transient"].(bool)
 	u.active, _ = props["ActiveState"].(string)
@@ -998,33 +998,33 @@ func populated(u unit) (bool, error) {
 }
 
 // empty reports whether a unit is not loaded or holds no process.
-func (adapter *Adapter) empty(ctx context.Context, name string) (bool, error) {
-	u, err := adapter.unit(ctx, name)
+func (profile *Systemd) empty(ctx context.Context, name string) (bool, error) {
+	u, err := profile.unit(ctx, name)
 	if err != nil || !u.loaded {
 		return err == nil, err
 	}
 	busy, err := populated(u)
 	if err != nil {
-		return false, adapter.failed("read cgroup of "+name, err)
+		return false, profile.failed("read cgroup of "+name, err)
 	}
 	return !busy, nil
 }
 
 // judge reads a run's state and terminal from its marker and unit; settled is false while the unit is activating.
-func (adapter *Adapter) judge(job string, m *marker, u unit) (wherry.JobState, wherry.Terminal, bool) {
-	terminal := wherry.Terminal{Started: true, Node: adapter.node}
-	never := func(class, reason string) (wherry.JobState, wherry.Terminal, bool) {
-		return wherry.JobNeverStarted, wherry.Terminal{Node: adapter.node, Class: class, Reason: reason}, true
+func (profile *Systemd) judge(job string, m *marker, u unit) (pluginsdk.JobState, pluginsdk.Terminal, bool) {
+	terminal := pluginsdk.Terminal{Started: true, Node: profile.node}
+	never := func(class, reason string) (pluginsdk.JobState, pluginsdk.Terminal, bool) {
+		return pluginsdk.JobNeverStarted, pluginsdk.Terminal{Node: profile.node, Class: class, Reason: reason}, true
 	}
 	switch {
 	case m == nil || m.Phase == phasePrepared && m.NeverStarted == nil:
-		return wherry.JobAbsent, wherry.Terminal{}, true
+		return pluginsdk.JobAbsent, pluginsdk.Terminal{}, true
 	case m.NeverStarted != nil:
 		return never(m.NeverStarted.Class, m.NeverStarted.Reason)
 	case u.active == "activating":
-		return 0, wherry.Terminal{}, false
+		return 0, pluginsdk.Terminal{}, false
 	case u.loaded && u.mainPID != 0:
-		return wherry.JobRunning, terminal, true
+		return pluginsdk.JobRunning, terminal, true
 	case u.loaded && u.exited != 0 && m.Phase == phaseStarting && u.result == "exit-code":
 		if class, reason, own := exitClass(u.status); own {
 			return never(class, reason)
@@ -1037,7 +1037,7 @@ func (adapter *Adapter) judge(job string, m *marker, u unit) (wherry.JobState, w
 		if u.code == 2 || u.code == 3 {
 			terminal.ExitCode, terminal.Signal = 128+int(u.status), strconv.Itoa(int(u.status))
 		}
-		return wherry.JobEnded, terminal, true
+		return pluginsdk.JobEnded, terminal, true
 	case u.loaded:
 		return never("start", u.result)
 	case m.Phase == phaseStarting && emptyFile(stdoutPath(job)):
@@ -1047,7 +1047,7 @@ func (adapter *Adapter) judge(job string, m *marker, u unit) (wherry.JobState, w
 	default:
 		terminal.ExitCode = -1
 	}
-	return wherry.JobEnded, terminal, true
+	return pluginsdk.JobEnded, terminal, true
 }
 
 // emptyFile reports whether a file is empty or absent.
@@ -1057,41 +1057,41 @@ func emptyFile(name string) bool {
 }
 
 // wait returns once the run's unit is not activating; a wait cut short stops the unit and removes the marker.
-func (adapter *Adapter) wait(ctx context.Context, job string) (wherry.Handle, wherry.JobState, error) {
+func (profile *Systemd) wait(ctx context.Context, job string) (pluginsdk.Handle, pluginsdk.JobState, error) {
 	m, err := readMarker(job)
 	if err != nil {
-		return wherry.Handle{}, 0, adapter.failed("read "+markerPath(job), err)
+		return pluginsdk.Handle{}, 0, profile.failed("read "+markerPath(job), err)
 	}
 	name := unitName(job)
 	for {
-		u, err := adapter.unit(ctx, name)
+		u, err := profile.unit(ctx, name)
 		if err != nil {
 			if ctx.Err() != nil {
-				return wherry.Handle{}, 0, adapter.stopTimedOut(ctx, job)
+				return pluginsdk.Handle{}, 0, profile.stopTimedOut(ctx, job)
 			}
-			return wherry.Handle{}, 0, err
+			return pluginsdk.Handle{}, 0, err
 		}
-		if state, _, settled := adapter.judge(job, m, u); settled {
-			if state == wherry.JobAbsent {
-				return wherry.Handle{}, state, nil
+		if state, _, settled := profile.judge(job, m, u); settled {
+			if state == pluginsdk.JobAbsent {
+				return pluginsdk.Handle{}, state, nil
 			}
 			data, _ := json.Marshal(handle{V: 1, Unit: name, Instance: m.Instance}) // strings always encode
-			return wherry.Handle{Data: data, Name: name}, state, nil
+			return pluginsdk.Handle{Data: data, Name: name}, state, nil
 		}
 		select {
 		case <-ctx.Done():
-			return wherry.Handle{}, 0, adapter.stopTimedOut(ctx, job)
+			return pluginsdk.Handle{}, 0, profile.stopTimedOut(ctx, job)
 		case <-time.After(waitPoll):
 		}
 	}
 }
 
-func (adapter *Adapter) stopTimedOut(ctx context.Context, job string) error {
+func (profile *Systemd) stopTimedOut(ctx context.Context, job string) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
 	defer cancel()
-	err := adapter.halt(cleanupCtx, unitName(job))
+	err := profile.halt(cleanupCtx, unitName(job))
 	if removeErr := os.Remove(markerPath(job)); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-		err = errors.Join(err, adapter.failed("remove "+markerPath(job), removeErr))
+		err = errors.Join(err, profile.failed("remove "+markerPath(job), removeErr))
 	}
 	if err != nil {
 		return errors.Join(ctx.Err(), fmt.Errorf("stop timed-out unit: %w", err))
@@ -1100,31 +1100,31 @@ func (adapter *Adapter) stopTimedOut(ctx context.Context, job string) error {
 }
 
 // Lookup finds a run's existing job and waits for it as Dispatch does.
-func (adapter *Adapter) Lookup(ctx context.Context, runID string) (wherry.Job, error) {
-	job := adapter.jobName(runID)
+func (profile *Systemd) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
+	job := profile.jobName(runID)
 	m, err := readMarker(job)
 	if err != nil {
-		return wherry.Job{}, adapter.failed("read "+markerPath(job), err)
+		return pluginsdk.Job{}, profile.failed("read "+markerPath(job), err)
 	}
-	u, err := adapter.unit(ctx, unitName(job))
+	u, err := profile.unit(ctx, unitName(job))
 	if err != nil {
-		return wherry.Job{}, err
+		return pluginsdk.Job{}, err
 	}
-	if adapter.foreign(m, u) {
-		return wherry.Job{}, errNotAgent
+	if profile.foreign(m, u) {
+		return pluginsdk.Job{}, errNotAgent
 	}
 	if m == nil {
-		return wherry.Job{}, nil
+		return pluginsdk.Job{}, nil
 	}
-	handle, state, err := adapter.wait(ctx, job)
-	if err != nil || state == wherry.JobAbsent {
-		return wherry.Job{}, err
+	handle, state, err := profile.wait(ctx, job)
+	if err != nil || state == pluginsdk.JobAbsent {
+		return pluginsdk.Job{}, err
 	}
-	return wherry.Job{State: state, Handle: handle, Attempt: m.Attempt, Profile: m.Profile, Agent: m.Agent}, nil
+	return pluginsdk.Job{State: state, Handle: handle, Attempt: m.Attempt, Profile: m.Profile, Agent: m.Agent}, nil
 }
 
 // current decodes a handle and reads its run's marker, refusing one a later Dispatch replaced; an absent marker is nil.
-func (adapter *Adapter) current(encoded wherry.Handle) (string, *marker, error) {
+func (profile *Systemd) current(encoded pluginsdk.Handle) (string, *marker, error) {
 	var h handle
 	if err := json.Unmarshal(encoded.Data, &h); err != nil {
 		return "", nil, err
@@ -1133,12 +1133,12 @@ func (adapter *Adapter) current(encoded wherry.Handle) (string, *marker, error) 
 		return "", nil, fmt.Errorf("handle version %d", h.V)
 	}
 	job := strings.TrimSuffix(strings.TrimPrefix(h.Unit, unitPrefix), unitSuffix)
-	if !strings.HasPrefix(job, adapter.jobName("")) || strings.ContainsRune(job, '/') || unitName(job) != h.Unit {
+	if !strings.HasPrefix(job, profile.jobName("")) || strings.ContainsRune(job, '/') || unitName(job) != h.Unit {
 		return "", nil, errors.New("the handle names no agent unit of this pool")
 	}
 	m, err := readMarker(job)
 	if err != nil {
-		return "", nil, adapter.failed("read "+markerPath(job), err)
+		return "", nil, profile.failed("read "+markerPath(job), err)
 	}
 	if m != nil && m.Instance != h.Instance {
 		return "", nil, errReplaced
@@ -1148,26 +1148,26 @@ func (adapter *Adapter) current(encoded wherry.Handle) (string, *marker, error) 
 
 // Follow streams the agent's stdout lines from a byte offset until its main process has exited, then returns its
 // terminal.
-func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, from int64, lines chan<- wherry.Line) (wherry.Terminal, error) {
-	job, m, err := adapter.current(encoded)
+func (profile *Systemd) Follow(ctx context.Context, encoded pluginsdk.Handle, from int64, lines chan<- pluginsdk.Line) (pluginsdk.Terminal, error) {
+	job, m, err := profile.current(encoded)
 	if err != nil {
-		return wherry.Terminal{}, err
+		return pluginsdk.Terminal{}, err
 	}
 	if m == nil {
-		return wherry.Terminal{}, errReplaced
+		return pluginsdk.Terminal{}, errReplaced
 	}
 	if m.NeverStarted != nil {
-		_, terminal, _ := adapter.judge(job, m, unit{})
+		_, terminal, _ := profile.judge(job, m, unit{})
 		return terminal, nil
 	}
 	file, err := os.OpenFile(stdoutPath(job), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return wherry.Terminal{}, adapter.failed("open "+stdoutPath(job), err)
+		return pluginsdk.Terminal{}, profile.failed("open "+stdoutPath(job), err)
 	}
 	defer file.Close()
 	shorter := errors.New("the agent's log is shorter than the offset")
 	if _, err := file.Seek(from, io.SeekStart); err != nil {
-		return wherry.Terminal{}, err
+		return pluginsdk.Terminal{}, err
 	}
 	reader := LineReader{Lines: lines, Position: from}
 	offset, chunk := from, make([]byte, 32<<10)
@@ -1194,65 +1194,65 @@ func (adapter *Adapter) Follow(ctx context.Context, encoded wherry.Handle, from 
 	var checked time.Time
 	for {
 		if err := drain(); err != nil {
-			return wherry.Terminal{}, err
+			return pluginsdk.Terminal{}, err
 		}
 		if time.Since(checked) >= unitPoll {
 			checked = time.Now()
-			u, err := adapter.unit(ctx, unitName(job))
+			u, err := profile.unit(ctx, unitName(job))
 			if err != nil {
-				return wherry.Terminal{}, err
+				return pluginsdk.Terminal{}, err
 			}
-			if state, terminal, settled := adapter.judge(job, m, u); settled && state != wherry.JobRunning {
+			if state, terminal, settled := profile.judge(job, m, u); settled && state != pluginsdk.JobRunning {
 				if err := drain(); err != nil {
-					return wherry.Terminal{}, err
+					return pluginsdk.Terminal{}, err
 				}
 				if err := reader.Flush(ctx); err != nil {
-					return wherry.Terminal{}, err
+					return pluginsdk.Terminal{}, err
 				}
 				return terminal, nil
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return wherry.Terminal{}, ctx.Err()
+			return pluginsdk.Terminal{}, ctx.Err()
 		case <-time.After(followPoll):
 		}
 	}
 }
 
 // Stop signals every process of the unit, SIGTERM then SIGKILL, and never stops the unit, which keeps its exit status.
-func (adapter *Adapter) Stop(ctx context.Context, encoded wherry.Handle) error {
-	job, m, err := adapter.current(encoded)
+func (profile *Systemd) Stop(ctx context.Context, encoded pluginsdk.Handle) error {
+	job, m, err := profile.current(encoded)
 	if err != nil || m == nil {
 		return err
 	}
 	name := unitName(job)
-	u, err := adapter.unit(ctx, name)
+	u, err := profile.unit(ctx, name)
 	if err != nil {
 		return err
 	}
-	if state, _, _ := adapter.judge(job, m, u); state == wherry.JobNeverStarted {
+	if state, _, _ := profile.judge(job, m, u); state == pluginsdk.JobNeverStarted {
 		return nil
 	}
-	return adapter.stop(ctx, name)
+	return profile.stop(ctx, name)
 }
 
 // stop signals a unit's cgroup until it is empty, and errs when processes outlive SIGKILL.
-func (adapter *Adapter) stop(ctx context.Context, name string) error {
+func (profile *Systemd) stop(ctx context.Context, name string) error {
 	for _, signal := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
-		if empty, err := adapter.empty(ctx, name); err != nil || empty {
+		if empty, err := profile.empty(ctx, name); err != nil || empty {
 			return err
 		}
-		bus, err := adapter.bus(ctx)
+		bus, err := profile.bus(ctx)
 		if err != nil {
 			return err
 		}
 		if err := bus.KillUnitWithTarget(ctx, name, sd.All, int32(signal)); err != nil {
 			// A unit that ended in between refuses the kill.
-			if empty, readErr := adapter.empty(ctx, name); readErr == nil && empty {
+			if empty, readErr := profile.empty(ctx, name); readErr == nil && empty {
 				return nil
 			}
-			return adapter.failed("kill unit "+name, err)
+			return profile.failed("kill unit "+name, err)
 		}
 		for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); {
 			select {
@@ -1260,22 +1260,22 @@ func (adapter *Adapter) stop(ctx context.Context, name string) error {
 				return ctx.Err()
 			case <-time.After(stopPoll):
 			}
-			if empty, err := adapter.empty(ctx, name); err != nil {
-				adapter.handled("read unit "+name, err)
+			if empty, err := profile.empty(ctx, name); err != nil {
+				profile.handled("read unit "+name, err)
 			} else if empty {
 				return nil
 			}
 		}
 	}
-	if empty, err := adapter.empty(ctx, name); err != nil || empty {
+	if empty, err := profile.empty(ctx, name); err != nil || empty {
 		return err
 	}
 	return errors.New("the agent outlived SIGKILL")
 }
 
 // Collect reads the outputs tree once no process of the unit is left, and reads what Select chooses.
-func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limits wherry.Limits, outputs chan<- wherry.Output) error {
-	job, m, err := adapter.current(encoded)
+func (profile *Systemd) Collect(ctx context.Context, encoded pluginsdk.Handle, limits pluginsdk.Limits, outputs chan<- pluginsdk.Output) error {
+	job, m, err := profile.current(encoded)
 	if err != nil {
 		return err
 	}
@@ -1283,7 +1283,7 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 		return errReplaced
 	}
 	for {
-		empty, err := adapter.empty(ctx, unitName(job))
+		empty, err := profile.empty(ctx, unitName(job))
 		if err != nil {
 			if ctx.Err() != nil {
 				return errors.New("the agent is still running")
@@ -1299,18 +1299,18 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 		case <-time.After(collectPoll):
 		}
 	}
-	dir := filepath.Join(adapter.workDir(job), "outputs")
+	dir := filepath.Join(profile.workDir(job), "outputs")
 	root, err := os.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return adapter.failed("open "+dir, err)
+		return profile.failed("open "+dir, err)
 	}
 	defer root.Close()
 	entries, err := walk(root, limits.Files+1)
 	if err != nil {
-		return adapter.failed("list "+dir, err)
+		return profile.failed("list "+dir, err)
 	}
 	selected, err := Select(entries, limits)
 	if err != nil {
@@ -1321,7 +1321,7 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 		switch {
 		case chosen.Stream:
 			if output.Body, err = open(root, output.Name); err != nil {
-				return adapter.failed("open "+filepath.Join(dir, output.Name), err)
+				return profile.failed("open "+filepath.Join(dir, output.Name), err)
 			}
 		case chosen.Read:
 			if output.Data, err = read(root, output.Name, output.Size); err != nil {
@@ -1341,8 +1341,8 @@ func (adapter *Adapter) Collect(ctx context.Context, encoded wherry.Handle, limi
 }
 
 // walk lists the tree beneath root without following a link, stopping after limit entries.
-func walk(root *os.Root, limit int) ([]wherry.Output, error) {
-	var entries []wherry.Output
+func walk(root *os.Root, limit int) ([]pluginsdk.Output, error) {
+	var entries []pluginsdk.Output
 	err := fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil || name == "." {
 			return err
@@ -1351,7 +1351,7 @@ func walk(root *os.Root, limit int) ([]wherry.Output, error) {
 		if err != nil {
 			return err
 		}
-		entries = append(entries, wherry.Output{Name: name, Size: info.Size(), Mode: info.Mode().Type()})
+		entries = append(entries, pluginsdk.Output{Name: name, Size: info.Size(), Mode: info.Mode().Type()})
 		if len(entries) >= limit {
 			return fs.SkipAll
 		}
@@ -1395,13 +1395,13 @@ func read(root *os.Root, name string, size int64) ([]byte, error) {
 
 // Release settles a run whose agent has ended: it records the outcome, stops the unit, which drops the credential
 // store and the dynamic user, and removes the prompt and inputs.
-func (adapter *Adapter) Release(ctx context.Context, runID string) error {
-	return adapter.release(ctx, adapter.jobName(runID))
+func (profile *Systemd) Release(ctx context.Context, runID string) error {
+	return profile.release(ctx, profile.jobName(runID))
 }
 
-func (adapter *Adapter) release(ctx context.Context, job string) error {
+func (profile *Systemd) release(ctx context.Context, job string) error {
 	name := unitName(job)
-	u, err := adapter.unit(ctx, name)
+	u, err := profile.unit(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -1410,20 +1410,20 @@ func (adapter *Adapter) release(ctx context.Context, job string) error {
 		// Stopping the unit releases its dynamic UID, which a later run may take while a process here still holds it.
 		if busy, err := populated(u); err != nil || busy {
 			if err != nil {
-				return adapter.failed("read cgroup of "+name, err)
+				return profile.failed("read cgroup of "+name, err)
 			}
 			return nil
 		}
-		unitErr = adapter.record(job, u)
+		unitErr = profile.record(job, u)
 		if unitErr == nil {
-			unitErr = adapter.halt(ctx, name)
+			unitErr = profile.halt(ctx, name)
 		}
 	}
 	var removeErr error
 	for _, dir := range workDirs(job) {
 		for _, entry := range []string{"prompt.txt", "inputs"} {
 			if err := os.RemoveAll(filepath.Join(dir, entry)); err != nil && removeErr == nil {
-				removeErr = adapter.failed("remove "+filepath.Join(dir, entry), err)
+				removeErr = profile.failed("remove "+filepath.Join(dir, entry), err)
 			}
 		}
 	}
@@ -1438,34 +1438,34 @@ func (adapter *Adapter) release(ctx context.Context, job string) error {
 }
 
 // record writes into the marker how a loaded unit's run ended, unless the marker already holds it.
-func (adapter *Adapter) record(job string, u unit) error {
+func (profile *Systemd) record(job string, u unit) error {
 	m, err := readMarker(job)
 	if err != nil {
-		return adapter.failed("read "+markerPath(job), err)
+		return profile.failed("read "+markerPath(job), err)
 	}
 	if m == nil || m.Terminal != nil || m.NeverStarted != nil {
 		return nil
 	}
-	switch state, terminal, _ := adapter.judge(job, m, u); state {
-	case wherry.JobEnded:
+	switch state, terminal, _ := profile.judge(job, m, u); state {
+	case pluginsdk.JobEnded:
 		m.Terminal = &recorded{ExitCode: terminal.ExitCode, Signal: terminal.Signal}
-	case wherry.JobNeverStarted:
+	case pluginsdk.JobNeverStarted:
 		m.NeverStarted = &neverStarted{terminal.Class, terminal.Reason}
 	default:
 		return nil
 	}
-	return adapter.writeMarker(job, m)
+	return profile.writeMarker(job, m)
 }
 
 // halt stops a unit, waiting for the job, and resets it, so a transient unit unloads; an unknown unit is success.
-func (adapter *Adapter) halt(ctx context.Context, name string) error {
-	bus, err := adapter.bus(ctx)
+func (profile *Systemd) halt(ctx context.Context, name string) error {
+	bus, err := profile.bus(ctx)
 	if err != nil {
 		return err
 	}
 	results := make(chan string, 1)
 	if _, err := bus.StopUnitContext(ctx, name, "replace", results); err != nil && busName(err) != busNoSuchUnit {
-		return adapter.failed("stop unit "+name, err)
+		return profile.failed("stop unit "+name, err)
 	} else if err == nil {
 		select {
 		case <-results:
@@ -1474,24 +1474,24 @@ func (adapter *Adapter) halt(ctx context.Context, name string) error {
 		}
 	}
 	if err := bus.ResetFailedUnitContext(ctx, name); err != nil && busName(err) != busNoSuchUnit {
-		return adapter.failed("reset unit "+name, err)
+		return profile.failed("reset unit "+name, err)
 	}
 	return nil
 }
 
 // Purge stops the run's unit, waits for it to unload, then removes its marker and directories.
-func (adapter *Adapter) Purge(ctx context.Context, runID string) error {
-	return adapter.purge(ctx, adapter.jobName(runID))
+func (profile *Systemd) Purge(ctx context.Context, runID string) error {
+	return profile.purge(ctx, profile.jobName(runID))
 }
 
 // purge waits for the unit to unload, since a loaded unit still holds the name.
-func (adapter *Adapter) purge(ctx context.Context, job string) error {
+func (profile *Systemd) purge(ctx context.Context, job string) error {
 	name := unitName(job)
-	if err := adapter.halt(ctx, name); err != nil {
+	if err := profile.halt(ctx, name); err != nil {
 		return err
 	}
 	for {
-		u, err := adapter.unit(ctx, name)
+		u, err := profile.unit(ctx, name)
 		if err != nil {
 			return err
 		}
@@ -1504,7 +1504,7 @@ func (adapter *Adapter) purge(ctx context.Context, job string) error {
 		case <-time.After(collectPoll):
 		}
 	}
-	return adapter.removeRun(job)
+	return profile.removeRun(job)
 }
 
 // endOf reports when a run ended: its main process's exit, else the unit's last deactivation, else the later of its
@@ -1532,11 +1532,11 @@ func stale(name string) bool {
 
 // Sweep settles and purges this profile's ended runs, settles other profiles' expired ones, and removes stale
 // material, leftovers and credential files.
-func (adapter *Adapter) Sweep(ctx context.Context) error {
-	prefix := adapter.jobName("")
+func (profile *Systemd) Sweep(ctx context.Context) error {
+	prefix := profile.jobName("")
 	controls, err := os.ReadDir(controlRoot)
 	if err != nil {
-		return adapter.failed("list "+controlRoot, err)
+		return profile.failed("list "+controlRoot, err)
 	}
 	var errs []error
 	counts := map[string]int{}
@@ -1547,11 +1547,11 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 			continue
 		}
 		jobs[job] = true
-		unlock, ok := adapter.lock(job, false)
+		unlock, ok := profile.lock(job, false)
 		if !ok {
 			continue
 		}
-		kind, err := adapter.sweepJob(ctx, job)
+		kind, err := profile.sweepJob(ctx, job)
 		unlock()
 		counts[kind]++
 		if err != nil {
@@ -1561,20 +1561,20 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 	for _, root := range []string{agentRoot(true), agentRoot(false)} {
 		works, err := os.ReadDir(root)
 		if err != nil {
-			errs = append(errs, adapter.failed("list "+root, err))
+			errs = append(errs, profile.failed("list "+root, err))
 			continue
 		}
 		for _, entry := range works {
 			if job := entry.Name(); strings.HasPrefix(job, prefix) && !jobs[job] && stale(filepath.Join(root, job)) {
 				if err := os.RemoveAll(filepath.Join(root, job)); err != nil {
-					errs = append(errs, adapter.failed("remove "+filepath.Join(root, job), err))
+					errs = append(errs, profile.failed("remove "+filepath.Join(root, job), err))
 				}
 			}
 		}
 	}
 	credentials, err := os.ReadDir(credentialRoot)
 	if err != nil {
-		errs = append(errs, adapter.failed("list "+credentialRoot, err))
+		errs = append(errs, profile.failed("list "+credentialRoot, err))
 	}
 	for _, entry := range credentials {
 		name := entry.Name()
@@ -1582,53 +1582,53 @@ func (adapter *Adapter) Sweep(ctx context.Context) error {
 		if !strings.HasPrefix(job, prefix) || unitName(job) != name {
 			continue
 		}
-		unlock, ok := adapter.lock(job, false)
+		unlock, ok := profile.lock(job, false)
 		if !ok {
 			continue
 		}
-		if u, err := adapter.unit(ctx, name); err != nil {
+		if u, err := profile.unit(ctx, name); err != nil {
 			errs = append(errs, err)
 		} else if u.active != "activating" {
 			if err := removeCredentials(name); err != nil {
-				errs = append(errs, adapter.failed("remove credentials of "+name, err))
+				errs = append(errs, profile.failed("remove credentials of "+name, err))
 			}
 		}
 		unlock()
 	}
-	adapter.metrics.Pending(counts["pending"])
-	adapter.metrics.Deleted("job", counts["job"])
-	adapter.metrics.Deleted("variable", counts["variable"])
+	profile.metrics.Pending(counts["pending"])
+	profile.metrics.Deleted("job", counts["job"])
+	profile.metrics.Deleted("variable", counts["variable"])
 	return errors.Join(errs...)
 }
 
 // sweepJob sweeps one run, and reports what it counts: "job" purged, "variable" stale material removed, or "pending" an
 // own ended run left.
-func (adapter *Adapter) sweepJob(ctx context.Context, job string) (string, error) {
+func (profile *Systemd) sweepJob(ctx context.Context, job string) (string, error) {
 	m, err := readMarker(job)
 	if err != nil {
-		return "", adapter.failed("read "+markerPath(job), err)
+		return "", profile.failed("read "+markerPath(job), err)
 	}
 	if m == nil {
 		if stale(filepath.Join(controlRoot, job)) {
-			return "", adapter.removeRun(job)
+			return "", profile.removeRun(job)
 		}
 		return "", nil
 	}
-	u, err := adapter.unit(ctx, unitName(job))
+	u, err := profile.unit(ctx, unitName(job))
 	if err != nil {
 		return "", err
 	}
-	own := m.Profile == adapter.name
+	own := m.Profile == profile.name
 	if m.Phase == phasePrepared && m.NeverStarted == nil && !u.loaded {
 		if !stale(markerPath(job)) {
 			return "", nil
 		}
-		if err := adapter.removeRun(job); err != nil || !own {
+		if err := profile.removeRun(job); err != nil || !own {
 			return "", err
 		}
 		return "variable", nil
 	}
-	if state, _, settled := adapter.judge(job, m, u); !settled || state == wherry.JobRunning || state == wherry.JobAbsent {
+	if state, _, settled := profile.judge(job, m, u); !settled || state == pluginsdk.JobRunning || state == pluginsdk.JobAbsent {
 		return "", nil
 	}
 	expired := time.Since(endOf(job, u)) >= sweepGrace
@@ -1639,16 +1639,16 @@ func (adapter *Adapter) sweepJob(ctx context.Context, job string) (string, error
 	if own {
 		pending = "pending"
 	}
-	if err := adapter.stop(ctx, unitName(job)); err != nil {
+	if err := profile.stop(ctx, unitName(job)); err != nil {
 		return pending, err
 	}
-	if err := adapter.release(ctx, job); err != nil {
+	if err := profile.release(ctx, job); err != nil {
 		return pending, err
 	}
 	if !own || !expired {
 		return pending, nil
 	}
-	if err := adapter.purge(ctx, job); err != nil {
+	if err := profile.purge(ctx, job); err != nil {
 		return pending, err
 	}
 	return "job", nil
@@ -1665,7 +1665,7 @@ func busName(err error) string {
 
 // failed counts err from the operation op by class and wraps it; an unknown unit, an absent file or a cancelled call
 // counts nothing.
-func (adapter *Adapter) failed(op string, err error) error {
+func (profile *Systemd) failed(op string, err error) error {
 	class := "other"
 	var errno syscall.Errno
 	var network net.Error
@@ -1673,7 +1673,7 @@ func (adapter *Adapter) failed(op string, err error) error {
 	case err == nil:
 		return nil
 	case name == busNoSuchUnit || errors.Is(err, fs.ErrNotExist) || errors.Is(err, context.Canceled):
-		return &wherry.Error{Op: op, Err: err}
+		return &pluginsdk.Error{Op: op, Err: err}
 	case errors.Is(err, context.DeadlineExceeded):
 		class = "timeout"
 	case name != "":
@@ -1697,19 +1697,19 @@ func (adapter *Adapter) failed(op string, err error) error {
 	case errors.Is(err, dbus.ErrClosed) || errors.Is(err, io.EOF) || errors.As(err, &network):
 		class = "unavailable"
 	}
-	adapter.metrics.Failed(class)
-	return &wherry.Error{Op: op, Class: class, Err: err}
+	profile.metrics.Failed(class)
+	return &pluginsdk.Error{Op: op, Class: class, Err: err}
 }
 
 // handled counts err as failed does and logs its op and class, never its text.
-func (adapter *Adapter) handled(op string, err error) {
-	var failure *wherry.Error
-	if errors.As(adapter.failed(op, err), &failure) && failure.Class != "" {
-		adapter.logger.Warn("systemd call failed", "profile", adapter.name, "op", failure.Op, "class", failure.Class)
+func (profile *Systemd) handled(op string, err error) {
+	var failure *pluginsdk.Error
+	if errors.As(profile.failed(op, err), &failure) && failure.Class != "" {
+		profile.logger.Warn("systemd call failed", "profile", profile.name, "op", failure.Op, "class", failure.Class)
 	}
 }
 
-// Metrics reports the adapter's platform errors, sweep deletions, cleanup-pending runs and placement latency.
-func (adapter *Adapter) Metrics(context.Context) ([]wherry.Sample, error) {
-	return adapter.metrics.Samples(), nil
+// Metrics reports the plugin profile's platform errors, sweep deletions, cleanup-pending runs and placement latency.
+func (profile *Systemd) Metrics(context.Context) ([]pluginsdk.Sample, error) {
+	return profile.metrics.Samples(), nil
 }

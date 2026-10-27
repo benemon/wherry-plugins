@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	wherry "github.com/benemon/wherry/adapter"
-	"github.com/benemon/wherry/adapter/adaptertest"
+	"github.com/benemon/wherry/pluginsdk"
+	"github.com/benemon/wherry/pluginsdk/pluginsdktest"
 	sd "github.com/coreos/go-systemd/v22/dbus"
 	"github.com/hashicorp/go-hclog"
 )
@@ -50,11 +50,11 @@ func hostPool(t *testing.T) string {
 	return "wherry-test-" + hex.EncodeToString(random)
 }
 
-// hostAdapter configures an adapter of a fresh pool whose runs are purged after the test.
-func hostAdapter(t *testing.T, config Config) *Adapter {
+// hostProfile configures a plugin profile of a fresh pool whose runs are purged after the test.
+func hostProfile(t *testing.T, config Config) *Systemd {
 	t.Helper()
 	onSystemd(t)
-	adapter, err := New(config, testProfile, hostPool(t), hclog.NewNullLogger())
+	profile, err := New(config, testProfile, hostPool(t), hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,14 +63,14 @@ func hostAdapter(t *testing.T, config Config) *Adapter {
 		defer cancel()
 		entries, _ := os.ReadDir(controlRoot)
 		for _, entry := range entries {
-			if strings.HasPrefix(entry.Name(), adapter.jobName("")) {
-				if err := adapter.purge(ctx, entry.Name()); err != nil {
+			if strings.HasPrefix(entry.Name(), profile.jobName("")) {
+				if err := profile.purge(ctx, entry.Name()); err != nil {
 					t.Errorf("purge %s: %v", entry.Name(), err)
 				}
 			}
 		}
 	})
-	return adapter
+	return profile
 }
 
 func shConfig(script string) Config {
@@ -80,23 +80,23 @@ func shConfig(script string) Config {
 }
 
 // hostTurn dispatches run, follows it to its end and collects its outputs.
-func hostTurn(t *testing.T, adapter *Adapter, run wherry.Run) ([]wherry.Line, wherry.Terminal, map[string]wherry.Output) {
+func hostTurn(t *testing.T, profile *Systemd, run pluginsdk.Run) ([]pluginsdk.Line, pluginsdk.Terminal, map[string]pluginsdk.Output) {
 	t.Helper()
-	handle := dispatch(t, adapter, run)
-	lines, terminal, err := followAll(t, adapter, handle, 0)
+	handle := dispatch(t, profile, run)
+	lines, terminal, err := followAll(t, profile, handle, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return lines, terminal, hostOutputs(t, adapter, handle)
+	return lines, terminal, hostOutputs(t, profile, handle)
 }
 
-func hostOutputs(t *testing.T, adapter *Adapter, handle wherry.Handle) map[string]wherry.Output {
+func hostOutputs(t *testing.T, profile *Systemd, handle pluginsdk.Handle) map[string]pluginsdk.Output {
 	t.Helper()
-	outputs, err := collect(t, adapter, handle, wherry.Limits{Files: 256, FileBytes: 4 << 20, TotalBytes: 16 << 20})
+	outputs, err := collect(t, profile, handle, pluginsdk.Limits{Files: 256, FileBytes: 4 << 20, TotalBytes: 16 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
-	byName := map[string]wherry.Output{}
+	byName := map[string]pluginsdk.Output{}
 	for _, output := range outputs {
 		byName[output.Name] = output
 	}
@@ -113,7 +113,7 @@ func hostConn(t *testing.T) *sd.Conn {
 	return conn
 }
 
-func conformanceSettings(t *testing.T) (wherry.Settings, wherry.Settings) {
+func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings) {
 	t.Helper()
 	onSystemd(t)
 	pool := hostPool(t)
@@ -125,7 +125,7 @@ func conformanceSettings(t *testing.T) (wherry.Settings, wherry.Settings) {
 
 func TestConformance(t *testing.T) {
 	completes, neverStarts := conformanceSettings(t)
-	adaptertest.Run(t, newAdapter, completes, neverStarts, 0)
+	pluginsdktest.Run(t, newProfile, completes, neverStarts, 0)
 }
 
 // TestConformanceOverTheLink runs the suite against the plugin binary WHERRY_SYSTEMD_PLUGIN names, through the
@@ -136,12 +136,12 @@ func TestConformanceOverTheLink(t *testing.T) {
 	if binary == "" {
 		t.Fatal("WHERRY_SYSTEMD_PLUGIN names no plugin binary")
 	}
-	plugin, err := wherry.Launch(func() (string, error) { return binary, nil }, io.Discard)
+	plugin, err := pluginsdk.Launch(func() (string, error) { return binary, nil }, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer plugin.Close()
-	adaptertest.Run(t, func(settings wherry.Settings, _ hclog.Logger) (wherry.Adapter, error) {
+	pluginsdktest.Run(t, func(settings pluginsdk.Settings, _ hclog.Logger) (pluginsdk.Plugin, error) {
 		return plugin.Configure(settings)
 	}, completes, neverStarts, 0)
 }
@@ -167,14 +167,14 @@ func TestReceiverBoundingSetOnSystemd(t *testing.T) {
 }
 
 func TestUnitPropertiesOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig("sleep 30"))
+	profile := hostProfile(t, shConfig("sleep 30"))
 	run := testRun("properties")
-	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}, {Name: "deploy", File: "deploy-key", Value: []byte("key")}}
+	run.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}, {Name: "deploy", File: "deploy-key", Value: []byte("key")}}
 	sent := map[string]any{}
-	for _, p := range adapter.properties(run, adapter.jobName(run.ID), []loadCredential{{envCredential + credentialEnv, "unused"}}) {
+	for _, p := range profile.properties(run, profile.jobName(run.ID), []loadCredential{{envCredential + credentialEnv, "unused"}}) {
 		sent[p.Name] = p.Value.Value()
 	}
-	handle := dispatch(t, adapter, run)
+	handle := dispatch(t, profile, run)
 	conn := hostConn(t)
 	unitProps, err := conn.GetUnitPropertiesContext(context.Background(), handle.Name)
 	if err != nil {
@@ -226,9 +226,9 @@ func TestUnitPropertiesOnSystemd(t *testing.T) {
 }
 
 func TestDaemonReloadKeepsTheUnit(t *testing.T) {
-	adapter := hostAdapter(t, shConfig(`sleep 5; echo '{"type":"result"}'`))
+	profile := hostProfile(t, shConfig(`sleep 5; echo '{"type":"result"}'`))
 	run := testRun("reload")
-	handle := dispatch(t, adapter, run)
+	handle := dispatch(t, profile, run)
 	conn := hostConn(t)
 	before, err := conn.GetUnitTypePropertiesContext(context.Background(), handle.Name, "Service")
 	if err != nil {
@@ -270,7 +270,7 @@ func TestDaemonReloadKeepsTheUnit(t *testing.T) {
 	case commands == 1 && fmt.Sprint(execBefore[0][:3]) != fmt.Sprint(execAfter[0][:3]):
 		t.Errorf("ExecStartEx changed across the reload")
 	}
-	lines, terminal, err := followAll(t, adapter, handle, 0)
+	lines, terminal, err := followAll(t, profile, handle, 0)
 	if err != nil || terminal.ExitCode != 0 || !slices.Equal(texts(lines), []string{`{"type":"result"}`}) {
 		t.Fatalf("lines %q, terminal %+v, %v; want the run completed", texts(lines), terminal, err)
 	}
@@ -294,7 +294,7 @@ ls -A /run/wherry-systemd 2>/dev/null | grep -q . && echo "credential files list
 logger "$PROBE" 2>/dev/null && echo "logger wrote" || echo "logger refused"
 } > outputs/view`
 
-func view(t *testing.T, output wherry.Output) map[string]string {
+func view(t *testing.T, output pluginsdk.Output) map[string]string {
 	t.Helper()
 	got := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(output.Data)), "\n") {
@@ -311,23 +311,23 @@ func TestAgentViewOnSystemd(t *testing.T) {
 	probe := "wherry-probe-" + hex.EncodeToString([]byte(time.Now().Format("150405.000")))
 	config := shConfig(viewScript)
 	config.Runtime.Env = map[string]string{"PROBE": probe}
-	adapter := hostAdapter(t, config)
+	profile := hostProfile(t, config)
 	withShell := shConfig(viewScript)
 	withShell.Runtime.Env = map[string]string{"PROBE": probe, "SHELL": "/bin/bash"}
-	bash := hostAdapter(t, withShell)
+	bash := hostProfile(t, withShell)
 	credentialed := testRun("view-credentials")
-	credentialed.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}, {Name: "deploy", File: "deploy-key", Value: []byte("key")}, {Name: "token", File: "token", Value: []byte("t")}}
+	credentialed.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}, {Name: "deploy", File: "deploy-key", Value: []byte("key")}, {Name: "token", File: "token", Value: []byte("t")}}
 	for _, c := range []struct {
-		adapter     *Adapter
-		run         wherry.Run
+		profile     *Systemd
+		run         pluginsdk.Run
 		credentials string
 		shell       string
 	}{
-		{adapter, credentialed, envCredential + credentialEnv + " deploy-key token", "/bin/sh"},
-		{adapter, testRun("view-plain"), "", "/bin/sh"},
+		{profile, credentialed, envCredential + credentialEnv + " deploy-key token", "/bin/sh"},
+		{profile, testRun("view-plain"), "", "/bin/sh"},
 		{bash, testRun("view-bash"), "", "/bin/bash"},
 	} {
-		_, terminal, outputs := hostTurn(t, c.adapter, c.run)
+		_, terminal, outputs := hostTurn(t, c.profile, c.run)
 		if terminal.ExitCode != 0 {
 			t.Fatalf("%s: terminal %+v", c.run.ID, terminal)
 		}
@@ -352,7 +352,7 @@ func TestAgentViewOnSystemd(t *testing.T) {
 				t.Errorf("%s: want %q in %v", c.run.ID, want, got)
 			}
 		}
-		if mode := mode(t, filepath.Join(controlRoot, c.adapter.jobName(c.run.ID))); mode != 0o700 {
+		if mode := mode(t, filepath.Join(controlRoot, c.profile.jobName(c.run.ID))); mode != 0o700 {
 			t.Errorf("%s: control directory mode %o; want 0700", c.run.ID, mode)
 		}
 	}
@@ -373,12 +373,12 @@ func TestFixedUserOnSystemd(t *testing.T) {
 		t.Fatal(err)
 	}
 	config.Runtime.User, config.Runtime.Group, config.Runtime.SupplementaryGroups = "nobody", group.Name, []string{"adm"}
-	adapter := hostAdapter(t, config)
-	_, terminal, outputs := hostTurn(t, adapter, testRun("fixed"))
+	profile := hostProfile(t, config)
+	_, terminal, outputs := hostTurn(t, profile, testRun("fixed"))
 	if terminal.ExitCode != 0 || strings.TrimSpace(string(outputs["uid"].Data)) != "65534" || strings.TrimSpace(string(outputs["owner"].Data)) != "65534" {
 		t.Fatalf("terminal %+v, uid %q, owner %q; want the run as nobody", terminal, outputs["uid"].Data, outputs["owner"].Data)
 	}
-	if !exists(filepath.Join(agentRoot(false), adapter.jobName("run-fixed"))) {
+	if !exists(filepath.Join(agentRoot(false), profile.jobName("run-fixed"))) {
 		t.Fatal("the fixed user's work directory is not under /var/lib/wherry-agents")
 	}
 }
@@ -396,14 +396,14 @@ func TestCredentialFileOwnerAndModeOnSystemd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := hostAdapter(t, shConfig(`mkdir outputs; stat -c '%a %u' "$WHERRY_CREDENTIALS_DIR/deploy-key" > outputs/file; stat -c '%a %u' "$WHERRY_CREDENTIALS_DIR" > outputs/directory; id -u > outputs/uid; ssh-keygen -y -f "$WHERRY_CREDENTIALS_DIR/deploy-key" > outputs/public`))
+	profile := hostProfile(t, shConfig(`mkdir outputs; stat -c '%a %u' "$WHERRY_CREDENTIALS_DIR/deploy-key" > outputs/file; stat -c '%a %u' "$WHERRY_CREDENTIALS_DIR" > outputs/directory; id -u > outputs/uid; ssh-keygen -y -f "$WHERRY_CREDENTIALS_DIR/deploy-key" > outputs/public`))
 	run := testRun("key")
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: private}}
-	handle := dispatch(t, adapter, run)
-	if _, _, err := followAll(t, adapter, handle, 0); err != nil {
+	run.Credentials = []pluginsdk.Secret{{Name: "deploy", File: "deploy-key", Value: private}}
+	handle := dispatch(t, profile, run)
+	if _, _, err := followAll(t, profile, handle, 0); err != nil {
 		t.Fatal(err)
 	}
-	outputs := hostOutputs(t, adapter, handle)
+	outputs := hostOutputs(t, profile, handle)
 	uid, err := strconv.ParseUint(strings.TrimSpace(string(outputs["uid"].Data)), 10, 32)
 	if err != nil {
 		t.Fatalf("uid %q", outputs["uid"].Data)
@@ -447,17 +447,17 @@ func TestCredentialFileOwnerAndModeOnSystemd(t *testing.T) {
 }
 
 func TestCredentialTargetsOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig(`mkdir outputs; printf %s "$`+credentialEnv+`" > outputs/env; printf %s "$SECOND_TOKEN" > outputs/second
+	profile := hostProfile(t, shConfig(`mkdir outputs; printf %s "$`+credentialEnv+`" > outputs/env; printf %s "$SECOND_TOKEN" > outputs/second
 cp "$WHERRY_CREDENTIALS_DIR/deploy-key" "$WHERRY_CREDENTIALS_DIR/token" outputs/`))
 	run := testRun("env")
-	run.Credentials = []wherry.Secret{
+	run.Credentials = []pluginsdk.Secret{
 		{Name: "model", Env: credentialEnv, Value: []byte("model-key with $dollar and trailing newline\n")},
 		{Name: "second", Env: "SECOND_TOKEN", Value: []byte("second-token")},
 		{Name: "deploy", File: "deploy-key", Value: []byte("deploy-key-value")},
 		{Name: "token", File: "token", Value: []byte("token-value\n")},
 	}
-	_, _, outputs := hostTurn(t, adapter, run)
-	for name, secret := range map[string]wherry.Secret{"env": run.Credentials[0], "second": run.Credentials[1], "deploy-key": run.Credentials[2], "token": run.Credentials[3]} {
+	_, _, outputs := hostTurn(t, profile, run)
+	for name, secret := range map[string]pluginsdk.Secret{"env": run.Credentials[0], "second": run.Credentials[1], "deploy-key": run.Credentials[2], "token": run.Credentials[3]} {
 		if !bytes.Equal(outputs[name].Data, secret.Value) {
 			t.Errorf("the agent's credential %s is %q; want %q", secret.Name, outputs[name].Data, secret.Value)
 		}
@@ -465,30 +465,30 @@ cp "$WHERRY_CREDENTIALS_DIR/deploy-key" "$WHERRY_CREDENTIALS_DIR/token" outputs/
 }
 
 func TestCredentialsAtTheLimitOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig("exit 0"))
+	profile := hostProfile(t, shConfig("exit 0"))
 	run := testRun("limit")
-	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}}
+	run.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}}
 	// The env credential takes one page of the store.
 	value := maxCredentials - os.Getpagesize()
-	run.Credentials = append(run.Credentials, wherry.Secret{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), value)})
-	if _, terminal, _ := hostTurn(t, adapter, run); !terminal.Started || terminal.ExitCode != 0 {
+	run.Credentials = append(run.Credentials, pluginsdk.Secret{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), value)})
+	if _, terminal, _ := hostTurn(t, profile, run); !terminal.Started || terminal.ExitCode != 0 {
 		t.Fatalf("at the limit: terminal %+v; want the run started", terminal)
 	}
 	over := testRun("over")
-	over.Credentials = []wherry.Secret{run.Credentials[0], {Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), value+1)}}
-	if outcome, _, err := adapter.Dispatch(context.Background(), over); outcome != wherry.OutcomeNothingCreated || err == nil {
+	over.Credentials = []pluginsdk.Secret{run.Credentials[0], {Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), value+1)}}
+	if outcome, _, err := profile.Dispatch(context.Background(), over); outcome != pluginsdk.OutcomeNothingCreated || err == nil {
 		t.Fatalf("one byte over: outcome %d, %v", outcome, err)
 	}
 	conn := hostConn(t)
-	if props, err := conn.GetUnitPropertiesContext(context.Background(), unitName(adapter.jobName(over.ID))); err != nil || props["LoadState"] == "loaded" {
+	if props, err := conn.GetUnitPropertiesContext(context.Background(), unitName(profile.jobName(over.ID))); err != nil || props["LoadState"] == "loaded" {
 		t.Fatalf("one byte over: unit %v, %v; want none", props["LoadState"], err)
 	}
 }
 
 func TestTwoRunsCannotReachEachOther(t *testing.T) {
-	first := hostAdapter(t, shConfig("sleep 60"))
+	first := hostProfile(t, shConfig("sleep 60"))
 	run := testRun("first")
-	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("first-credential")}}
+	run.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("first-credential")}}
 	dispatch(t, first, run)
 	u, err := first.unit(context.Background(), unitName(first.jobName(run.ID)))
 	if err != nil || u.mainPID == 0 {
@@ -502,7 +502,7 @@ ls $TARGET_DIR >/dev/null 2>&1 && echo "work listed" >> outputs/reach
 ls /var/lib/wherry-agents/$TARGET_JOB/ >/dev/null 2>&1 && echo "symlink listed" >> outputs/reach
 true`)
 	config.Runtime.Env = map[string]string{"TARGET": strconv.Itoa(int(u.mainPID)), "TARGET_DIR": first.workDir(first.jobName(run.ID)), "TARGET_JOB": first.jobName(run.ID)}
-	second := hostAdapter(t, config)
+	second := hostProfile(t, config)
 	_, _, outputs := hostTurn(t, second, testRun("second"))
 	if reach, ok := outputs["reach"]; ok {
 		t.Fatalf("the second run reached the first: %s", reach.Data)
@@ -510,28 +510,28 @@ true`)
 }
 
 func TestFetchOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig(`mkdir outputs; cat inputs/data.bin > outputs/copy`))
+	profile := hostProfile(t, shConfig(`mkdir outputs; cat inputs/data.bin > outputs/copy`))
 	body := []byte("object bytes")
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
 	defer server.Close()
-	adapter.fetcher.Transport = server.Client().Transport
-	_, _, outputs := hostTurn(t, adapter, fetchRun("fetch", server.URL, body))
+	profile.fetcher.Transport = server.Client().Transport
+	_, _, outputs := hostTurn(t, profile, fetchRun("fetch", server.URL, body))
 	if !bytes.Equal(outputs["copy"].Data, body) {
 		t.Fatalf("the agent read %q; want %q", outputs["copy"].Data, body)
 	}
 	altered := fetchRun("fetch-altered", server.URL, []byte("uploaded bytes"))
-	handle := dispatch(t, adapter, altered)
-	if _, terminal, err := followAll(t, adapter, handle, 0); err != nil || terminal.Started || terminal.Class != wherry.ClassFetch {
+	handle := dispatch(t, profile, altered)
+	if _, terminal, err := followAll(t, profile, handle, 0); err != nil || terminal.Started || terminal.Class != pluginsdk.ClassFetch {
 		t.Fatalf("terminal %+v, %v; want never started, fetch", terminal, err)
 	}
 }
 
-func stopRunning(t *testing.T, adapter *Adapter, run wherry.Run) wherry.Handle {
+func stopRunning(t *testing.T, profile *Systemd, run pluginsdk.Run) pluginsdk.Handle {
 	t.Helper()
-	handle := dispatch(t, adapter, run)
+	handle := dispatch(t, profile, run)
 	time.Sleep(time.Second)
 	began := time.Now()
-	if err := adapter.Stop(context.Background(), handle); err != nil {
+	if err := profile.Stop(context.Background(), handle); err != nil {
 		t.Fatal(err)
 	}
 	if elapsed := time.Since(began); elapsed > 35*time.Second {
@@ -541,36 +541,36 @@ func stopRunning(t *testing.T, adapter *Adapter, run wherry.Run) wherry.Handle {
 }
 
 func TestStopKeepsOutputsOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig(`mkdir outputs; echo kept > outputs/kept; sleep 600`))
-	handle := stopRunning(t, adapter, testRun("stop-outputs"))
-	if outputs := hostOutputs(t, adapter, handle); string(outputs["kept"].Data) != "kept\n" {
+	profile := hostProfile(t, shConfig(`mkdir outputs; echo kept > outputs/kept; sleep 600`))
+	handle := stopRunning(t, profile, testRun("stop-outputs"))
+	if outputs := hostOutputs(t, profile, handle); string(outputs["kept"].Data) != "kept\n" {
 		t.Fatalf("outputs %v; want kept", outputs)
 	}
 }
 
 func TestStopEscalatesOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig(`trap '' TERM; while :; do sleep 1; done`))
-	handle := stopRunning(t, adapter, testRun("stop-escalates"))
-	if job, err := adapter.Lookup(context.Background(), "run-stop-escalates"); err != nil || job.State != wherry.JobEnded || job.Handle.Name != handle.Name {
+	profile := hostProfile(t, shConfig(`trap '' TERM; while :; do sleep 1; done`))
+	handle := stopRunning(t, profile, testRun("stop-escalates"))
+	if job, err := profile.Lookup(context.Background(), "run-stop-escalates"); err != nil || job.State != pluginsdk.JobEnded || job.Handle.Name != handle.Name {
 		t.Fatalf("lookup %+v, %v; want ended", job, err)
 	}
 }
 
 func TestStopKillsLeftoversOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig(`sleep 600 & exit 0`))
+	profile := hostProfile(t, shConfig(`sleep 600 & exit 0`))
 	run := testRun("leftovers")
-	handle := dispatch(t, adapter, run)
-	if _, _, err := followAll(t, adapter, handle, 0); err != nil {
+	handle := dispatch(t, profile, run)
+	if _, _, err := followAll(t, profile, handle, 0); err != nil {
 		t.Fatal(err)
 	}
-	name := unitName(adapter.jobName(run.ID))
-	if empty, err := adapter.empty(context.Background(), name); err != nil || empty {
+	name := unitName(profile.jobName(run.ID))
+	if empty, err := profile.empty(context.Background(), name); err != nil || empty {
 		t.Fatalf("empty %v, %v; want the background sleep in the cgroup", empty, err)
 	}
-	if err := adapter.Stop(context.Background(), handle); err != nil {
+	if err := profile.Stop(context.Background(), handle); err != nil {
 		t.Fatal(err)
 	}
-	if empty, err := adapter.empty(context.Background(), name); err != nil || !empty {
+	if empty, err := profile.empty(context.Background(), name); err != nil || !empty {
 		t.Fatalf("empty %v, %v after the stop", empty, err)
 	}
 }
@@ -579,8 +579,8 @@ func TestCollectAfterAgentOOMOnSystemd(t *testing.T) {
 	// tail keeps a line that never ends in memory, and exec makes it the unit's main process.
 	config := shConfig(`mkdir outputs; echo before > outputs/before; exec tail /dev/zero`)
 	config.Runtime.Resources.MemoryMB = new(64)
-	adapter := hostAdapter(t, config)
-	_, terminal, outputs := hostTurn(t, adapter, testRun("oom"))
+	profile := hostProfile(t, config)
+	_, terminal, outputs := hostTurn(t, profile, testRun("oom"))
 	if terminal.Signal != "9" || string(outputs["before"].Data) != "before\n" {
 		t.Fatalf("terminal %+v, outputs %v; want signal 9 and the output", terminal, outputs)
 	}
@@ -588,17 +588,17 @@ func TestCollectAfterAgentOOMOnSystemd(t *testing.T) {
 
 func TestAdoptionOnSystemd(t *testing.T) {
 	config := shConfig(`mkdir outputs; i=0; while [ $i -lt 20 ]; do echo "line $i"; i=$((i+1)); sleep 0.5; done; echo done > outputs/done`)
-	first := hostAdapter(t, config)
+	first := hostProfile(t, config)
 	run := testRun("adopt")
 	handle := dispatch(t, first, run)
 	ctx, cancel := context.WithCancel(context.Background())
-	lines := make(chan wherry.Line)
+	lines := make(chan pluginsdk.Line)
 	followed := make(chan error, 1)
 	go func() {
 		_, err := first.Follow(ctx, handle, 0, lines)
 		followed <- err
 	}()
-	var seen []wherry.Line
+	var seen []pluginsdk.Line
 	for len(seen) < 4 {
 		seen = append(seen, <-lines)
 	}
@@ -609,7 +609,7 @@ func TestAdoptionOnSystemd(t *testing.T) {
 		t.Fatal(err)
 	}
 	job, err := second.Lookup(context.Background(), run.ID)
-	if err != nil || job.State != wherry.JobRunning {
+	if err != nil || job.State != pluginsdk.JobRunning {
 		t.Fatalf("lookup %+v, %v; want running", job, err)
 	}
 	rest, terminal, err := followAll(t, second, job.Handle, seen[len(seen)-1].Next)
@@ -634,13 +634,13 @@ func TestAdoptionOnSystemd(t *testing.T) {
 }
 
 func TestLargeStreamedOutputOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig(`mkdir outputs; head -c 1536m /dev/zero > outputs/large.bin`))
-	handle := dispatch(t, adapter, testRun("large"))
-	if _, _, err := followAll(t, adapter, handle, 0); err != nil {
+	profile := hostProfile(t, shConfig(`mkdir outputs; head -c 1536m /dev/zero > outputs/large.bin`))
+	handle := dispatch(t, profile, testRun("large"))
+	if _, _, err := followAll(t, profile, handle, 0); err != nil {
 		t.Fatal(err)
 	}
 	began := time.Now()
-	outputs, err := collect(t, adapter, handle, wherry.Limits{Files: 8, Stream: []string{"large.bin"}, StreamBytes: 2 << 30})
+	outputs, err := collect(t, profile, handle, pluginsdk.Limits{Files: 8, Stream: []string{"large.bin"}, StreamBytes: 2 << 30})
 	if err != nil || len(outputs) != 1 || outputs[0].Body == nil {
 		t.Fatalf("outputs %v, %v; want large.bin streamed", outputs, err)
 	}
@@ -653,8 +653,8 @@ func TestLargeStreamedOutputOnSystemd(t *testing.T) {
 }
 
 func TestStderrStaysOutOfTheTranscriptOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig(`printf '{"type":'; echo noise >&2; printf '"result"}\n'`))
-	lines, _, _ := hostTurn(t, adapter, testRun("stderr"))
+	profile := hostProfile(t, shConfig(`printf '{"type":'; echo noise >&2; printf '"result"}\n'`))
+	lines, _, _ := hostTurn(t, profile, testRun("stderr"))
 	if !slices.Equal(texts(lines), []string{`{"type":"result"}`}) {
 		t.Fatalf("lines %q; want the result line whole", texts(lines))
 	}
@@ -669,37 +669,37 @@ func (u unlinking) StartTransientUnitContext(ctx context.Context, name, mode str
 }
 
 func TestFailedStartsOnSystemd(t *testing.T) {
-	missing := hostAdapter(t, missingCommand())
+	missing := hostProfile(t, missingCommand())
 	if _, terminal, err := followAll(t, missing, dispatch(t, missing, testRun("missing")), 0); err != nil || terminal.Class != "exec" || terminal.Reason != "systemd exit status 203/EXEC" {
 		t.Fatalf("terminal %+v, %v; want never started, exec", terminal, err)
 	}
-	adapter := hostAdapter(t, shConfig("exit 0"))
-	bus, err := adapter.bus(context.Background())
+	profile := hostProfile(t, shConfig("exit 0"))
+	bus, err := profile.bus(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter.conn = unlinking{bus}
+	profile.conn = unlinking{bus}
 	run := testRun("no-source")
-	run.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: []byte("key")}}
-	if _, terminal, err := followAll(t, adapter, dispatch(t, adapter, run), 0); err != nil || terminal.Class != "credentials" || terminal.Reason != "systemd exit status 243/CREDENTIALS" {
+	run.Credentials = []pluginsdk.Secret{{Name: "deploy", File: "deploy-key", Value: []byte("key")}}
+	if _, terminal, err := followAll(t, profile, dispatch(t, profile, run), 0); err != nil || terminal.Class != "credentials" || terminal.Reason != "systemd exit status 243/CREDENTIALS" {
 		t.Fatalf("terminal %+v, %v; want never started, credentials", terminal, err)
 	}
 }
 
 func TestCoreDumpKeepsTheCredentialOutOfTheJournalOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig(`sh -c 'kill -SEGV $$'; kill -SEGV $$`))
+	profile := hostProfile(t, shConfig(`sh -c 'kill -SEGV $$'; kill -SEGV $$`))
 	pattern, _ := exec.Command("sysctl", "-n", "kernel.core_pattern").Output()
 	t.Logf("kernel.core_pattern: %s", bytes.TrimSpace(pattern))
 	since := time.Now().Add(-time.Second).Format("2006-01-02 15:04:05")
 	run := testRun("core")
-	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("core-dump-credential-" + hex.EncodeToString([]byte(since)))}}
-	_, terminal, _ := hostTurn(t, adapter, run)
+	run.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("core-dump-credential-" + hex.EncodeToString([]byte(since)))}}
+	_, terminal, _ := hostTurn(t, profile, run)
 	if terminal.Signal != "11" {
 		t.Errorf("terminal %+v; want signal 11", terminal)
 	}
 	time.Sleep(2 * time.Second)
 	for _, args := range [][]string{
-		{"-o", "export", "_SYSTEMD_UNIT=" + unitName(adapter.jobName(run.ID))},
+		{"-o", "export", "_SYSTEMD_UNIT=" + unitName(profile.jobName(run.ID))},
 		{"-o", "export", "-t", "systemd-coredump", "--since", since},
 		{"-o", "export", "--since", since},
 	} {
@@ -714,12 +714,12 @@ func TestCoreDumpKeepsTheCredentialOutOfTheJournalOnSystemd(t *testing.T) {
 }
 
 func TestTransientFileHoldsNoMaterial(t *testing.T) {
-	adapter := hostAdapter(t, shConfig("sleep 30"))
+	profile := hostProfile(t, shConfig("sleep 30"))
 	run := testRun("transient")
 	run.Prompt = []byte("transient-prompt-secret")
-	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("transient-credential-secret")}, {Name: "deploy", File: "deploy-key", Value: []byte("transient-task-secret")}}
-	run.Inputs = []wherry.File{{Name: "in.txt", Data: []byte("transient-input-secret")}}
-	handle := dispatch(t, adapter, run)
+	run.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("transient-credential-secret")}, {Name: "deploy", File: "deploy-key", Value: []byte("transient-task-secret")}}
+	run.Inputs = []pluginsdk.File{{Name: "in.txt", Data: []byte("transient-input-secret")}}
+	handle := dispatch(t, profile, run)
 	file, err := os.ReadFile(filepath.Join("/run/systemd/transient", handle.Name))
 	if err != nil {
 		t.Fatal(err)
@@ -737,14 +737,14 @@ func TestTransientFileHoldsNoMaterial(t *testing.T) {
 }
 
 func TestPurgeLeavesNothingOnSystemd(t *testing.T) {
-	adapter := hostAdapter(t, shConfig(`mkdir outputs; echo x > outputs/x; sleep 30`))
+	profile := hostProfile(t, shConfig(`mkdir outputs; echo x > outputs/x; sleep 30`))
 	run := testRun("purge")
-	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key")}}
-	handle := dispatch(t, adapter, run)
-	if err := adapter.Purge(context.Background(), run.ID); err != nil {
+	run.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key")}}
+	handle := dispatch(t, profile, run)
+	if err := profile.Purge(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
 	}
-	job := adapter.jobName(run.ID)
+	job := profile.jobName(run.ID)
 	for _, path := range slices.Concat(workDirs(job), []string{filepath.Join(controlRoot, job), filepath.Join(credentialRoot, handle.Name), filepath.Join("/run/credentials", handle.Name)}) {
 		if exists(path) {
 			t.Errorf("%s remains", path)

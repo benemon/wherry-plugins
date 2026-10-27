@@ -10,19 +10,19 @@ import (
 	"strings"
 	"testing"
 
-	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/godbus/dbus/v5"
 )
 
-func credentialedRun(name string) wherry.Run {
+func credentialedRun(name string) pluginsdk.Run {
 	run := testRun(name)
-	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}, {Name: "deploy", File: "deploy-key", Value: []byte("ssh-key\n")}}
+	run.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}, {Name: "deploy", File: "deploy-key", Value: []byte("ssh-key\n")}}
 	return run
 }
 
 func TestCredentialFilesAreRootOnly(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := credentialedRun("credential-files")
 	dir := filepath.Join(credentialRoot, unitOf(run))
 	checked := false
@@ -52,12 +52,12 @@ func TestCredentialFilesAreRootOnly(t *testing.T) {
 			}
 		}
 	})
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	if !checked {
 		t.Fatal("no unit started")
 	}
 	plain := testRun("no-credentials")
-	dispatch(t, adapter, plain)
+	dispatch(t, profile, plain)
 	if _, ok := f.properties(unitOf(plain))["LoadCredential"]; ok || exists(filepath.Join(credentialRoot, unitOf(plain))) {
 		t.Fatal("a run without credentials has LoadCredential or a credential directory")
 	}
@@ -65,9 +65,9 @@ func TestCredentialFilesAreRootOnly(t *testing.T) {
 
 func TestCredentialFilesRemovedAfterTheStart(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
+	profile := newAgent(t, agentConfig("sleep 30"))
 	run := credentialedRun("credentials-removed")
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	if exists(filepath.Join(credentialRoot, unitOf(run))) {
 		t.Fatal("the credential files outlived the start")
 	}
@@ -75,7 +75,7 @@ func TestCredentialFilesRemovedAfterTheStart(t *testing.T) {
 
 func TestCredentialFilesRemovedAfterAFailedStart(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	missing := credentialedRun("credentials-missing")
 	f.set(func() {
 		f.onStart = func(name string, _ map[string]any) {
@@ -84,22 +84,22 @@ func TestCredentialFilesRemovedAfterAFailedStart(t *testing.T) {
 			}
 		}
 	})
-	dispatch(t, adapter, missing)
+	dispatch(t, profile, missing)
 	f.set(func() { f.onStart, f.result = nil, "timeout" })
 	timedOut := credentialedRun("credentials-timeout")
-	dispatch(t, adapter, timedOut)
+	dispatch(t, profile, timedOut)
 	f.set(func() { f.result = "" })
 	refused := credentialedRun("credentials-refused")
 	f.fail("start", dbus.Error{Name: "org.freedesktop.DBus.Error.AccessDenied"})
-	if _, _, err := adapter.Dispatch(context.Background(), refused); err == nil {
+	if _, _, err := profile.Dispatch(context.Background(), refused); err == nil {
 		t.Fatal("a refused start succeeded")
 	}
-	for _, run := range []wherry.Run{missing, timedOut} {
+	for _, run := range []pluginsdk.Run{missing, timedOut} {
 		if m := readMarkerOf(t, run); m.NeverStarted == nil {
 			t.Fatalf("%s: marker %+v; want a failed start", run.ID, m)
 		}
 	}
-	for _, run := range []wherry.Run{missing, timedOut, refused} {
+	for _, run := range []pluginsdk.Run{missing, timedOut, refused} {
 		if exists(filepath.Join(credentialRoot, unitOf(run))) {
 			t.Errorf("%s: the credential files outlived the failed start", run.ID)
 		}
@@ -108,14 +108,14 @@ func TestCredentialFilesRemovedAfterAFailedStart(t *testing.T) {
 
 func TestCredentialFileMissingFailsTheStart(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := credentialedRun("credential-missing")
 	f.set(func() {
 		f.onStart = func(name string, _ map[string]any) {
 			_ = os.Remove(filepath.Join(credentialRoot, name, "deploy-key"))
 		}
 	})
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	if m := readMarkerOf(t, run); m.NeverStarted == nil || *m.NeverStarted != (neverStarted{"credentials", "systemd exit status 243/CREDENTIALS"}) {
 		t.Fatalf("marker %+v; want never started, credentials", m)
 	}
@@ -123,7 +123,7 @@ func TestCredentialFileMissingFailsTheStart(t *testing.T) {
 
 func TestSweepRemovesStaleCredentialFiles(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	stale, starting, foreign := unitName(poolPrefix+"run-stale"), unitName(poolPrefix+"run-starting"), unitName("agent-000000000000-run-x")
 	for _, name := range []string{stale, starting, foreign} {
 		if err := os.MkdirAll(filepath.Join(credentialRoot, name), 0o700); err != nil {
@@ -134,7 +134,7 @@ func TestSweepRemovesStaleCredentialFiles(t *testing.T) {
 		}
 	}
 	f.put(starting, capturedUnit(t, "activating"))
-	sweep(t, adapter)
+	sweep(t, profile)
 	if exists(filepath.Join(credentialRoot, stale)) || !exists(filepath.Join(credentialRoot, starting)) || !exists(filepath.Join(credentialRoot, foreign)) {
 		t.Fatalf("stale %v, starting %v, foreign %v; want only the stale directory removed",
 			exists(filepath.Join(credentialRoot, stale)), exists(filepath.Join(credentialRoot, starting)), exists(filepath.Join(credentialRoot, foreign)))

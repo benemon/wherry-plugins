@@ -1,7 +1,7 @@
 # wherry-plugins
 
 Plugins for [wherry](https://github.com/benemon/wherry) receivers, each the
-adapter for one kind of platform. A receiver ships with no plugins; it runs
+plugin for one kind of platform. A receiver ships with no plugins; it runs
 `wherry-plugin-<type>` from its plugin directory for each plugin type in its
 configuration, and configures each of that plugin's profiles in it. See
 [Plugins](https://benemon.github.io/wherry/commands#plugins) for the
@@ -26,8 +26,8 @@ follow each platform:
 | User | `runtime.user`, a name or `UID[:GID]`, with `group` on `docker` and `podman` and `supplementary_groups` on `docker`; the GID defaults to the UID for credential files | `runtime.user`, `UID[:GID]`, with `group` and `supplementary_groups` as GIDs; the GID defaults to the image's | `runtime.user`, a name or `UID[:GID]`, with `group` and `supplementary_groups`; unset, a dynamic user per run |
 | Placement | `node_pool`, `datacenters` | `node_selector`, `tolerations` | the receiver's host |
 
-Each plugin is its own Go module and builds against the tagged adapter
-protocol module, `github.com/benemon/wherry/adapter`. `make build` builds
+Each plugin is its own Go module and builds against the tagged plugin
+protocol module, `github.com/benemon/wherry/pluginsdk`. `make build` builds
 every plugin, `make check` runs the CI gates, and
 `make dist PLUGIN=<directory> VERSION=<version>` writes a plugin's release
 archives into `dist`. `make image` builds the Kubernetes receiver image
@@ -38,5 +38,5 @@ a Go workspace from the repository root. `go.work` is for local development
 only and is not tracked.
 
 ```sh
-go work init ./nomad ./kubernetes ./systemd ../wherry/adapter
+go work init ./nomad ./kubernetes ./systemd ../wherry/pluginsdk
 ```

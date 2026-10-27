@@ -1,4 +1,4 @@
-// Command wherry-plugin-kubernetes is the wherry adapter plugin for Kubernetes, which also runs on OpenShift. The
+// Command wherry-plugin-kubernetes is the wherry plugin for Kubernetes, which also runs on OpenShift. The
 // receiver starts it from its plugin directory; it is not run by hand.
 package main
 
@@ -6,17 +6,17 @@ import (
 	json "encoding/json/v2"
 	"fmt"
 
-	wherry "github.com/benemon/wherry/adapter"
+	"github.com/benemon/wherry/pluginsdk"
 	"github.com/go-logr/logr"
 	"github.com/hashicorp/go-hclog"
 	"k8s.io/klog/v2"
 )
 
 func main() {
-	wherry.Serve(newAdapter)
+	pluginsdk.Serve(newProfile)
 }
 
-func newAdapter(settings wherry.Settings, logger hclog.Logger) (wherry.Adapter, error) {
+func newProfile(settings pluginsdk.Settings, logger hclog.Logger) (pluginsdk.Plugin, error) {
 	// client-go logs through klog to stderr, which the receiver would relay unlevelled.
 	klog.SetLogger(logr.Discard())
 	var config Config

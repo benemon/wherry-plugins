@@ -27,8 +27,8 @@ import (
 	"testing"
 	"time"
 
-	wherry "github.com/benemon/wherry/adapter"
-	"github.com/benemon/wherry/adapter/adaptertest"
+	"github.com/benemon/wherry/pluginsdk"
+	"github.com/benemon/wherry/pluginsdk/pluginsdktest"
 	sd "github.com/coreos/go-systemd/v22/dbus"
 	"github.com/godbus/dbus/v5"
 	"github.com/hashicorp/go-hclog"
@@ -90,7 +90,7 @@ type fakeManager struct {
 	onRead  func(name string)
 }
 
-// newHost roots the adapter's host paths in a temporary tree and dials a fake manager.
+// newHost roots the plugin's host paths in a temporary tree and dials a fake manager.
 func newHost(t *testing.T) *fakeManager {
 	t.Helper()
 	root := t.TempDir()
@@ -517,7 +517,7 @@ func (f *fakeManager) Connected() bool {
 	return f.connected
 }
 
-// fast shortens the adapter's polls and grace for one test.
+// fast shortens the plugin's polls and grace for one test.
 func fast(t *testing.T) {
 	t.Helper()
 	saved := []time.Duration{waitPoll, followPoll, unitPoll, collectPoll, stopPoll, stopGrace}
@@ -533,39 +533,39 @@ func agentConfig(script string) Config {
 	}}
 }
 
-func newAgent(t *testing.T, config Config) *Adapter {
+func newAgent(t *testing.T, config Config) *Systemd {
 	t.Helper()
 	fast(t)
-	adapter, err := New(config, testProfile, testPool, hclog.NewNullLogger())
+	profile, err := New(config, testProfile, testPool, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return adapter
+	return profile
 }
 
-func testRun(name string) wherry.Run {
-	return wherry.Run{ID: "run-" + name, Profile: testProfile, Agent: "coder", Attempt: 2, Prompt: []byte("hello-prompt")}
+func testRun(name string) pluginsdk.Run {
+	return pluginsdk.Run{ID: "run-" + name, Profile: testProfile, Agent: "coder", Attempt: 2, Prompt: []byte("hello-prompt")}
 }
 
-func unitOf(run wherry.Run) string { return unitName(jobName(testPool, run.ID)) }
+func unitOf(run pluginsdk.Run) string { return unitName(jobName(testPool, run.ID)) }
 
-func jobOf(run wherry.Run) string { return jobName(testPool, run.ID) }
+func jobOf(run pluginsdk.Run) string { return jobName(testPool, run.ID) }
 
-func dispatch(t *testing.T, adapter *Adapter, run wherry.Run) wherry.Handle {
+func dispatch(t *testing.T, profile *Systemd, run pluginsdk.Run) pluginsdk.Handle {
 	t.Helper()
-	outcome, handle, err := adapter.Dispatch(context.Background(), run)
-	if err != nil || outcome != wherry.OutcomeCreated {
+	outcome, handle, err := profile.Dispatch(context.Background(), run)
+	if err != nil || outcome != pluginsdk.OutcomeCreated {
 		t.Fatalf("dispatch %s: outcome %d, %v; want created", run.ID, outcome, err)
 	}
 	return handle
 }
 
-func followAll(t *testing.T, adapter *Adapter, handle wherry.Handle, from int64) ([]wherry.Line, wherry.Terminal, error) {
+func followAll(t *testing.T, profile *Systemd, handle pluginsdk.Handle, from int64) ([]pluginsdk.Line, pluginsdk.Terminal, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	lines := make(chan wherry.Line)
-	var got []wherry.Line
+	lines := make(chan pluginsdk.Line)
+	var got []pluginsdk.Line
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -573,13 +573,13 @@ func followAll(t *testing.T, adapter *Adapter, handle wherry.Handle, from int64)
 			got = append(got, line)
 		}
 	}()
-	terminal, err := adapter.Follow(ctx, handle, from, lines)
+	terminal, err := profile.Follow(ctx, handle, from, lines)
 	close(lines)
 	<-done
 	return got, terminal, err
 }
 
-func texts(lines []wherry.Line) []string {
+func texts(lines []pluginsdk.Line) []string {
 	var out []string
 	for _, line := range lines {
 		out = append(out, string(line.Data))
@@ -587,7 +587,7 @@ func texts(lines []wherry.Line) []string {
 	return out
 }
 
-func readMarkerOf(t *testing.T, run wherry.Run) *marker {
+func readMarkerOf(t *testing.T, run pluginsdk.Run) *marker {
 	t.Helper()
 	m, err := readMarker(jobOf(run))
 	if err != nil {
@@ -596,9 +596,9 @@ func readMarkerOf(t *testing.T, run wherry.Run) *marker {
 	return m
 }
 
-func samples(adapter *Adapter) map[string]wherry.Sample {
-	got, _ := adapter.Metrics(context.Background())
-	byKey := map[string]wherry.Sample{}
+func samples(profile *Systemd) map[string]pluginsdk.Sample {
+	got, _ := profile.Metrics(context.Background())
+	byKey := map[string]pluginsdk.Sample{}
 	for _, sample := range got {
 		key := sample.Family
 		for _, label := range []string{"class", "kind"} {
@@ -625,7 +625,7 @@ func capturedUnit(t *testing.T, name string) captured {
 }
 
 // putMarker writes a run's directories and a marker in phase, as a Dispatch would have left them.
-func putMarker(t *testing.T, run wherry.Run, phase string, edit func(*marker)) {
+func putMarker(t *testing.T, run pluginsdk.Run, phase string, edit func(*marker)) {
 	t.Helper()
 	job := jobOf(run)
 	for _, dir := range []string{filepath.Join(controlRoot, job), filepath.Join(agentRoot(true), job, "inputs")} {
@@ -651,9 +651,9 @@ func putMarker(t *testing.T, run wherry.Run, phase string, edit func(*marker)) {
 	}
 }
 
-func handleFor(name, instance string) wherry.Handle {
+func handleFor(name, instance string) pluginsdk.Handle {
 	data, _ := json.Marshal(handle{V: 1, Unit: name, Instance: instance})
-	return wherry.Handle{Data: data, Name: name}
+	return pluginsdk.Handle{Data: data, Name: name}
 }
 
 func exists(name string) bool {
@@ -674,9 +674,9 @@ func TestUnitPropertiesFromRuntime(t *testing.T) {
 	f := newHost(t)
 	config := agentConfig("exec agent-run")
 	config.Runtime.Resources = Resources{CPUQuota: new(150), MemoryMB: new(4096)}
-	adapter := newAgent(t, config)
+	profile := newAgent(t, config)
 	run := testRun("props")
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	props := f.properties(unitOf(run))
 	job := jobOf(run)
 	want := map[string]any{
@@ -815,7 +815,7 @@ func TestUnitPropertiesMatchSystemdSignatures(t *testing.T) {
 	config := agentConfig("exit 0")
 	config.Runtime.User, config.Runtime.Group, config.Runtime.SupplementaryGroups = "agent", "agents", []string{"video"}
 	run := testRun("signatures")
-	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}}
+	run.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}}
 	dispatch(t, newAgent(t, agentConfig("exit 0")), run)
 	fixed := testRun("signatures-fixed")
 	dispatch(t, newAgent(t, config), fixed)
@@ -842,17 +842,17 @@ func TestUnitPropertiesMatchSystemdSignatures(t *testing.T) {
 
 func TestUnitPropertiesHoldNoMaterial(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	object := []byte("fetched-input-secret")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(object) }))
 	defer server.Close()
 	run := testRun("no-material")
 	run.Prompt = []byte("prompt-secret")
 	run.Model = "opus"
-	run.Inputs = []wherry.File{{Name: "in.txt", Data: []byte("inline-input-secret")}}
-	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("credential-secret")}, {Name: "deploy", File: "deploy-key", Value: []byte("task-credential-secret")}}
-	run.Fetches = []wherry.Fetch{{Name: "object.bin", URL: server.URL + "/object?X-Amz-Signature=presigned-url-secret", Size: int64(len(object)), SHA256: sha(object)}}
-	dispatch(t, adapter, run)
+	run.Inputs = []pluginsdk.File{{Name: "in.txt", Data: []byte("inline-input-secret")}}
+	run.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("credential-secret")}, {Name: "deploy", File: "deploy-key", Value: []byte("task-credential-secret")}}
+	run.Fetches = []pluginsdk.Fetch{{Name: "object.bin", URL: server.URL + "/object?X-Amz-Signature=presigned-url-secret", Size: int64(len(object)), SHA256: sha(object)}}
+	dispatch(t, profile, run)
 	var seen strings.Builder
 	f.mu.Lock()
 	for _, p := range f.starts[unitOf(run)] {
@@ -868,11 +868,11 @@ func TestUnitPropertiesHoldNoMaterial(t *testing.T) {
 
 func TestExecStartDisablesEnvExpansion(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("echo $HOME"))
+	profile := newAgent(t, agentConfig("echo $HOME"))
 	plain, credentialed := testRun("expand"), testRun("expand-credential")
-	credentialed.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key")}}
-	for _, run := range []wherry.Run{plain, credentialed} {
-		dispatch(t, adapter, run)
+	credentialed.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key")}}
+	for _, run := range []pluginsdk.Run{plain, credentialed} {
+		dispatch(t, profile, run)
 		exe := f.properties(unitOf(run))["ExecStartEx"].([]execStart)
 		if len(exe) != 1 || !slices.Equal(exe[0].Flags, []string{"no-env-expand"}) {
 			t.Errorf("%s: ExecStartEx %+v; want one command with no-env-expand", run.ID, exe)
@@ -910,14 +910,14 @@ func TestCredentialWrapperPreservesBytes(t *testing.T) {
 
 func TestCredentialWrapperOnlyWithACredential(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exec agent-run"))
+	profile := newAgent(t, agentConfig("exec agent-run"))
 	plain, files, credentialed := testRun("wrapper"), testRun("wrapper-files"), testRun("wrapper-credential")
-	files.Credentials = []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: []byte("key")}}
-	credentialed.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key")}, files.Credentials[0], {Name: "second", Env: "SECOND_TOKEN", Value: []byte("key")}}
-	for _, run := range []wherry.Run{plain, files, credentialed} {
-		dispatch(t, adapter, run)
+	files.Credentials = []pluginsdk.Secret{{Name: "deploy", File: "deploy-key", Value: []byte("key")}}
+	credentialed.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key")}, files.Credentials[0], {Name: "second", Env: "SECOND_TOKEN", Value: []byte("key")}}
+	for _, run := range []pluginsdk.Run{plain, files, credentialed} {
+		dispatch(t, profile, run)
 	}
-	for _, run := range []wherry.Run{plain, files} {
+	for _, run := range []pluginsdk.Run{plain, files} {
 		if exe := f.properties(unitOf(run))["ExecStartEx"].([]execStart)[0]; !slices.Equal(exe.Args, []string{"/bin/sh", "-c", "exec agent-run"}) {
 			t.Errorf("%s: argv %q; want the runtime command alone", run.ID, exe.Args)
 		}
@@ -930,10 +930,10 @@ func TestCredentialWrapperOnlyWithACredential(t *testing.T) {
 
 func TestConformanceCredentialsReachTheAgent(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig(`printf '%s\n' "$CONFORMANCE_TOKEN"; cat `+credentialsPath+`/conformance-key; echo`))
+	profile := newAgent(t, agentConfig(`printf '%s\n' "$CONFORMANCE_TOKEN"; cat `+credentialsPath+`/conformance-key; echo`))
 	run := testRun("credential-targets")
-	run.Credentials = adaptertest.Credentials
-	lines, terminal, err := followAll(t, adapter, dispatch(t, adapter, run), 0)
+	run.Credentials = pluginsdktest.Credentials
+	lines, terminal, err := followAll(t, profile, dispatch(t, profile, run), 0)
 	if err != nil || terminal.ExitCode != 0 || !slices.Equal(texts(lines), []string{"conformance-env-value", "conformance-file-value"}) {
 		t.Fatalf("lines %q, terminal %+v, %v; want the env credential, then the file credential", texts(lines), terminal, err)
 	}
@@ -941,21 +941,21 @@ func TestConformanceCredentialsReachTheAgent(t *testing.T) {
 
 func TestTwoCredentialsOfEachTargetReachTheAgent(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig(`printf '%s\n' "$`+credentialEnv+`" "$SECOND_TOKEN"; cat `+credentialsPath+`/deploy-key `+credentialsPath+`/token`))
+	profile := newAgent(t, agentConfig(`printf '%s\n' "$`+credentialEnv+`" "$SECOND_TOKEN"; cat `+credentialsPath+`/deploy-key `+credentialsPath+`/token`))
 	run := testRun("credential-pairs")
-	run.Credentials = []wherry.Secret{
+	run.Credentials = []pluginsdk.Secret{
 		{Name: "model", Env: credentialEnv, Value: []byte("model-key")},
 		{Name: "deploy", File: "deploy-key", Value: []byte("deploy-value\n")},
 		{Name: "second", Env: "SECOND_TOKEN", Value: []byte("second-token")},
 		{Name: "token", File: "token", Value: []byte("token-value\n")},
 	}
-	lines, terminal, err := followAll(t, adapter, dispatch(t, adapter, run), 0)
+	lines, terminal, err := followAll(t, profile, dispatch(t, profile, run), 0)
 	if err != nil || terminal.ExitCode != 0 || !slices.Equal(texts(lines), []string{"model-key", "second-token", "deploy-value", "token-value"}) {
 		t.Fatalf("lines %q, terminal %+v, %v; want both env credentials, then both file credentials", texts(lines), terminal, err)
 	}
 }
 
-func envOf(f *fakeManager, run wherry.Run) []string {
+func envOf(f *fakeManager, run pluginsdk.Run) []string {
 	return f.properties(unitOf(run))["Environment"].([]string)
 }
 
@@ -966,14 +966,14 @@ func TestAgentEnvironmentReachesTheAgent(t *testing.T) {
 	run := testRun("agent-env")
 	dispatch(t, newAgent(t, config), run)
 	env := envOf(f, run)
-	for name, value := range wherry.AgentEnvironment {
+	for name, value := range pluginsdk.AgentEnvironment {
 		if !slices.Contains(env, name+"="+value) {
 			t.Errorf("Environment lacks %s=%s", name, value)
 		}
 	}
 	for _, entry := range env {
 		name, _, _ := strings.Cut(entry, "=")
-		if slices.Contains(wherry.AgentUnset, name) {
+		if slices.Contains(pluginsdk.AgentUnset, name) {
 			t.Errorf("Environment holds %s", entry)
 		}
 	}
@@ -984,11 +984,11 @@ func TestAgentEnvironmentReachesTheAgent(t *testing.T) {
 
 func TestUnitEnvCarriesTheModelOnlyWhenSet(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	plain, modelled := testRun("no-model"), testRun("model")
 	modelled.Model = "opus"
-	dispatch(t, adapter, plain)
-	dispatch(t, adapter, modelled)
+	dispatch(t, profile, plain)
+	dispatch(t, profile, modelled)
 	for _, entry := range envOf(f, plain) {
 		if strings.HasPrefix(entry, "WHERRY_MODEL=") {
 			t.Errorf("without a model: %s", entry)
@@ -1010,15 +1010,15 @@ func TestUnitEnvSetsAnOverridableShell(t *testing.T) {
 	config.Runtime.Env["SHELL"] = "/bin/bash"
 	bash := newAgent(t, config)
 	for _, c := range []struct {
-		adapter *Adapter
-		run     wherry.Run
+		profile *Systemd
+		run     pluginsdk.Run
 		want    string
 	}{{plain, testRun("shell"), "/bin/sh"}, {bash, testRun("shell-bash"), "/bin/bash"}} {
-		handle := dispatch(t, c.adapter, c.run)
+		handle := dispatch(t, c.profile, c.run)
 		if env := envOf(f, c.run); !slices.Equal(slices.DeleteFunc(env, func(e string) bool { return !strings.HasPrefix(e, "SHELL=") }), []string{"SHELL=" + c.want}) {
 			t.Errorf("%s: Environment sets SHELL as %q; want SHELL=%s once", c.run.ID, env, c.want)
 		}
-		lines, _, err := followAll(t, c.adapter, handle, 0)
+		lines, _, err := followAll(t, c.profile, handle, 0)
 		if err != nil || !slices.Equal(texts(lines), []string{c.want}) {
 			t.Errorf("%s: the agent's SHELL %q, %v; want %s", c.run.ID, texts(lines), err, c.want)
 		}
@@ -1030,8 +1030,8 @@ func TestUnitEnvSetsThePluginsVariablesOnce(t *testing.T) {
 	config := agentConfig(`printf '%s %s\n' "$HOME" "$WHERRY_INPUT_DIR"`)
 	config.Runtime.Env["HOME"] = "/elsewhere"
 	config.Runtime.Env["WHERRY_INPUT_DIR"] = "/elsewhere/inputs"
-	adapter := newAgent(t, config)
-	lines, _, err := followAll(t, adapter, dispatch(t, adapter, testRun("home")), 0)
+	profile := newAgent(t, config)
+	lines, _, err := followAll(t, profile, dispatch(t, profile, testRun("home")), 0)
 	if err != nil || !slices.Equal(texts(lines), []string{"/wherry /wherry/inputs"}) {
 		t.Fatalf("the agent's HOME and WHERRY_INPUT_DIR %q, %v; want the plugin's", texts(lines), err)
 	}
@@ -1059,7 +1059,7 @@ func TestUnitPropertiesLimitCoreDumps(t *testing.T) {
 func TestDirectoriesAreFixed(t *testing.T) {
 	newHost(t)
 	got := newAgent(t, agentConfig("exit 0")).Directories()
-	if got != (wherry.Directories{Input: "/wherry/inputs", Output: "/wherry/outputs", Credentials: "/run/wherry/credentials"}) {
+	if got != (pluginsdk.Directories{Input: "/wherry/inputs", Output: "/wherry/outputs", Credentials: "/run/wherry/credentials"}) {
 		t.Fatalf("directories %+v; want the paths each unit sees", got)
 	}
 }
@@ -1240,9 +1240,9 @@ func TestSameRunInTwoPoolsMakesTwoUnits(t *testing.T) {
 
 func TestDispatchWritesMaterialThenStarts(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("order")
-	run.Inputs = []wherry.File{{Name: "data.csv", Data: []byte("a,b")}}
+	run.Inputs = []pluginsdk.File{{Name: "data.csv", Data: []byte("a,b")}}
 	body := []byte("fetched")
 	var events []string
 	var mu sync.Mutex
@@ -1256,7 +1256,7 @@ func TestDispatchWritesMaterialThenStarts(t *testing.T) {
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
-	run.Fetches = []wherry.Fetch{{Name: "big.bin", URL: server.URL, Size: int64(len(body)), SHA256: sha(body)}}
+	run.Fetches = []pluginsdk.Fetch{{Name: "big.bin", URL: server.URL, Size: int64(len(body)), SHA256: sha(body)}}
 	f.set(func() {
 		f.onStart = func(string, map[string]any) {
 			m, _ := readMarker(job)
@@ -1277,7 +1277,7 @@ func TestDispatchWritesMaterialThenStarts(t *testing.T) {
 			}
 		}
 	})
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	if m := readMarkerOf(t, run); m.Phase != phaseStarted {
 		t.Errorf("marker phase %s after the start; want started", m.Phase)
 	}
@@ -1288,21 +1288,21 @@ func TestDispatchWritesMaterialThenStarts(t *testing.T) {
 
 func TestDispatchConvergesOnAnExistingUnit(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
+	profile := newAgent(t, agentConfig("sleep 30"))
 	run := testRun("converge")
-	first := dispatch(t, adapter, run)
-	second := dispatch(t, adapter, run)
+	first := dispatch(t, profile, run)
+	second := dispatch(t, profile, run)
 	if !bytes.Equal(first.Data, second.Data) || len(f.recorded("start")) != 1 {
 		t.Fatalf("handles %s and %s, starts %v; want one unit", first.Data, second.Data, f.recorded("start"))
 	}
 	// Another start of the run wins between the read and the start.
 	raced := testRun("raced")
-	adapter.conn = &intercepted{fakeManager: f, start: func(name string) error {
+	profile.conn = &intercepted{fakeManager: f, start: func(name string) error {
 		f.put(name, capturedUnitState("running"))
 		return dbus.Error{Name: busUnitExists}
 	}}
-	outcome, handle, err := adapter.Dispatch(context.Background(), raced)
-	if err != nil || outcome != wherry.OutcomeCreated || handle.Name != unitOf(raced) {
+	outcome, handle, err := profile.Dispatch(context.Background(), raced)
+	if err != nil || outcome != pluginsdk.OutcomeCreated || handle.Name != unitOf(raced) {
 		t.Fatalf("a start that lost to another: outcome %d, %v; want created", outcome, err)
 	}
 }
@@ -1329,32 +1329,32 @@ func (i *intercepted) KillUnitWithTarget(ctx context.Context, name string, targe
 
 func TestDispatchConvergesOnAnEndedJob(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("ended")
-	first := dispatch(t, adapter, run)
+	first := dispatch(t, profile, run)
 	f.exited(t, unitOf(run))
-	if err := adapter.Release(context.Background(), run.ID); err != nil {
+	if err := profile.Release(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
 	}
-	second := dispatch(t, adapter, run)
+	second := dispatch(t, profile, run)
 	if !bytes.Equal(first.Data, second.Data) || len(f.recorded("start")) != 1 {
 		t.Fatalf("handles %s and %s, starts %v; want the ended job again and no second unit", first.Data, second.Data, f.recorded("start"))
 	}
-	if job, err := adapter.Lookup(context.Background(), run.ID); err != nil || job.State != wherry.JobEnded {
+	if job, err := profile.Lookup(context.Background(), run.ID); err != nil || job.State != pluginsdk.JobEnded {
 		t.Fatalf("lookup %+v, %v; want ended", job, err)
 	}
 }
 
 func TestDispatchReplacesLeftovers(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("leftover")
 	putMarker(t, run, phasePrepared, nil)
 	old := filepath.Join(agentRoot(true), jobOf(run), "inputs", "stale.txt")
 	if err := os.WriteFile(old, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	if exists(old) {
 		t.Fatal("a prepared leftover's input survived the Dispatch")
 	}
@@ -1365,12 +1365,12 @@ func TestDispatchReplacesLeftovers(t *testing.T) {
 
 func TestDispatchFailureOutcomes(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	denied := dbus.Error{Name: "org.freedesktop.DBus.Error.AccessDenied", Body: []any{"denied"}}
 
 	refused := testRun("refused")
 	f.fail("start", denied)
-	if outcome, _, err := adapter.Dispatch(context.Background(), refused); outcome != wherry.OutcomeNothingCreated || err == nil {
+	if outcome, _, err := profile.Dispatch(context.Background(), refused); outcome != pluginsdk.OutcomeNothingCreated || err == nil {
 		t.Errorf("refused start: outcome %d, %v; want nothing created", outcome, err)
 	}
 	if exists(filepath.Join(controlRoot, jobOf(refused))) || exists(filepath.Join(agentRoot(true), jobOf(refused))) {
@@ -1381,7 +1381,7 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 	f.fail("start", denied)
 	// The first read is Dispatch's own; the second follows the failed start.
 	f.fail("unit", nil, errors.New("connection reset"))
-	if outcome, _, err := adapter.Dispatch(context.Background(), unread); outcome != wherry.OutcomeUnknown || err == nil {
+	if outcome, _, err := profile.Dispatch(context.Background(), unread); outcome != pluginsdk.OutcomeUnknown || err == nil {
 		t.Errorf("unreadable unit: outcome %d, %v; want unknown", outcome, err)
 	}
 	if !exists(markerPath(jobOf(unread))) {
@@ -1389,11 +1389,11 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 	}
 
 	loaded := testRun("loaded")
-	adapter.conn = &intercepted{fakeManager: f, start: func(name string) error {
+	profile.conn = &intercepted{fakeManager: f, start: func(name string) error {
 		f.put(name, capturedUnitState("running"))
 		return denied
 	}}
-	if outcome, _, err := adapter.Dispatch(context.Background(), loaded); outcome != wherry.OutcomeUnknown || err == nil {
+	if outcome, _, err := profile.Dispatch(context.Background(), loaded); outcome != pluginsdk.OutcomeUnknown || err == nil {
 		t.Errorf("a refused start whose unit is loaded: outcome %d, %v; want unknown", outcome, err)
 	}
 	if !exists(markerPath(jobOf(loaded))) {
@@ -1410,15 +1410,15 @@ func capturedUnitState(name string) captured {
 
 func TestDispatchRefusesANameOverNameMax(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	long := strings.Repeat("n", 256)
-	for _, run := range []wherry.Run{
-		{ID: "run-inline", Profile: testProfile, Inputs: []wherry.File{{Name: long, Data: []byte("x")}}},
-		{ID: "run-fetch", Profile: testProfile, Fetches: []wherry.Fetch{{Name: long, URL: "https://storage.invalid/x", Size: 1}}},
+	for _, run := range []pluginsdk.Run{
+		{ID: "run-inline", Profile: testProfile, Inputs: []pluginsdk.File{{Name: long, Data: []byte("x")}}},
+		{ID: "run-fetch", Profile: testProfile, Fetches: []pluginsdk.Fetch{{Name: long, URL: "https://storage.invalid/x", Size: 1}}},
 	} {
-		outcome, _, err := adapter.Dispatch(context.Background(), run)
-		var tooLarge *wherry.InputTooLargeError
-		if outcome != wherry.OutcomeNothingCreated || !errors.As(err, &tooLarge) || tooLarge.Name != long {
+		outcome, _, err := profile.Dispatch(context.Background(), run)
+		var tooLarge *pluginsdk.InputTooLargeError
+		if outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &tooLarge) || tooLarge.Name != long {
 			t.Errorf("%s: outcome %d, %v; want input too large", run.ID, outcome, err)
 		}
 	}
@@ -1426,30 +1426,30 @@ func TestDispatchRefusesANameOverNameMax(t *testing.T) {
 		t.Fatalf("starts %v; want none", got)
 	}
 	run := testRun("name-max")
-	run.Inputs = []wherry.File{{Name: strings.Repeat("n", 255), Data: []byte("x")}}
-	dispatch(t, adapter, run)
+	run.Inputs = []pluginsdk.File{{Name: strings.Repeat("n", 255), Data: []byte("x")}}
+	dispatch(t, profile, run)
 }
 
 func TestDispatchRefusesCredentialsOverTheLimit(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	// The store's pages bind a run whose env credential takes a page of its own; the IDs and values bind one key.
 	for _, c := range []struct {
 		name        string
-		credentials []wherry.Secret
+		credentials []pluginsdk.Secret
 		value       int
 	}{
-		{"pages", []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}}, maxCredentials - os.Getpagesize()},
+		{"pages", []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("model-key")}}, maxCredentials - os.Getpagesize()},
 		{"bytes", nil, maxCredentials - len("deploy-key")},
 	} {
 		run := testRun("at-limit-" + c.name)
-		run.Credentials = slices.Concat(c.credentials, []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), c.value)}})
-		dispatch(t, adapter, run)
+		run.Credentials = slices.Concat(c.credentials, []pluginsdk.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), c.value)}})
+		dispatch(t, profile, run)
 		over := testRun("over-limit-" + c.name)
-		over.Credentials = slices.Concat(c.credentials, []wherry.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), c.value+1)}})
+		over.Credentials = slices.Concat(c.credentials, []pluginsdk.Secret{{Name: "deploy", File: "deploy-key", Value: bytes.Repeat([]byte("k"), c.value+1)}})
 		starts := len(f.recorded("start"))
-		outcome, _, err := adapter.Dispatch(context.Background(), over)
-		if outcome != wherry.OutcomeNothingCreated || err == nil || err.Error() != "the credentials exceed systemd's 1 MiB credential limit" {
+		outcome, _, err := profile.Dispatch(context.Background(), over)
+		if outcome != pluginsdk.OutcomeNothingCreated || err == nil || err.Error() != "the credentials exceed systemd's 1 MiB credential limit" {
 			t.Fatalf("%s: one byte over: outcome %d, %v", c.name, outcome, err)
 		}
 		if exists(filepath.Join(controlRoot, jobOf(over))) || len(f.recorded("start")) != starts {
@@ -1460,20 +1460,20 @@ func TestDispatchRefusesCredentialsOverTheLimit(t *testing.T) {
 
 func TestDispatchRefusesACredentialWithNUL(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("nul")
-	run.Credentials = []wherry.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key\x00tail")}}
-	if outcome, _, err := adapter.Dispatch(context.Background(), run); outcome != wherry.OutcomeNothingCreated || err == nil || strings.Contains(err.Error(), "tail") {
+	run.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("key\x00tail")}}
+	if outcome, _, err := profile.Dispatch(context.Background(), run); outcome != pluginsdk.OutcomeNothingCreated || err == nil || strings.Contains(err.Error(), "tail") {
 		t.Fatalf("outcome %d, %v; want nothing created", outcome, err)
 	}
 	model := testRun("nul-model")
 	model.Model = "opus\x00"
-	if outcome, _, err := adapter.Dispatch(context.Background(), model); outcome != wherry.OutcomeNothingCreated || err == nil {
+	if outcome, _, err := profile.Dispatch(context.Background(), model); outcome != pluginsdk.OutcomeNothingCreated || err == nil {
 		t.Fatalf("model with NUL: outcome %d, %v; want nothing created", outcome, err)
 	}
 	binary := testRun("binary-task-credential")
-	binary.Credentials = []wherry.Secret{{Name: "key", File: "key.der", Value: []byte{0x30, 0x00, 0x82}}}
-	dispatch(t, adapter, binary)
+	binary.Credentials = []pluginsdk.Secret{{Name: "key", File: "key.der", Value: []byte{0x30, 0x00, 0x82}}}
+	dispatch(t, profile, binary)
 	if len(f.recorded("start")) != 1 {
 		t.Fatal("a task credential with NUL bytes was refused")
 	}
@@ -1487,23 +1487,23 @@ func missingCommand() Config {
 
 func TestDispatchRecordsAFailedStart(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, missingCommand())
+	profile := newAgent(t, missingCommand())
 	run := testRun("exec")
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	if m := readMarkerOf(t, run); m.NeverStarted == nil || *m.NeverStarted != (neverStarted{"exec", "systemd exit status 203/EXEC"}) {
 		t.Fatalf("marker %+v; want never started, exec", m)
 	}
-	if job, err := adapter.Lookup(context.Background(), run.ID); err != nil || job.State != wherry.JobNeverStarted {
+	if job, err := profile.Lookup(context.Background(), run.ID); err != nil || job.State != pluginsdk.JobNeverStarted {
 		t.Fatalf("lookup %+v, %v; want never started", job, err)
 	}
 }
 
 func TestDispatchRecordsAStartJobResult(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	f.set(func() { f.result = "timeout" })
 	run := testRun("job-timeout")
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	if m := readMarkerOf(t, run); m.NeverStarted == nil || *m.NeverStarted != (neverStarted{"start", "timeout"}) {
 		t.Fatalf("marker %+v; want never started, start, timeout", m)
 	}
@@ -1511,12 +1511,12 @@ func TestDispatchRecordsAStartJobResult(t *testing.T) {
 
 func TestDispatchTimeoutStopsTheUnit(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
+	profile := newAgent(t, agentConfig("sleep 30"))
 	f.set(func() { f.activating = true })
 	run := testRun("hung")
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if _, _, err := adapter.Dispatch(ctx, run); !errors.Is(err, context.DeadlineExceeded) {
+	if _, _, err := profile.Dispatch(ctx, run); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got %v; want the deadline", err)
 	}
 	if f.unit(unitOf(run)).LoadState == "loaded" || len(f.recorded("stop")) != 1 {
@@ -1529,21 +1529,21 @@ func TestDispatchTimeoutStopsTheUnit(t *testing.T) {
 
 func TestDispatchReportsPlacement(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
+	profile := newAgent(t, agentConfig("sleep 30"))
 	run := testRun("placed")
-	dispatch(t, adapter, run)
-	dispatch(t, adapter, run)
-	dispatch(t, newAgentLike(t, adapter, missingCommand()), testRun("unplaced"))
-	if got := samples(adapter)["wherry_adapter_placement_seconds"].Histogram.Count; got != 1 {
+	dispatch(t, profile, run)
+	dispatch(t, profile, run)
+	dispatch(t, newAgentLike(t, profile, missingCommand()), testRun("unplaced"))
+	if got := samples(profile)["wherry_plugin_placement_seconds"].Histogram.Count; got != 1 {
 		t.Fatalf("placements %d; want 1, the started unit's", got)
 	}
 }
 
-// newAgentLike builds an adapter of config sharing adapter's metrics.
-func newAgentLike(t *testing.T, adapter *Adapter, config Config) *Adapter {
+// newAgentLike builds a plugin profile of config sharing profile's metrics.
+func newAgentLike(t *testing.T, profile *Systemd, config Config) *Systemd {
 	t.Helper()
 	other := newAgent(t, config)
-	other.metrics = adapter.metrics
+	other.metrics = profile.metrics
 	return other
 }
 
@@ -1552,15 +1552,15 @@ func sha(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func fetchRun(name, url string, body []byte) wherry.Run {
+func fetchRun(name, url string, body []byte) pluginsdk.Run {
 	run := testRun(name)
-	run.Fetches = []wherry.Fetch{{Name: "data.bin", URL: url, Size: int64(len(body)), SHA256: sha(body)}}
+	run.Fetches = []pluginsdk.Fetch{{Name: "data.bin", URL: url, Size: int64(len(body)), SHA256: sha(body)}}
 	return run
 }
 
 func TestFetchBeforeTheUnit(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	body := []byte("object bytes")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if starts := f.recorded("start"); len(starts) != 0 {
@@ -1576,7 +1576,7 @@ func TestFetchBeforeTheUnit(t *testing.T) {
 			seen, _ = os.ReadFile(filepath.Join(agentRoot(true), jobOf(run), "inputs", "data.bin"))
 		}
 	})
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	if !bytes.Equal(seen, body) {
 		t.Fatalf("the unit started with input %q; want %q", seen, body)
 	}
@@ -1584,7 +1584,7 @@ func TestFetchBeforeTheUnit(t *testing.T) {
 
 func TestFetchRefusesRedirects(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	body := []byte("redirected")
 	followed := false
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1595,8 +1595,8 @@ func TestFetchRefusesRedirects(t *testing.T) {
 	redirect := httptest.NewServer(http.RedirectHandler(target.URL, http.StatusFound))
 	defer redirect.Close()
 	run := fetchRun("redirect", redirect.URL, body)
-	dispatch(t, adapter, run)
-	if m := readMarkerOf(t, run); followed || m.NeverStarted == nil || m.NeverStarted.Class != wherry.ClassFetch || len(f.recorded("start")) != 0 {
+	dispatch(t, profile, run)
+	if m := readMarkerOf(t, run); followed || m.NeverStarted == nil || m.NeverStarted.Class != pluginsdk.ClassFetch || len(f.recorded("start")) != 0 {
 		t.Fatalf("followed %v, marker %+v; want the redirect refused and the run never started", followed, m)
 	}
 }
@@ -1611,15 +1611,15 @@ func (c *counter) Read(p []byte) (int, error) {
 
 func TestFetchBoundsTheBody(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	endless := &counter{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.Copy(w, io.LimitReader(endless, 64<<20))
 	}))
 	run := testRun("endless")
-	run.Fetches = []wherry.Fetch{{Name: "data.bin", URL: server.URL, Size: 1024, SHA256: sha(make([]byte, 1024))}}
-	dispatch(t, adapter, run)
-	if m := readMarkerOf(t, run); m.NeverStarted == nil || m.NeverStarted.Class != wherry.ClassFetch {
+	run.Fetches = []pluginsdk.Fetch{{Name: "data.bin", URL: server.URL, Size: 1024, SHA256: sha(make([]byte, 1024))}}
+	dispatch(t, profile, run)
+	if m := readMarkerOf(t, run); m.NeverStarted == nil || m.NeverStarted.Class != pluginsdk.ClassFetch {
 		t.Fatalf("marker %+v; want never started, fetch", m)
 	}
 	server.Close()
@@ -1636,19 +1636,19 @@ func TestFetchBoundsTheBody(t *testing.T) {
 
 func TestFetchVerifiesSizeAndDigest(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	body := []byte("the object")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
 	defer server.Close()
-	for name, fetch := range map[string]wherry.Fetch{
+	for name, fetch := range map[string]pluginsdk.Fetch{
 		"short":  {Name: "data.bin", URL: server.URL, Size: int64(len(body)) + 1, SHA256: sha(append(body, 'x'))},
 		"long":   {Name: "data.bin", URL: server.URL, Size: int64(len(body)) - 1, SHA256: sha(body[:len(body)-1])},
 		"digest": {Name: "data.bin", URL: server.URL, Size: int64(len(body)), SHA256: sha([]byte("other bytes"))},
 	} {
 		run := testRun("verify-" + name)
-		run.Fetches = []wherry.Fetch{fetch}
-		dispatch(t, adapter, run)
-		if m := readMarkerOf(t, run); m.NeverStarted == nil || m.NeverStarted.Class != wherry.ClassFetch {
+		run.Fetches = []pluginsdk.Fetch{fetch}
+		dispatch(t, profile, run)
+		if m := readMarkerOf(t, run); m.NeverStarted == nil || m.NeverStarted.Class != pluginsdk.ClassFetch {
 			t.Errorf("%s: marker %+v; want never started, fetch", name, m)
 		}
 		if entries, _ := os.ReadDir(filepath.Join(agentRoot(true), jobOf(run), "inputs")); len(entries) != 0 {
@@ -1656,7 +1656,7 @@ func TestFetchVerifiesSizeAndDigest(t *testing.T) {
 		}
 	}
 	run := fetchRun("verified", server.URL, body)
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	if got, _ := os.ReadFile(filepath.Join(agentRoot(true), jobOf(run), "inputs/data.bin")); !bytes.Equal(got, body) {
 		t.Fatalf("delivered %q; want %q", got, body)
 	}
@@ -1664,22 +1664,22 @@ func TestFetchVerifiesSizeAndDigest(t *testing.T) {
 
 func TestFetchFailureNeverStartsTheAgent(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("altered")) }))
 	defer server.Close()
 	run := fetchRun("altered", server.URL, []byte("uploaded"))
-	outcome, handle, err := adapter.Dispatch(context.Background(), run)
-	if err != nil || outcome != wherry.OutcomeCreated {
+	outcome, handle, err := profile.Dispatch(context.Background(), run)
+	if err != nil || outcome != pluginsdk.OutcomeCreated {
 		t.Fatalf("outcome %d, %v; want created", outcome, err)
 	}
 	if got := f.recorded("start"); len(got) != 0 {
 		t.Fatalf("starts %v; want none", got)
 	}
-	want := wherry.Terminal{Class: wherry.ClassFetch, Reason: "input data.bin: not fetched", Node: adapter.node}
-	if job, err := adapter.Lookup(context.Background(), run.ID); err != nil || job.State != wherry.JobNeverStarted {
+	want := pluginsdk.Terminal{Class: pluginsdk.ClassFetch, Reason: "input data.bin: not fetched", Node: profile.node}
+	if job, err := profile.Lookup(context.Background(), run.ID); err != nil || job.State != pluginsdk.JobNeverStarted {
 		t.Fatalf("lookup %+v, %v; want never started", job, err)
 	}
-	if _, terminal, err := followAll(t, adapter, handle, 0); err != nil || terminal != want {
+	if _, terminal, err := followAll(t, profile, handle, 0); err != nil || terminal != want {
 		t.Fatalf("terminal %+v, %v; want %+v", terminal, err, want)
 	}
 }
@@ -1689,7 +1689,7 @@ func TestFetchWriteFailureIsSetup(t *testing.T) {
 		t.Skip("root writes into a directory of any mode")
 	}
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("unwritable")
 	inputs := filepath.Join(agentRoot(true), jobOf(run), "inputs")
 	body := []byte("bytes")
@@ -1698,8 +1698,8 @@ func TestFetchWriteFailureIsSetup(t *testing.T) {
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
-	run.Fetches = []wherry.Fetch{{Name: "data.bin", URL: server.URL, Size: int64(len(body)), SHA256: sha(body)}}
-	dispatch(t, adapter, run)
+	run.Fetches = []pluginsdk.Fetch{{Name: "data.bin", URL: server.URL, Size: int64(len(body)), SHA256: sha(body)}}
+	dispatch(t, profile, run)
 	_ = os.Chmod(inputs, 0o700)
 	if m := readMarkerOf(t, run); m.NeverStarted == nil || *m.NeverStarted != (neverStarted{"setup", "input data.bin: permission denied"}) {
 		t.Fatalf("marker %+v; want never started, setup", m)
@@ -1709,7 +1709,7 @@ func TestFetchWriteFailureIsSetup(t *testing.T) {
 func TestLookupMissingJob(t *testing.T) {
 	newHost(t)
 	job, err := newAgent(t, agentConfig("exit 0")).Lookup(context.Background(), "run-absent")
-	if err != nil || job.State != wherry.JobAbsent || job.Handle.Data != nil {
+	if err != nil || job.State != pluginsdk.JobAbsent || job.Handle.Data != nil {
 		t.Fatalf("lookup %+v, %v; want absent", job, err)
 	}
 }
@@ -1718,22 +1718,22 @@ func TestLookupOfAPreparedJobIsAbsent(t *testing.T) {
 	newHost(t)
 	run := testRun("prepared")
 	putMarker(t, run, phasePrepared, nil)
-	if job, err := newAgent(t, agentConfig("exit 0")).Lookup(context.Background(), run.ID); err != nil || job.State != wherry.JobAbsent {
+	if job, err := newAgent(t, agentConfig("exit 0")).Lookup(context.Background(), run.ID); err != nil || job.State != pluginsdk.JobAbsent {
 		t.Fatalf("lookup %+v, %v; want absent", job, err)
 	}
 }
 
 func TestLookupReadsDispatchMetadata(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 0.3"))
+	profile := newAgent(t, agentConfig("sleep 0.3"))
 	run := testRun("metadata")
-	handle := dispatch(t, adapter, run)
-	job, err := adapter.Lookup(context.Background(), run.ID)
-	if err != nil || job.State != wherry.JobRunning || job.Attempt != 2 || job.Profile != testProfile || job.Agent != "coder" || job.Handle.Name != handle.Name {
+	handle := dispatch(t, profile, run)
+	job, err := profile.Lookup(context.Background(), run.ID)
+	if err != nil || job.State != pluginsdk.JobRunning || job.Attempt != 2 || job.Profile != testProfile || job.Agent != "coder" || job.Handle.Name != handle.Name {
 		t.Fatalf("lookup %+v, %v; want running with the dispatch's metadata", job, err)
 	}
 	f.exited(t, unitOf(run))
-	if job, err := adapter.Lookup(context.Background(), run.ID); err != nil || job.State != wherry.JobEnded {
+	if job, err := profile.Lookup(context.Background(), run.ID); err != nil || job.State != pluginsdk.JobEnded {
 		t.Fatalf("lookup after the exit %+v, %v; want ended", job, err)
 	}
 	if f.unit(unitOf(run)).LoadState != "loaded" {
@@ -1743,26 +1743,26 @@ func TestLookupReadsDispatchMetadata(t *testing.T) {
 
 func TestLookupMapsCapturedUnits(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	for _, c := range []struct {
 		file, phase string
-		state       wherry.JobState
+		state       pluginsdk.JobState
 		class       string
 		reason      string
 	}{
-		{"running", phaseStarted, wherry.JobRunning, "", ""},
-		{"exit-0", phaseStarted, wherry.JobEnded, "", ""},
-		{"exit-1", phaseStarted, wherry.JobEnded, "", ""},
-		{"sigterm", phaseStarted, wherry.JobEnded, "", ""},
-		{"sigkill", phaseStarted, wherry.JobEnded, "", ""},
-		{"oom", phaseStarted, wherry.JobEnded, "", ""},
-		{"exit-203", phaseStarted, wherry.JobEnded, "", ""},
-		{"exit-203", phaseStarting, wherry.JobNeverStarted, "exec", "systemd exit status 203/EXEC"},
-		{"exit-243", phaseStarting, wherry.JobNeverStarted, "credentials", "systemd exit status 243/CREDENTIALS"},
-		{"exit-226", phaseStarting, wherry.JobNeverStarted, "setup", "systemd exit status 226/NAMESPACE"},
-		{"exit-1", phaseStarting, wherry.JobEnded, "", ""},
-		{"start-timeout", phaseStarting, wherry.JobNeverStarted, "start", "timeout"},
-		{"not-found", phaseStarted, wherry.JobEnded, "", ""},
+		{"running", phaseStarted, pluginsdk.JobRunning, "", ""},
+		{"exit-0", phaseStarted, pluginsdk.JobEnded, "", ""},
+		{"exit-1", phaseStarted, pluginsdk.JobEnded, "", ""},
+		{"sigterm", phaseStarted, pluginsdk.JobEnded, "", ""},
+		{"sigkill", phaseStarted, pluginsdk.JobEnded, "", ""},
+		{"oom", phaseStarted, pluginsdk.JobEnded, "", ""},
+		{"exit-203", phaseStarted, pluginsdk.JobEnded, "", ""},
+		{"exit-203", phaseStarting, pluginsdk.JobNeverStarted, "exec", "systemd exit status 203/EXEC"},
+		{"exit-243", phaseStarting, pluginsdk.JobNeverStarted, "credentials", "systemd exit status 243/CREDENTIALS"},
+		{"exit-226", phaseStarting, pluginsdk.JobNeverStarted, "setup", "systemd exit status 226/NAMESPACE"},
+		{"exit-1", phaseStarting, pluginsdk.JobEnded, "", ""},
+		{"start-timeout", phaseStarting, pluginsdk.JobNeverStarted, "start", "timeout"},
+		{"not-found", phaseStarted, pluginsdk.JobEnded, "", ""},
 	} {
 		run := testRun("captured-" + c.file + "-" + c.phase)
 		putMarker(t, run, c.phase, nil)
@@ -1770,13 +1770,13 @@ func TestLookupMapsCapturedUnits(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.put(unitOf(run), capturedUnit(t, c.file))
-		job, err := adapter.Lookup(context.Background(), run.ID)
+		job, err := profile.Lookup(context.Background(), run.ID)
 		if err != nil || job.State != c.state {
 			t.Errorf("%s in phase %s: lookup %+v, %v; want state %d", c.file, c.phase, job, err, c.state)
 			continue
 		}
 		if m := readMarkerOf(t, run); c.class != "" {
-			_, terminal, _ := adapter.judge(jobOf(run), m, mustUnit(t, adapter, unitOf(run)))
+			_, terminal, _ := profile.judge(jobOf(run), m, mustUnit(t, profile, unitOf(run)))
 			if terminal.Class != c.class || terminal.Reason != c.reason || terminal.Started {
 				t.Errorf("%s in phase %s: terminal %+v; want class %s, reason %q", c.file, c.phase, terminal, c.class, c.reason)
 			}
@@ -1787,24 +1787,24 @@ func TestLookupMapsCapturedUnits(t *testing.T) {
 // systemd before 254 reloads an agent unit as bad-setting, its ExecStartEx= lost, while its agent runs on.
 func TestAUnitReloadedAsBadSettingStaysTheRun(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
+	profile := newAgent(t, agentConfig("sleep 30"))
 	run := testRun("bad-setting")
-	handle := dispatch(t, adapter, run)
+	handle := dispatch(t, profile, run)
 	f.edit(unitOf(run), func(u *captured) { u.LoadState = "bad-setting" })
-	if job, err := adapter.Lookup(context.Background(), run.ID); err != nil || job.State != wherry.JobRunning {
+	if job, err := profile.Lookup(context.Background(), run.ID); err != nil || job.State != pluginsdk.JobRunning {
 		t.Fatalf("lookup %+v, %v; want running", job, err)
 	}
-	if err := adapter.Stop(context.Background(), handle); err != nil {
+	if err := profile.Stop(context.Background(), handle); err != nil {
 		t.Fatal(err)
 	}
-	if _, terminal, err := followAll(t, adapter, handle, 0); err != nil || terminal.Signal != "15" {
+	if _, terminal, err := followAll(t, profile, handle, 0); err != nil || terminal.Signal != "15" {
 		t.Fatalf("terminal %+v, %v; want the agent ended by SIGTERM", terminal, err)
 	}
 }
 
-func mustUnit(t *testing.T, adapter *Adapter, name string) unit {
+func mustUnit(t *testing.T, profile *Systemd, name string) unit {
 	t.Helper()
-	u, err := adapter.unit(context.Background(), name)
+	u, err := profile.unit(context.Background(), name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1813,19 +1813,19 @@ func mustUnit(t *testing.T, adapter *Adapter, name string) unit {
 
 func TestLookupOfAGoneUnitIsEnded(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	bare, recordedRun := testRun("gone"), testRun("gone-recorded")
 	putMarker(t, bare, phaseStarted, nil)
 	putMarker(t, recordedRun, phaseStarted, func(m *marker) { m.Terminal = &recorded{ExitCode: 137, Signal: "9"} })
-	for run, want := range map[*wherry.Run]wherry.Terminal{
-		&bare:        {Started: true, ExitCode: -1, Node: adapter.node},
-		&recordedRun: {Started: true, ExitCode: 137, Signal: "9", Node: adapter.node},
+	for run, want := range map[*pluginsdk.Run]pluginsdk.Terminal{
+		&bare:        {Started: true, ExitCode: -1, Node: profile.node},
+		&recordedRun: {Started: true, ExitCode: 137, Signal: "9", Node: profile.node},
 	} {
-		job, err := adapter.Lookup(context.Background(), run.ID)
-		if err != nil || job.State != wherry.JobEnded {
+		job, err := profile.Lookup(context.Background(), run.ID)
+		if err != nil || job.State != pluginsdk.JobEnded {
 			t.Fatalf("%s: lookup %+v, %v; want ended", run.ID, job, err)
 		}
-		if _, terminal, err := followAll(t, adapter, job.Handle, 0); err != nil || terminal != want {
+		if _, terminal, err := followAll(t, profile, job.Handle, 0); err != nil || terminal != want {
 			t.Fatalf("%s: terminal %+v, %v; want %+v", run.ID, terminal, err, want)
 		}
 	}
@@ -1833,28 +1833,28 @@ func TestLookupOfAGoneUnitIsEnded(t *testing.T) {
 
 func TestLookupOfAStartingJobWithNoUnit(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	silent, spoke := testRun("starting-silent"), testRun("starting-spoke")
 	putMarker(t, silent, phaseStarting, nil)
 	putMarker(t, spoke, phaseStarting, nil)
 	if err := os.WriteFile(stdoutPath(jobOf(spoke)), []byte("a line\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	job, err := adapter.Lookup(context.Background(), silent.ID)
-	if err != nil || job.State != wherry.JobNeverStarted {
+	job, err := profile.Lookup(context.Background(), silent.ID)
+	if err != nil || job.State != pluginsdk.JobNeverStarted {
 		t.Fatalf("starting, no unit, empty stdout: %+v, %v; want never started", job, err)
 	}
-	if _, terminal, err := followAll(t, adapter, job.Handle, 0); err != nil || terminal.Started || terminal.Class != "start" {
+	if _, terminal, err := followAll(t, profile, job.Handle, 0); err != nil || terminal.Started || terminal.Class != "start" {
 		t.Fatalf("terminal %+v, %v; want never started, class start", terminal, err)
 	}
-	if job, err := adapter.Lookup(context.Background(), spoke.ID); err != nil || job.State != wherry.JobEnded {
+	if job, err := profile.Lookup(context.Background(), spoke.ID); err != nil || job.State != pluginsdk.JobEnded {
 		t.Fatalf("starting, no unit, with output: %+v, %v; want ended", job, err)
 	}
 }
 
 func TestLookupRefusesAForeignUnit(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	unmarked := testRun("unmarked")
 	f.put(unitOf(unmarked), capturedUnit(t, "running"))
 	persistent := testRun("persistent")
@@ -1864,11 +1864,11 @@ func TestLookupRefusesAForeignUnit(t *testing.T) {
 	f.put(unitOf(persistent), state)
 	otherPool := testRun("other-pool")
 	putMarker(t, otherPool, phaseStarted, func(m *marker) { m.Pool = "review" })
-	for _, run := range []wherry.Run{unmarked, persistent, otherPool} {
-		if _, err := adapter.Lookup(context.Background(), run.ID); !errors.Is(err, errNotAgent) {
+	for _, run := range []pluginsdk.Run{unmarked, persistent, otherPool} {
+		if _, err := profile.Lookup(context.Background(), run.ID); !errors.Is(err, errNotAgent) {
 			t.Errorf("%s: %v; want %v", run.ID, err, errNotAgent)
 		}
-		if _, _, err := adapter.Dispatch(context.Background(), run); !errors.Is(err, errNotAgent) {
+		if _, _, err := profile.Dispatch(context.Background(), run); !errors.Is(err, errNotAgent) {
 			t.Errorf("dispatch %s: %v; want %v", run.ID, err, errNotAgent)
 		}
 	}
@@ -1876,7 +1876,7 @@ func TestLookupRefusesAForeignUnit(t *testing.T) {
 
 func TestLookupWaitsForAnActivatingUnit(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("activating")
 	putMarker(t, run, phaseStarting, nil)
 	f.put(unitOf(run), capturedUnit(t, "activating"))
@@ -1885,24 +1885,24 @@ func TestLookupWaitsForAnActivatingUnit(t *testing.T) {
 		f.edit(unitOf(run), func(c *captured) { *c = capturedUnitState("running") })
 	}()
 	began := time.Now()
-	job, err := adapter.Lookup(context.Background(), run.ID)
-	if err != nil || job.State != wherry.JobRunning || time.Since(began) < 100*time.Millisecond {
+	job, err := profile.Lookup(context.Background(), run.ID)
+	if err != nil || job.State != pluginsdk.JobRunning || time.Since(began) < 100*time.Millisecond {
 		t.Fatalf("lookup %+v, %v after %v; want running once activated", job, err, time.Since(began))
 	}
 }
 
 func TestFollowOffsetsAndReattach(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig(`printf 'one\ntwo\nthree\n'`))
-	handle := dispatch(t, adapter, testRun("offsets"))
-	lines, _, err := followAll(t, adapter, handle, 0)
+	profile := newAgent(t, agentConfig(`printf 'one\ntwo\nthree\n'`))
+	handle := dispatch(t, profile, testRun("offsets"))
+	lines, _, err := followAll(t, profile, handle, 0)
 	if err != nil || !slices.Equal(texts(lines), []string{"one", "two", "three"}) {
 		t.Fatalf("lines %q, %v", texts(lines), err)
 	}
 	if lines[1].Offset != 4 || lines[1].Next != 8 || lines[2].Next != 14 {
 		t.Fatalf("offsets %+v; want byte offsets", lines)
 	}
-	again, _, err := followAll(t, adapter, handle, lines[1].Offset)
+	again, _, err := followAll(t, profile, handle, lines[1].Offset)
 	if err != nil || !slices.Equal(texts(again), []string{"two", "three"}) || again[0].Offset != 4 {
 		t.Fatalf("reattached at 4: %q, %v", texts(again), err)
 	}
@@ -1910,9 +1910,9 @@ func TestFollowOffsetsAndReattach(t *testing.T) {
 
 func TestFollowReadsToTheEndAfterExit(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 0.2"))
+	profile := newAgent(t, agentConfig("sleep 0.2"))
 	run := testRun("final")
-	handle := dispatch(t, adapter, run)
+	handle := dispatch(t, profile, run)
 	// The agent's last line lands as systemd records its exit.
 	var once sync.Once
 	f.set(func() {
@@ -1927,7 +1927,7 @@ func TestFollowReadsToTheEndAfterExit(t *testing.T) {
 			})
 		}
 	})
-	lines, _, err := followAll(t, adapter, handle, 0)
+	lines, _, err := followAll(t, profile, handle, 0)
 	if err != nil || !slices.Equal(texts(lines), []string{`{"type":"result"}`}) {
 		t.Fatalf("lines %q, %v; want the line written at the exit", texts(lines), err)
 	}
@@ -1935,9 +1935,9 @@ func TestFollowReadsToTheEndAfterExit(t *testing.T) {
 
 func TestFollowFailsOnALogShorterThanTheOffset(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig(`echo short`))
-	handle := dispatch(t, adapter, testRun("short"))
-	if _, _, err := followAll(t, adapter, handle, 100); err == nil || err.Error() != "the agent's log is shorter than the offset" {
+	profile := newAgent(t, agentConfig(`echo short`))
+	handle := dispatch(t, profile, testRun("short"))
+	if _, _, err := followAll(t, profile, handle, 100); err == nil || err.Error() != "the agent's log is shorter than the offset" {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -1947,16 +1947,16 @@ func TestFollowReturnsTerminal(t *testing.T) {
 	node, _ := os.Hostname()
 	for i, c := range []struct {
 		script string
-		want   wherry.Terminal
+		want   pluginsdk.Terminal
 	}{
-		{"exit 0", wherry.Terminal{Started: true, ExitCode: 0, Node: node}},
-		{"exit 3", wherry.Terminal{Started: true, ExitCode: 3, Node: node}},
-		{"kill -9 $$", wherry.Terminal{Started: true, ExitCode: 137, Signal: "9", Node: node}},
+		{"exit 0", pluginsdk.Terminal{Started: true, ExitCode: 0, Node: node}},
+		{"exit 3", pluginsdk.Terminal{Started: true, ExitCode: 3, Node: node}},
+		{"kill -9 $$", pluginsdk.Terminal{Started: true, ExitCode: 137, Signal: "9", Node: node}},
 	} {
 		script, want := c.script, c.want
-		adapter := newAgent(t, agentConfig(script))
+		profile := newAgent(t, agentConfig(script))
 		run := testRun("terminal-" + strconv.Itoa(i))
-		if _, terminal, err := followAll(t, adapter, dispatch(t, adapter, run), 0); err != nil || terminal != want {
+		if _, terminal, err := followAll(t, profile, dispatch(t, profile, run), 0); err != nil || terminal != want {
 			t.Errorf("%s: terminal %+v, %v; want %+v", script, terminal, err, want)
 		}
 	}
@@ -1964,9 +1964,9 @@ func TestFollowReturnsTerminal(t *testing.T) {
 
 func TestFollowOfANeverStartedJob(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, missingCommand())
-	_, terminal, err := followAll(t, adapter, dispatch(t, adapter, testRun("never")), 0)
-	want := wherry.Terminal{Class: "exec", Reason: "systemd exit status 203/EXEC", Node: adapter.node}
+	profile := newAgent(t, missingCommand())
+	_, terminal, err := followAll(t, profile, dispatch(t, profile, testRun("never")), 0)
+	want := pluginsdk.Terminal{Class: "exec", Reason: "systemd exit status 203/EXEC", Node: profile.node}
 	if err != nil || terminal != want {
 		t.Fatalf("terminal %+v, %v; want %+v", terminal, err, want)
 	}
@@ -1974,13 +1974,13 @@ func TestFollowOfANeverStartedJob(t *testing.T) {
 
 func TestFollowOfAGoneUnitReadsTheRest(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("gone-rest")
 	putMarker(t, run, phaseStarted, nil)
 	if err := os.WriteFile(stdoutPath(jobOf(run)), []byte("first\nsecond\nlast"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	lines, terminal, err := followAll(t, adapter, handleFor(unitOf(run), "0123456789abcdef0123456789abcdef"), 6)
+	lines, terminal, err := followAll(t, profile, handleFor(unitOf(run), "0123456789abcdef0123456789abcdef"), 6)
 	if err != nil || !slices.Equal(texts(lines), []string{"second", "last"}) || terminal.ExitCode != -1 {
 		t.Fatalf("lines %q, terminal %+v, %v; want the rest of the file", texts(lines), terminal, err)
 	}
@@ -1988,9 +1988,9 @@ func TestFollowOfAGoneUnitReadsTheRest(t *testing.T) {
 
 func TestFollowCarriesNoStderr(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig(`printf 'out-'; echo err >&2; printf 'line\n'`))
+	profile := newAgent(t, agentConfig(`printf 'out-'; echo err >&2; printf 'line\n'`))
 	run := testRun("stderr")
-	lines, _, err := followAll(t, adapter, dispatch(t, adapter, run), 0)
+	lines, _, err := followAll(t, profile, dispatch(t, profile, run), 0)
 	if err != nil || !slices.Equal(texts(lines), []string{"out-line"}) {
 		t.Fatalf("lines %q, %v; want stdout alone", texts(lines), err)
 	}
@@ -2001,14 +2001,14 @@ func TestFollowCarriesNoStderr(t *testing.T) {
 
 func TestTerminalCarriesPlatformReason(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	reason := "systemd's text: unit failed at step CREDENTIALS with 'quoted' material " + strings.Repeat("x", 600)
 	run := testRun("reason")
 	putMarker(t, run, phaseStarting, nil)
 	state := capturedUnit(t, "start-timeout")
 	state.Result = reason
 	f.put(unitOf(run), state)
-	_, terminal, err := followAll(t, adapter, handleFor(unitOf(run), "0123456789abcdef0123456789abcdef"), 0)
+	_, terminal, err := followAll(t, profile, handleFor(unitOf(run), "0123456789abcdef0123456789abcdef"), 0)
 	if err != nil || terminal.Reason != reason {
 		t.Fatalf("reason %q, %v; want systemd's text unchanged", terminal.Reason, err)
 	}
@@ -2016,28 +2016,30 @@ func TestTerminalCarriesPlatformReason(t *testing.T) {
 
 func TestStaleHandleRefusesAReplacedJob(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
+	profile := newAgent(t, agentConfig("sleep 30"))
 	run := testRun("replaced")
-	stale := dispatch(t, adapter, run)
-	if err := adapter.Purge(context.Background(), run.ID); err != nil {
+	stale := dispatch(t, profile, run)
+	if err := profile.Purge(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
 	}
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for name, call := range map[string]func() error{
 		"follow": func() error {
-			_, err := adapter.Follow(ctx, stale, 0, make(chan wherry.Line, 64))
+			_, err := profile.Follow(ctx, stale, 0, make(chan pluginsdk.Line, 64))
 			return err
 		},
-		"stop":    func() error { return adapter.Stop(ctx, stale) },
-		"collect": func() error { return adapter.Collect(ctx, stale, wherry.Limits{Files: 8}, make(chan wherry.Output, 8)) },
+		"stop": func() error { return profile.Stop(ctx, stale) },
+		"collect": func() error {
+			return profile.Collect(ctx, stale, pluginsdk.Limits{Files: 8}, make(chan pluginsdk.Output, 8))
+		},
 	} {
 		if err := call(); !errors.Is(err, errReplaced) {
 			t.Errorf("%s through a stale handle: %v; want %v", name, err, errReplaced)
 		}
 	}
-	if job, _ := adapter.Lookup(ctx, run.ID); job.State != wherry.JobRunning {
+	if job, _ := profile.Lookup(ctx, run.ID); job.State != pluginsdk.JobRunning {
 		t.Fatalf("the new job %+v; want it running", job)
 	}
 }
@@ -2053,9 +2055,9 @@ func kills(f *fakeManager) []string {
 
 func TestStopSignalsThenWaits(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
+	profile := newAgent(t, agentConfig("sleep 30"))
 	run := testRun("stop")
-	if err := adapter.Stop(context.Background(), dispatch(t, adapter, run)); err != nil {
+	if err := profile.Stop(context.Background(), dispatch(t, profile, run)); err != nil {
 		t.Fatal(err)
 	}
 	if got := kills(f); !slices.Equal(got, []string{"all 15"}) {
@@ -2068,9 +2070,9 @@ func TestStopSignalsThenWaits(t *testing.T) {
 
 func TestStopEscalatesAfterGrace(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig(`trap '' TERM; while :; do sleep 0.05; done`))
+	profile := newAgent(t, agentConfig(`trap '' TERM; while :; do sleep 0.05; done`))
 	run := testRun("stubborn")
-	if err := adapter.Stop(context.Background(), dispatch(t, adapter, run)); err != nil {
+	if err := profile.Stop(context.Background(), dispatch(t, profile, run)); err != nil {
 		t.Fatal(err)
 	}
 	if got := kills(f); !slices.Equal(got, []string{"all 15", "all 9"}) {
@@ -2080,68 +2082,68 @@ func TestStopEscalatesAfterGrace(t *testing.T) {
 
 func TestStopKillsLeftoverProcesses(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 600 & exit 0"))
+	profile := newAgent(t, agentConfig("sleep 600 & exit 0"))
 	run := testRun("leftover-process")
-	handle := dispatch(t, adapter, run)
+	handle := dispatch(t, profile, run)
 	f.exited(t, unitOf(run))
-	if empty, err := adapter.empty(context.Background(), unitOf(run)); err != nil || empty {
+	if empty, err := profile.empty(context.Background(), unitOf(run)); err != nil || empty {
 		t.Fatalf("empty %v, %v; want the background process left in the cgroup", empty, err)
 	}
-	if err := adapter.Stop(context.Background(), handle); err != nil {
+	if err := profile.Stop(context.Background(), handle); err != nil {
 		t.Fatal(err)
 	}
-	if empty, err := adapter.empty(context.Background(), unitOf(run)); err != nil || !empty {
+	if empty, err := profile.empty(context.Background(), unitOf(run)); err != nil || !empty {
 		t.Fatalf("empty %v, %v after the stop; want the cgroup empty", empty, err)
 	}
 }
 
 func TestStopErrsWhenProcessesOutliveSIGKILL(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
-	handle := dispatch(t, adapter, testRun("immortal"))
+	profile := newAgent(t, agentConfig("sleep 30"))
+	handle := dispatch(t, profile, testRun("immortal"))
 	f.set(func() { f.unkillable = true })
-	if err := adapter.Stop(context.Background(), handle); err == nil || err.Error() != "the agent outlived SIGKILL" {
+	if err := profile.Stop(context.Background(), handle); err == nil || err.Error() != "the agent outlived SIGKILL" {
 		t.Fatalf("got %v", err)
 	}
 	f.set(func() { f.unkillable = false })
 	f.fail("kill", dbus.Error{Name: "org.freedesktop.DBus.Error.AccessDenied", Body: []any{"denied"}})
-	var failure *wherry.Error
-	if err := adapter.Stop(context.Background(), handle); !errors.As(err, &failure) || !strings.HasPrefix(failure.Op, "kill unit ") || failure.Class != "denied" {
+	var failure *pluginsdk.Error
+	if err := profile.Stop(context.Background(), handle); !errors.As(err, &failure) || !strings.HasPrefix(failure.Op, "kill unit ") || failure.Class != "denied" {
 		t.Fatalf("a refused kill: %v; want the kill's error", err)
 	}
 }
 
 func TestStopKeepsTheUnitLoaded(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
+	profile := newAgent(t, agentConfig("sleep 30"))
 	run := testRun("loaded")
-	if err := adapter.Stop(context.Background(), dispatch(t, adapter, run)); err != nil {
+	if err := profile.Stop(context.Background(), dispatch(t, profile, run)); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.recorded("stop", "reset"); len(got) != 0 || f.unit(unitOf(run)).LoadState != "loaded" {
 		t.Fatalf("calls %v, unit %+v; want the unit loaded", got, f.unit(unitOf(run)))
 	}
-	if job, err := adapter.Lookup(context.Background(), run.ID); err != nil || job.State != wherry.JobEnded {
+	if job, err := profile.Lookup(context.Background(), run.ID); err != nil || job.State != pluginsdk.JobEnded {
 		t.Fatalf("lookup %+v, %v; want ended", job, err)
 	}
 }
 
 func TestStopOfAnEmptyCgroupDoesNotSignal(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("empty")
-	handle := dispatch(t, adapter, run)
+	handle := dispatch(t, profile, run)
 	f.exited(t, unitOf(run))
-	if err := adapter.Stop(context.Background(), handle); err != nil || len(kills(f)) != 0 {
+	if err := profile.Stop(context.Background(), handle); err != nil || len(kills(f)) != 0 {
 		t.Fatalf("stop %v, kills %v; want no signal", err, kills(f))
 	}
 }
 
 func TestStopOfANeverStartedJobLeavesIt(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, missingCommand())
+	profile := newAgent(t, missingCommand())
 	run := testRun("never-stop")
-	if err := adapter.Stop(context.Background(), dispatch(t, adapter, run)); err != nil {
+	if err := profile.Stop(context.Background(), dispatch(t, profile, run)); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.recorded("kill", "stop", "reset"); len(got) != 0 || f.unit(unitOf(run)).LoadState != "loaded" {
@@ -2151,14 +2153,14 @@ func TestStopOfANeverStartedJobLeavesIt(t *testing.T) {
 
 func TestStopOfAGoneUnitSucceeds(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("gone-stop")
-	handle := dispatch(t, adapter, run)
+	handle := dispatch(t, profile, run)
 	f.exited(t, unitOf(run))
-	if err := adapter.Release(context.Background(), run.ID); err != nil {
+	if err := profile.Release(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := adapter.Stop(context.Background(), handle); err != nil || len(kills(f)) != 0 {
+	if err := profile.Stop(context.Background(), handle); err != nil || len(kills(f)) != 0 {
 		t.Fatalf("stop %v, kills %v; want success and no signal", err, kills(f))
 	}
 	// The unit goes between the read and the kill.
@@ -2174,7 +2176,7 @@ func TestStopOfAGoneUnitSucceeds(t *testing.T) {
 	}
 }
 
-func writeOutputs(t *testing.T, run wherry.Run, files map[string]string) string {
+func writeOutputs(t *testing.T, run pluginsdk.Run, files map[string]string) string {
 	t.Helper()
 	dir := filepath.Join(agentRoot(true), jobOf(run), "outputs")
 	for name, content := range files {
@@ -2188,31 +2190,31 @@ func writeOutputs(t *testing.T, run wherry.Run, files map[string]string) string 
 	return dir
 }
 
-func collect(t *testing.T, adapter *Adapter, handle wherry.Handle, limits wherry.Limits) ([]wherry.Output, error) {
+func collect(t *testing.T, profile *Systemd, handle pluginsdk.Handle, limits pluginsdk.Limits) ([]pluginsdk.Output, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	outputs := make(chan wherry.Output, 1024)
-	err := adapter.Collect(ctx, handle, limits, outputs)
+	outputs := make(chan pluginsdk.Output, 1024)
+	err := profile.Collect(ctx, handle, limits, outputs)
 	close(outputs)
-	var got []wherry.Output
+	var got []pluginsdk.Output
 	for output := range outputs {
 		got = append(got, output)
 	}
 	return got, err
 }
 
-var limits = wherry.Limits{Files: 64, FileBytes: 1 << 20, TotalBytes: 4 << 20}
+var limits = pluginsdk.Limits{Files: 64, FileBytes: 1 << 20, TotalBytes: 4 << 20}
 
 // ended dispatches run and waits for its agent to exit.
-func ended(t *testing.T, f *fakeManager, adapter *Adapter, run wherry.Run) wherry.Handle {
+func ended(t *testing.T, f *fakeManager, profile *Systemd, run pluginsdk.Run) pluginsdk.Handle {
 	t.Helper()
-	handle := dispatch(t, adapter, run)
+	handle := dispatch(t, profile, run)
 	f.exited(t, unitOf(run))
 	return handle
 }
 
-func names(outputs []wherry.Output) []string {
+func names(outputs []pluginsdk.Output) []string {
 	var got []string
 	for _, output := range outputs {
 		got = append(got, output.Name)
@@ -2222,9 +2224,9 @@ func names(outputs []wherry.Output) []string {
 
 func TestCollectWaitsForAnEmptyCgroup(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig(`mkdir outputs; echo early > outputs/early; (sleep 0.3; echo late > outputs/late) & exit 0`))
+	profile := newAgent(t, agentConfig(`mkdir outputs; echo early > outputs/early; (sleep 0.3; echo late > outputs/late) & exit 0`))
 	run := testRun("late")
-	got, err := collect(t, adapter, ended(t, f, adapter, run), limits)
+	got, err := collect(t, profile, ended(t, f, profile, run), limits)
 	if err != nil || !slices.Equal(names(got), []string{"early", "late"}) {
 		t.Fatalf("outputs %v, %v; want both, read once the cgroup emptied", names(got), err)
 	}
@@ -2232,35 +2234,35 @@ func TestCollectWaitsForAnEmptyCgroup(t *testing.T) {
 
 func TestCollectRefusesARunningAgent(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
-	handle := dispatch(t, adapter, testRun("running"))
+	profile := newAgent(t, agentConfig("sleep 30"))
+	handle := dispatch(t, profile, testRun("running"))
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if err := adapter.Collect(ctx, handle, limits, make(chan wherry.Output, 8)); err == nil || err.Error() != "the agent is still running" {
+	if err := profile.Collect(ctx, handle, limits, make(chan pluginsdk.Output, 8)); err == nil || err.Error() != "the agent is still running" {
 		t.Fatalf("got %v", err)
 	}
 }
 
 func TestCollectCountsTheTreeBeforeReading(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("count")
-	handle := ended(t, f, adapter, run)
+	handle := ended(t, f, profile, run)
 	writeOutputs(t, run, map[string]string{"a": "1", "b": "2", "sub/c": "3"})
-	got, err := collect(t, adapter, handle, wherry.Limits{Files: 3, FileBytes: 1 << 20, TotalBytes: 1 << 20})
+	got, err := collect(t, profile, handle, pluginsdk.Limits{Files: 3, FileBytes: 1 << 20, TotalBytes: 1 << 20})
 	if err == nil || len(got) != 0 {
 		t.Fatalf("outputs %v, %v; want four entries over three refused, nothing read", names(got), err)
 	}
-	if got, err := collect(t, adapter, handle, wherry.Limits{Files: 4, FileBytes: 1 << 20, TotalBytes: 1 << 20}); err != nil || len(got) != 3 {
+	if got, err := collect(t, profile, handle, pluginsdk.Limits{Files: 4, FileBytes: 1 << 20, TotalBytes: 1 << 20}); err != nil || len(got) != 3 {
 		t.Fatalf("at the limit: %v, %v", names(got), err)
 	}
 }
 
 func TestCollectReadsOnlyRegularFiles(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("types")
-	handle := ended(t, f, adapter, run)
+	handle := ended(t, f, profile, run)
 	dir := writeOutputs(t, run, map[string]string{"report.md": "report", "target": "inside"})
 	if err := syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o644); err != nil {
 		t.Fatal(err)
@@ -2268,7 +2270,7 @@ func TestCollectReadsOnlyRegularFiles(t *testing.T) {
 	if err := os.Symlink("target", filepath.Join(dir, "link")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := collect(t, adapter, handle, limits)
+	got, err := collect(t, profile, handle, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2307,9 +2309,9 @@ func TestCollectReadsOnlyRegularFiles(t *testing.T) {
 
 func TestCollectDoesNotFollowLinks(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("links")
-	handle := ended(t, f, adapter, run)
+	handle := ended(t, f, profile, run)
 	dir := writeOutputs(t, run, map[string]string{"real/file": "x"})
 	outside := filepath.Join(t.TempDir(), "secret")
 	if err := os.WriteFile(outside, []byte("host secret"), 0o600); err != nil {
@@ -2320,7 +2322,7 @@ func TestCollectDoesNotFollowLinks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := collect(t, adapter, handle, limits)
+	got, err := collect(t, profile, handle, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2354,11 +2356,11 @@ func TestCollectRefusesEscapingNames(t *testing.T) {
 
 func TestCollectLeavesFilesOverTheLimitsUnread(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("limits")
-	handle := ended(t, f, adapter, run)
+	handle := ended(t, f, profile, run)
 	writeOutputs(t, run, map[string]string{"big": strings.Repeat("b", 100), "small": "s"})
-	got, err := collect(t, adapter, handle, wherry.Limits{Files: 8, FileBytes: 10, TotalBytes: 10})
+	got, err := collect(t, profile, handle, pluginsdk.Limits{Files: 8, FileBytes: 10, TotalBytes: 10})
 	if err != nil || len(got) != 2 || got[0].Data != nil || got[0].Size != 100 || string(got[1].Data) != "s" {
 		t.Fatalf("outputs %+v, %v; want big listed unread and small read", got, err)
 	}
@@ -2383,11 +2385,11 @@ func TestCollectRefusesAReadOfAnotherLength(t *testing.T) {
 
 func TestCollectStreamsNamedOutputs(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("stream")
-	handle := ended(t, f, adapter, run)
+	handle := ended(t, f, profile, run)
 	writeOutputs(t, run, map[string]string{"archive.tar": strings.Repeat("t", 5000), "note": "n"})
-	got, err := collect(t, adapter, handle, wherry.Limits{Files: 8, FileBytes: 10, TotalBytes: 10, Stream: []string{"archive.tar"}, StreamBytes: 1 << 20})
+	got, err := collect(t, profile, handle, pluginsdk.Limits{Files: 8, FileBytes: 10, TotalBytes: 10, Stream: []string{"archive.tar"}, StreamBytes: 1 << 20})
 	if err != nil || len(got) != 2 || got[0].Body == nil || got[0].Data != nil {
 		t.Fatalf("outputs %+v, %v; want archive.tar streamed", got, err)
 	}
@@ -2399,12 +2401,12 @@ func TestCollectStreamsNamedOutputs(t *testing.T) {
 
 func TestCollectStreamsTheOutcome(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("outcome")
-	handle := ended(t, f, adapter, run)
+	handle := ended(t, f, profile, run)
 	outcome := `{"state":"TASK_STATE_COMPLETED"}`
 	writeOutputs(t, run, map[string]string{".wherry/outcome.json": outcome, "reply.md": "done"})
-	got, err := collect(t, adapter, handle, wherry.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20, Stream: []string{".wherry/outcome.json"}, StreamBytes: 1 << 20})
+	got, err := collect(t, profile, handle, pluginsdk.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20, Stream: []string{".wherry/outcome.json"}, StreamBytes: 1 << 20})
 	if err != nil || len(got) != 2 || got[0].Name != ".wherry/outcome.json" || got[0].Body == nil || got[0].Data != nil || string(got[1].Data) != "done" {
 		t.Fatalf("outputs %+v, %v; want .wherry/outcome.json streamed beside reply.md", got, err)
 	}
@@ -2416,31 +2418,31 @@ func TestCollectStreamsTheOutcome(t *testing.T) {
 
 func TestCollectWithoutAnOutputsDirectory(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
-	if got, err := collect(t, adapter, ended(t, f, adapter, testRun("no-outputs")), limits); err != nil || len(got) != 0 {
+	profile := newAgent(t, agentConfig("exit 0"))
+	if got, err := collect(t, profile, ended(t, f, profile, testRun("no-outputs")), limits); err != nil || len(got) != 0 {
 		t.Fatalf("outputs %v, %v; want none", got, err)
 	}
 }
 
 func TestCollectAfterRelease(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("mkdir outputs; echo done > outputs/reply.md"))
+	profile := newAgent(t, agentConfig("mkdir outputs; echo done > outputs/reply.md"))
 	run := testRun("after-release")
-	handle := ended(t, f, adapter, run)
-	if err := adapter.Release(context.Background(), run.ID); err != nil {
+	handle := ended(t, f, profile, run)
+	if err := profile.Release(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := collect(t, adapter, handle, limits); err != nil || len(got) != 1 || string(got[0].Data) != "done\n" {
+	if got, err := collect(t, profile, handle, limits); err != nil || len(got) != 1 || string(got[0].Data) != "done\n" {
 		t.Fatalf("outputs %+v, %v; want reply.md", got, err)
 	}
 }
 
 func TestReleaseRecordsTheTerminalAndStopsTheUnit(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 3"))
+	profile := newAgent(t, agentConfig("exit 3"))
 	run := testRun("release")
-	handle := ended(t, f, adapter, run)
-	if err := adapter.Release(context.Background(), run.ID); err != nil {
+	handle := ended(t, f, profile, run)
+	if err := profile.Release(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
 	}
 	if m := readMarkerOf(t, run); m.Terminal == nil || *m.Terminal != (recorded{ExitCode: 3}) {
@@ -2449,18 +2451,18 @@ func TestReleaseRecordsTheTerminalAndStopsTheUnit(t *testing.T) {
 	if got := f.recorded("stop", "reset"); len(got) != 2 || f.unit(unitOf(run)).LoadState == "loaded" {
 		t.Fatalf("calls %v; want the unit stopped and reset", got)
 	}
-	if _, terminal, err := followAll(t, adapter, handle, 0); err != nil || terminal.ExitCode != 3 {
+	if _, terminal, err := followAll(t, profile, handle, 0); err != nil || terminal.ExitCode != 3 {
 		t.Fatalf("terminal %+v, %v; want exit code 3 from the marker", terminal, err)
 	}
 }
 
 func TestReleaseRemovesPromptAndInputs(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("mkdir outputs; echo x > outputs/x"))
+	profile := newAgent(t, agentConfig("mkdir outputs; echo x > outputs/x"))
 	run := testRun("release-material")
-	run.Inputs = []wherry.File{{Name: "in.txt", Data: []byte("input")}}
-	ended(t, f, adapter, run)
-	if err := adapter.Release(context.Background(), run.ID); err != nil {
+	run.Inputs = []pluginsdk.File{{Name: "in.txt", Data: []byte("input")}}
+	ended(t, f, profile, run)
+	if err := profile.Release(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
 	}
 	work := filepath.Join(agentRoot(true), jobOf(run))
@@ -2471,10 +2473,10 @@ func TestReleaseRemovesPromptAndInputs(t *testing.T) {
 
 func TestReleaseLeavesARunningAgent(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
+	profile := newAgent(t, agentConfig("sleep 30"))
 	run := testRun("release-running")
-	dispatch(t, adapter, run)
-	if err := adapter.Release(context.Background(), run.ID); err != nil {
+	dispatch(t, profile, run)
+	if err := profile.Release(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.recorded("stop", "reset", "kill"); len(got) != 0 || !exists(filepath.Join(agentRoot(true), jobOf(run), "prompt.txt")) {
@@ -2482,26 +2484,26 @@ func TestReleaseLeavesARunningAgent(t *testing.T) {
 	}
 	leftover := testRun("release-leftover")
 	ended(t, f, newAgent(t, agentConfig("sleep 600 & exit 0")), leftover)
-	if err := adapter.Release(context.Background(), leftover.ID); err != nil || f.unit(unitOf(leftover)).LoadState != "loaded" {
+	if err := profile.Release(context.Background(), leftover.ID); err != nil || f.unit(unitOf(leftover)).LoadState != "loaded" {
 		t.Fatalf("release with a process left: %v, unit %+v; want the unit kept", err, f.unit(unitOf(leftover)))
 	}
 }
 
 func TestReleaseOfAnAbsentRunSucceeds(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	for range 2 {
-		if err := adapter.Release(context.Background(), "run-never"); err != nil {
+		if err := profile.Release(context.Background(), "run-never"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	run := testRun("release-no-work")
-	ended(t, f, adapter, run)
+	ended(t, f, profile, run)
 	if err := os.RemoveAll(filepath.Join(agentRoot(true), jobOf(run))); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := adapter.Release(context.Background(), run.ID); err != nil {
+		if err := profile.Release(context.Background(), run.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2509,11 +2511,11 @@ func TestReleaseOfAnAbsentRunSucceeds(t *testing.T) {
 
 func TestPurgeStopsWaitsAndRemoves(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
+	profile := newAgent(t, agentConfig("sleep 30"))
 	run := testRun("purge")
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	f.set(func() { f.linger = 3 })
-	if err := adapter.Purge(context.Background(), run.ID); err != nil {
+	if err := profile.Purge(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
 	}
 	if f.unit(unitOf(run)).LoadState == "loaded" {
@@ -2531,31 +2533,31 @@ func TestPurgeRemovesTheMarkerFirst(t *testing.T) {
 		t.Skip("root removes a directory of any mode")
 	}
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("mkdir -p outputs/locked; touch outputs/locked/file; chmod 0500 outputs/locked"))
+	profile := newAgent(t, agentConfig("mkdir -p outputs/locked; touch outputs/locked/file; chmod 0500 outputs/locked"))
 	run := testRun("purge-fails")
-	ended(t, f, adapter, run)
+	ended(t, f, profile, run)
 	locked := filepath.Join(agentRoot(true), jobOf(run), "outputs/locked")
 	defer os.Chmod(locked, 0o700)
-	if err := adapter.Purge(context.Background(), run.ID); err == nil {
+	if err := profile.Purge(context.Background(), run.ID); err == nil {
 		t.Fatal("a Purge whose removal failed succeeded")
 	}
-	if job, err := adapter.Lookup(context.Background(), run.ID); err != nil || job.State != wherry.JobAbsent {
+	if job, err := profile.Lookup(context.Background(), run.ID); err != nil || job.State != pluginsdk.JobAbsent {
 		t.Fatalf("lookup %+v, %v; want absent", job, err)
 	}
 }
 
 func TestPurgeOfAnAbsentJobSucceeds(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	for range 2 {
-		if err := adapter.Purge(context.Background(), "run-absent"); err != nil {
+		if err := profile.Purge(context.Background(), "run-absent"); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
 
 // backdate moves a run's end, and its files' changes, by ago into the past.
-func backdate(t *testing.T, f *fakeManager, run wherry.Run, ago time.Duration) {
+func backdate(t *testing.T, f *fakeManager, run pluginsdk.Run, ago time.Duration) {
 	t.Helper()
 	at := time.Now().Add(-ago)
 	if f != nil && f.unit(unitOf(run)).LoadState == "loaded" {
@@ -2568,20 +2570,20 @@ func backdate(t *testing.T, f *fakeManager, run wherry.Run, ago time.Duration) {
 	}
 }
 
-func sweep(t *testing.T, adapter *Adapter) {
+func sweep(t *testing.T, profile *Systemd) {
 	t.Helper()
-	if err := adapter.Sweep(context.Background()); err != nil {
+	if err := profile.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestSweepPurgesRunsEndedPastTheGrace(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("expired")
-	ended(t, f, adapter, run)
+	ended(t, f, profile, run)
 	backdate(t, f, run, 11*time.Minute)
-	sweep(t, adapter)
+	sweep(t, profile)
 	if exists(filepath.Join(controlRoot, jobOf(run))) || f.unit(unitOf(run)).LoadState == "loaded" {
 		t.Fatal("an own run ended past the grace survived the sweep")
 	}
@@ -2589,11 +2591,11 @@ func TestSweepPurgesRunsEndedPastTheGrace(t *testing.T) {
 
 func TestSweepKeepsRunsInsideTheGrace(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("recent")
-	ended(t, f, adapter, run)
+	ended(t, f, profile, run)
 	backdate(t, f, run, time.Minute)
-	sweep(t, adapter)
+	sweep(t, profile)
 	if !exists(markerPath(jobOf(run))) || !exists(stdoutPath(jobOf(run))) {
 		t.Fatal("a run ended inside the grace was purged")
 	}
@@ -2601,10 +2603,10 @@ func TestSweepKeepsRunsInsideTheGrace(t *testing.T) {
 
 func TestSweepSettlesOwnEndedRunsAtOnce(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 4"))
+	profile := newAgent(t, agentConfig("exit 4"))
 	run := testRun("settle")
-	ended(t, f, adapter, run)
-	sweep(t, adapter)
+	ended(t, f, profile, run)
+	sweep(t, profile)
 	if f.unit(unitOf(run)).LoadState == "loaded" || exists(filepath.Join(agentRoot(true), jobOf(run), "prompt.txt")) {
 		t.Fatal("an own ended run was not settled at once")
 	}
@@ -2615,24 +2617,24 @@ func TestSweepSettlesOwnEndedRunsAtOnce(t *testing.T) {
 
 func TestSweepCountsOnlyThisProfilesRuns(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	own, other := testRun("own"), testRun("other")
 	other.Profile = "other"
-	ended(t, f, adapter, own)
-	ended(t, f, adapter, other)
+	ended(t, f, profile, own)
+	ended(t, f, profile, other)
 	backdate(t, f, own, 11*time.Minute)
 	backdate(t, f, other, 11*time.Minute)
-	sweep(t, adapter)
+	sweep(t, profile)
 	if !exists(markerPath(jobOf(other))) || exists(markerPath(jobOf(own))) {
 		t.Fatal("want the own run purged and the other profile's kept")
 	}
-	if got := samples(adapter)["wherry_adapter_sweep_deletions_total/job"].Value; got != 1 {
+	if got := samples(profile)["wherry_plugin_sweep_deletions_total/job"].Value; got != 1 {
 		t.Fatalf("deletions %v; want 1", got)
 	}
 }
 
 // setMarkerProfile rewrites the profile field of run's job.json as it is on disk.
-func setMarkerProfile(t *testing.T, run wherry.Run, profile string) map[string]any {
+func setMarkerProfile(t *testing.T, run pluginsdk.Run, profile string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(markerPath(jobOf(run)))
 	if err != nil {
@@ -2655,23 +2657,23 @@ func setMarkerProfile(t *testing.T, run wherry.Run, profile string) map[string]a
 
 func TestMarkerProfileDecidesOwnership(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("marked")
-	ended(t, f, adapter, run)
-	if written := setMarkerProfile(t, run, "other"); written["profile"] != testProfile || written["adapter"] != nil {
+	ended(t, f, profile, run)
+	if written := setMarkerProfile(t, run, "other"); written["profile"] != testProfile {
 		t.Fatalf("marker %v; want the profile under profile", written)
 	}
-	if job, err := adapter.Lookup(context.Background(), run.ID); err != nil || job.Profile != "other" {
+	if job, err := profile.Lookup(context.Background(), run.ID); err != nil || job.Profile != "other" {
 		t.Fatalf("lookup %+v, %v; want the marker's profile other", job, err)
 	}
 	backdate(t, f, run, 11*time.Minute)
-	sweep(t, adapter)
+	sweep(t, profile)
 	if !exists(markerPath(jobOf(run))) {
 		t.Fatal("swept a run whose marker names another profile")
 	}
 	setMarkerProfile(t, run, testProfile)
 	backdate(t, f, run, 11*time.Minute)
-	sweep(t, adapter)
+	sweep(t, profile)
 	if exists(markerPath(jobOf(run))) {
 		t.Fatal("kept an expired run whose marker names this profile")
 	}
@@ -2679,13 +2681,13 @@ func TestMarkerProfileDecidesOwnership(t *testing.T) {
 
 func TestSweepSettlesAnotherProfilesExpiredRun(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	recent, expired := testRun("other-recent"), testRun("other-expired")
 	recent.Profile, expired.Profile = "other", "other"
-	ended(t, f, adapter, recent)
-	ended(t, f, adapter, expired)
+	ended(t, f, profile, recent)
+	ended(t, f, profile, expired)
 	backdate(t, f, expired, 11*time.Minute)
-	sweep(t, adapter)
+	sweep(t, profile)
 	if f.unit(unitOf(expired)).LoadState == "loaded" || exists(filepath.Join(agentRoot(true), jobOf(expired), "prompt.txt")) || !exists(markerPath(jobOf(expired))) {
 		t.Fatal("want the expired run's unit stopped and material deleted, and the run kept")
 	}
@@ -2696,11 +2698,11 @@ func TestSweepSettlesAnotherProfilesExpiredRun(t *testing.T) {
 
 func TestSweepKeepsARunningRun(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("sleep 30"))
+	profile := newAgent(t, agentConfig("sleep 30"))
 	run := testRun("alive")
-	dispatch(t, adapter, run)
+	dispatch(t, profile, run)
 	backdate(t, f, run, time.Hour)
-	sweep(t, adapter)
+	sweep(t, profile)
 	if got := f.recorded("kill", "stop", "reset"); len(got) != 0 || !exists(markerPath(jobOf(run))) {
 		t.Fatalf("calls %v; want the running run untouched", got)
 	}
@@ -2708,30 +2710,30 @@ func TestSweepKeepsARunningRun(t *testing.T) {
 
 func TestSweepRemovesStaleMaterial(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	own, other := testRun("stale"), testRun("stale-other")
 	other.Profile = "other"
-	for _, run := range []wherry.Run{own, other} {
+	for _, run := range []pluginsdk.Run{own, other} {
 		putMarker(t, run, phasePrepared, nil)
 		backdate(t, nil, run, 11*time.Minute)
 	}
-	sweep(t, adapter)
-	for _, run := range []wherry.Run{own, other} {
+	sweep(t, profile)
+	for _, run := range []pluginsdk.Run{own, other} {
 		if exists(filepath.Join(controlRoot, jobOf(run))) || exists(filepath.Join(agentRoot(true), jobOf(run))) {
 			t.Errorf("%s: stale material survived", run.ID)
 		}
 	}
-	if got := samples(adapter)["wherry_adapter_sweep_deletions_total/variable"].Value; got != 1 {
+	if got := samples(profile)["wherry_plugin_sweep_deletions_total/variable"].Value; got != 1 {
 		t.Fatalf("variable deletions %v; want the own one", got)
 	}
 }
 
 func TestSweepKeepsRecentMaterial(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("fresh")
 	putMarker(t, run, phasePrepared, nil)
-	sweep(t, adapter)
+	sweep(t, profile)
 	if !exists(filepath.Join(agentRoot(true), jobOf(run), "prompt.txt")) {
 		t.Fatal("recent material was removed")
 	}
@@ -2739,7 +2741,7 @@ func TestSweepKeepsRecentMaterial(t *testing.T) {
 
 func TestSweepRemovesLeftovers(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	control, work := filepath.Join(controlRoot, poolPrefix+"run-orphan"), filepath.Join(agentRoot(true), poolPrefix+"run-workless")
 	recent := filepath.Join(agentRoot(false), poolPrefix+"run-recent")
 	foreign := filepath.Join(agentRoot(true), "agent-000000000000-run-x")
@@ -2754,12 +2756,12 @@ func TestSweepRemovesLeftovers(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sweep(t, adapter)
+	sweep(t, profile)
 	if exists(control) || exists(work) || !exists(recent) || !exists(foreign) {
 		t.Fatalf("control %v, work %v, recent %v, foreign %v; want only the old leftovers of the pool removed", exists(control), exists(work), exists(recent), exists(foreign))
 	}
-	for _, sample := range samples(adapter) {
-		if sample.Family == "wherry_adapter_sweep_deletions_total" && sample.Value != 0 {
+	for _, sample := range samples(profile) {
+		if sample.Family == "wherry_plugin_sweep_deletions_total" && sample.Value != 0 {
 			t.Fatalf("leftovers counted: %+v", sample)
 		}
 	}
@@ -2767,12 +2769,12 @@ func TestSweepRemovesLeftovers(t *testing.T) {
 
 func TestSweepIgnoresUnitsWithoutAMarker(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	f.put(unitName(poolPrefix+"run-unmarked"), capturedUnit(t, "exit-1"))
 	if err := os.MkdirAll(filepath.Join(controlRoot, poolPrefix+"run-unmarked"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	sweep(t, adapter)
+	sweep(t, profile)
 	if got := f.recorded("kill", "stop", "reset", "unit"); len(got) != 0 {
 		t.Fatalf("calls %v; want none", got)
 	}
@@ -2780,20 +2782,20 @@ func TestSweepIgnoresUnitsWithoutAMarker(t *testing.T) {
 
 func TestSweepReportsDeletionsAndPendingRuns(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	purged, pending, stale := testRun("sweep-purged"), testRun("sweep-pending"), testRun("sweep-stale")
-	ended(t, f, adapter, purged)
-	ended(t, f, adapter, pending)
+	ended(t, f, profile, purged)
+	ended(t, f, profile, pending)
 	backdate(t, f, purged, 11*time.Minute)
 	putMarker(t, stale, phasePrepared, nil)
 	backdate(t, nil, stale, 11*time.Minute)
-	sweep(t, adapter)
-	got := samples(adapter)
-	if got["wherry_adapter_sweep_deletions_total/job"].Value != 1 || got["wherry_adapter_sweep_deletions_total/variable"].Value != 1 || got["wherry_adapter_cleanup_pending"].Value != 1 {
+	sweep(t, profile)
+	got := samples(profile)
+	if got["wherry_plugin_sweep_deletions_total/job"].Value != 1 || got["wherry_plugin_sweep_deletions_total/variable"].Value != 1 || got["wherry_plugin_cleanup_pending"].Value != 1 {
 		t.Fatalf("samples %+v; want one job, one variable and one pending", got)
 	}
 	for key := range got {
-		if family, kind, ok := strings.Cut(key, "/"); ok && family == "wherry_adapter_sweep_deletions_total" && kind != "job" && kind != "variable" {
+		if family, kind, ok := strings.Cut(key, "/"); ok && family == "wherry_plugin_sweep_deletions_total" && kind != "job" && kind != "variable" {
 			t.Fatalf("deletion kind %s", kind)
 		}
 	}
@@ -2801,31 +2803,31 @@ func TestSweepReportsDeletionsAndPendingRuns(t *testing.T) {
 
 func TestReadyFromSystemState(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	for state, want := range map[string]bool{"running": true, "degraded": true, "initializing": false, "starting": true, "maintenance": false, "stopping": false} {
 		f.set(func() { f.state = state })
-		if ready, err := adapter.Ready(context.Background()); err != nil || ready != want {
+		if ready, err := profile.Ready(context.Background()); err != nil || ready != want {
 			t.Errorf("%s: ready %v, %v; want %v", state, ready, err, want)
 		}
 	}
 	f.fail("state", dbus.Error{Name: "org.freedesktop.DBus.Error.NoReply"})
-	if ready, err := adapter.Ready(context.Background()); ready || err == nil {
+	if ready, err := profile.Ready(context.Background()); ready || err == nil {
 		t.Fatalf("a failed read: %v, %v; want not ready and the error", ready, err)
 	}
 }
 
-func classOf(t *testing.T, adapter *Adapter, err error) string {
+func classOf(t *testing.T, profile *Systemd, err error) string {
 	t.Helper()
-	var failure *wherry.Error
-	if !errors.As(adapter.failed("op", err), &failure) {
-		t.Fatalf("%v: not an adapter error", err)
+	var failure *pluginsdk.Error
+	if !errors.As(profile.failed("op", err), &failure) {
+		t.Fatalf("%v: not a plugin error", err)
 	}
 	return failure.Class
 }
 
 func TestDBusErrorsAreClassified(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	for name, want := range map[string]string{
 		"org.freedesktop.DBus.Error.AccessDenied":                     "denied",
 		"org.freedesktop.DBus.Error.InteractiveAuthorizationRequired": "denied",
@@ -2842,7 +2844,7 @@ func TestDBusErrorsAreClassified(t *testing.T) {
 		"org.freedesktop.DBus.Error.InvalidArgs":                      "other",
 		busNoSuchUnit:                                                 "",
 	} {
-		if got := classOf(t, adapter, dbus.Error{Name: name}); got != want {
+		if got := classOf(t, profile, dbus.Error{Name: name}); got != want {
 			t.Errorf("%s: class %q; want %q", name, got, want)
 		}
 	}
@@ -2852,16 +2854,16 @@ func TestDBusErrorsAreClassified(t *testing.T) {
 		context.Canceled:         "",
 		errors.New("odd"):        "other",
 	} {
-		if got := classOf(t, adapter, err); got != want {
+		if got := classOf(t, profile, err); got != want {
 			t.Errorf("%v: class %q; want %q", err, got, want)
 		}
 	}
-	if got := samples(adapter); got["wherry_adapter_platform_errors_total/"].Value != 0 {
+	if got := samples(profile); got["wherry_plugin_platform_errors_total/"].Value != 0 {
 		t.Fatalf("an error without a class was counted: %+v", got)
 	}
 	total := 0.0
-	for key, sample := range samples(adapter) {
-		if strings.HasPrefix(key, "wherry_adapter_platform_errors_total/") {
+	for key, sample := range samples(profile) {
+		if strings.HasPrefix(key, "wherry_plugin_platform_errors_total/") {
 			total += sample.Value
 		}
 	}
@@ -2872,13 +2874,13 @@ func TestDBusErrorsAreClassified(t *testing.T) {
 
 func TestFilesystemErrorsAreClassified(t *testing.T) {
 	newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	for errno, want := range map[syscall.Errno]string{
 		syscall.EACCES: "denied", syscall.EPERM: "denied", syscall.EROFS: "denied",
 		syscall.ENOSPC: "unavailable", syscall.EDQUOT: "unavailable", syscall.EIO: "unavailable",
 		syscall.ENOENT: "", syscall.EINVAL: "other",
 	} {
-		if got := classOf(t, adapter, &fs.PathError{Op: "write", Path: "/x", Err: errno}); got != want {
+		if got := classOf(t, profile, &fs.PathError{Op: "write", Path: "/x", Err: errno}); got != want {
 			t.Errorf("%v: class %q; want %q", errno, got, want)
 		}
 	}
@@ -2886,12 +2888,12 @@ func TestFilesystemErrorsAreClassified(t *testing.T) {
 
 func TestClosedConnectionIsRedialled(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
-	if _, err := adapter.Ready(context.Background()); err != nil {
+	profile := newAgent(t, agentConfig("exit 0"))
+	if _, err := profile.Ready(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	f.set(func() { f.connected = false })
-	if _, err := adapter.Ready(context.Background()); err != nil {
+	if _, err := profile.Ready(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if f.dials != 2 {
@@ -2899,21 +2901,21 @@ func TestClosedConnectionIsRedialled(t *testing.T) {
 	}
 	f.set(func() { f.connected = false })
 	f.fail("dial", errors.New("connection refused"))
-	if _, err := adapter.Ready(context.Background()); err == nil {
+	if _, err := profile.Ready(context.Background()); err == nil {
 		t.Fatal("a failed dial succeeded")
 	}
-	if _, err := adapter.Ready(context.Background()); err != nil {
+	if _, err := profile.Ready(context.Background()); err != nil {
 		t.Fatalf("the call after a failed dial: %v", err)
 	}
 }
 
 func TestReturnedErrorCarriesOpAndClass(t *testing.T) {
 	f := newHost(t)
-	adapter := newAgent(t, agentConfig("exit 0"))
+	profile := newAgent(t, agentConfig("exit 0"))
 	run := testRun("op")
 	f.fail("start", dbus.Error{Name: "org.freedesktop.DBus.Error.AccessDenied", Body: []any{"Access denied"}})
-	_, _, err := adapter.Dispatch(context.Background(), run)
-	var failure *wherry.Error
+	_, _, err := profile.Dispatch(context.Background(), run)
+	var failure *pluginsdk.Error
 	if !errors.As(err, &failure) || failure.Op != "start unit "+unitOf(run) || failure.Class != "denied" {
 		t.Fatalf("got %#v; want op and class", err)
 	}
@@ -2926,12 +2928,12 @@ func TestHandledErrorIsLoggedOnceWithoutText(t *testing.T) {
 	newHost(t)
 	var logs bytes.Buffer
 	fast(t)
-	adapter, err := New(agentConfig("exit 0"), testProfile, testPool, hclog.New(&hclog.LoggerOptions{Output: &logs}))
+	profile, err := New(agentConfig("exit 0"), testProfile, testPool, hclog.New(&hclog.LoggerOptions{Output: &logs}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter.handled("remove credentials of unit", &fs.PathError{Op: "unlinkat", Path: "/run/secret-text", Err: syscall.EIO})
-	adapter.handled("read unit", dbus.Error{Name: busNoSuchUnit, Body: []any{"secret-text"}})
+	profile.handled("remove credentials of unit", &fs.PathError{Op: "unlinkat", Path: "/run/secret-text", Err: syscall.EIO})
+	profile.handled("read unit", dbus.Error{Name: busNoSuchUnit, Body: []any{"secret-text"}})
 	if lines := strings.Split(strings.TrimSpace(logs.String()), "\n"); len(lines) != 1 || !strings.Contains(lines[0], "systemd call failed") ||
 		!strings.Contains(lines[0], "class=unavailable") || !strings.Contains(lines[0], `op="remove credentials of unit"`) || strings.Contains(logs.String(), "secret-text") {
 		t.Fatalf("logs %q; want one line with op and class and no text", logs.String())
@@ -2942,7 +2944,7 @@ func TestMaterialNeverInPropertiesLogsOrErrors(t *testing.T) {
 	f := newHost(t)
 	var logs bytes.Buffer
 	fast(t)
-	adapter, err := New(agentConfig(`cat prompt.txt inputs/* > /dev/null; mkdir outputs; printf 'output-%s-secret' bytes > outputs/reply.md; echo '{"type":"result"}'`),
+	profile, err := New(agentConfig(`cat prompt.txt inputs/* > /dev/null; mkdir outputs; printf 'output-%s-secret' bytes > outputs/reply.md; echo '{"type":"result"}'`),
 		testProfile, testPool, hclog.New(&hclog.LoggerOptions{Output: &logs, Level: hclog.Trace}))
 	if err != nil {
 		t.Fatal(err)
@@ -2961,40 +2963,40 @@ func TestMaterialNeverInPropertiesLogsOrErrors(t *testing.T) {
 	run := testRun("material")
 	run.Prompt = []byte("prompt-secret")
 	run.Model = "opus"
-	run.Inputs = []wherry.File{{Name: "in.txt", Data: []byte("inline-input-secret")}}
-	run.Credentials = []wherry.Secret{
+	run.Inputs = []pluginsdk.File{{Name: "in.txt", Data: []byte("inline-input-secret")}}
+	run.Credentials = []pluginsdk.Secret{
 		{Name: "model", Env: credentialEnv, Value: []byte("credential-secret")},
 		{Name: "second", Env: "SECOND_TOKEN", Value: []byte("second-env-secret")},
 		{Name: "deploy", File: "deploy-key", Value: []byte("task-credential-secret")},
 		{Name: "token", File: "token", Value: []byte("second-file-secret")},
 	}
-	run.Fetches = []wherry.Fetch{{Name: "object.bin", URL: url, Size: int64(len(object)), SHA256: sha(object)}}
+	run.Fetches = []pluginsdk.Fetch{{Name: "object.bin", URL: url, Size: int64(len(object)), SHA256: sha(object)}}
 	var errs []error
 	note := func(err error) {
 		if err != nil {
 			errs = append(errs, err)
 		}
 	}
-	handle := dispatch(t, adapter, run)
-	_, _, err = followAll(t, adapter, handle, 0)
+	handle := dispatch(t, profile, run)
+	_, _, err = followAll(t, profile, handle, 0)
 	note(err)
-	note(adapter.Stop(context.Background(), handle))
-	outputs, err := collect(t, adapter, handle, limits)
+	note(profile.Stop(context.Background(), handle))
+	outputs, err := collect(t, profile, handle, limits)
 	note(err)
-	note(adapter.Release(context.Background(), run.ID))
-	note(adapter.Purge(context.Background(), run.ID))
-	note(adapter.Sweep(context.Background()))
+	note(profile.Release(context.Background(), run.ID))
+	note(profile.Purge(context.Background(), run.ID))
+	note(profile.Sweep(context.Background()))
 	broken := testRun("material-fails")
 	broken.Credentials = run.Credentials
-	broken.Fetches = []wherry.Fetch{{Name: "object.bin", URL: failing, Size: 1, SHA256: sha([]byte("x"))}}
-	dispatch(t, adapter, broken)
-	_, terminal, err := followAll(t, adapter, dispatch(t, adapter, broken), 0)
+	broken.Fetches = []pluginsdk.Fetch{{Name: "object.bin", URL: failing, Size: 1, SHA256: sha([]byte("x"))}}
+	dispatch(t, profile, broken)
+	_, terminal, err := followAll(t, profile, dispatch(t, profile, broken), 0)
 	note(err)
 	unreachable := testRun("material-unreachable")
-	unreachable.Fetches = []wherry.Fetch{{Name: "object.bin", URL: "https://127.0.0.1:1/x?X-Amz-Signature=presigned-url-secret", Size: 1, SHA256: sha([]byte("x"))}}
-	dispatch(t, adapter, unreachable)
+	unreachable.Fetches = []pluginsdk.Fetch{{Name: "object.bin", URL: "https://127.0.0.1:1/x?X-Amz-Signature=presigned-url-secret", Size: 1, SHA256: sha([]byte("x"))}}
+	dispatch(t, profile, unreachable)
 	f.fail("start", dbus.Error{Name: "org.freedesktop.DBus.Error.AccessDenied", Body: []any{"denied"}})
-	_, _, err = adapter.Dispatch(context.Background(), testRun("material-refused"))
+	_, _, err = profile.Dispatch(context.Background(), testRun("material-refused"))
 	note(err)
 	if len(outputs) != 1 {
 		t.Fatalf("outputs %v; want the reply", names(outputs))
