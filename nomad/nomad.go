@@ -39,6 +39,8 @@ const (
 	outputsDir  = taskName + "/local/outputs"
 	stopGrace   = 15 * time.Second
 	followPoll  = time.Second
+	// maxBrokenStreams bounds how often a running task's followed log stream is opened again after it breaks.
+	maxBrokenStreams = 5
 	// collectPoll separates the reads of an allocation that Collect waits on, since Stop returns before it ends.
 	collectPoll = 500 * time.Millisecond
 	cleanupWait = 10 * time.Second
@@ -597,30 +599,51 @@ func (profile *Nomad) Follow(ctx context.Context, encoded pluginsdk.Handle, offs
 		return terminalOf(alloc), nil
 	}
 	reader := lineReader{lines: lines, position: offset, cri: handle.Format == formatCRI}
-	streamCtx, stopStream := context.WithCancel(ctx)
-	defer stopStream()
-	frames, errs := profile.logs(streamCtx, alloc, taskName, true, offset)
+	stream := profile.follow(ctx, alloc, offset)
+	defer func() { stream.stop() }()
 	// A followed stream can stay open with no frames after the task ends, can close before the task ends,
 	// and can lag a task that ended before it opened; completion is polled instead.
 	poll := time.NewTicker(followPoll)
 	defer poll.Stop()
+	// A long-lived stream can be cut mid-frame by a proxy or load balancer; it is opened again from the last line
+	// boundary while the task runs, and a finished task's log is read whole instead.
+	broken := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return pluginsdk.Terminal{}, ctx.Err()
-		case err := <-errs:
-			return pluginsdk.Terminal{}, profile.failed("read logs", logsError(err))
-		case <-poll.C:
+		case err := <-stream.errs:
+			stream.stop()
+			if ctx.Err() != nil {
+				return pluginsdk.Terminal{}, ctx.Err()
+			}
 			if final := profile.finished(ctx, handle.Alloc); final != nil {
-				stopStream()
 				if err := profile.drain(ctx, final, &reader); err != nil {
 					return pluginsdk.Terminal{}, err
 				}
 				return terminalOf(final), nil
 			}
-		case frame, ok := <-frames:
+			if broken++; broken > maxBrokenStreams {
+				return pluginsdk.Terminal{}, profile.failed("read logs", logsError(err))
+			}
+			reader.pending, reader.partial, reader.consumed = nil, nil, 0
+			select {
+			case <-ctx.Done():
+				return pluginsdk.Terminal{}, ctx.Err()
+			case <-time.After(followPoll):
+			}
+			stream = profile.follow(ctx, alloc, reader.position)
+		case <-poll.C:
+			if final := profile.finished(ctx, handle.Alloc); final != nil {
+				stream.stop()
+				if err := profile.drain(ctx, final, &reader); err != nil {
+					return pluginsdk.Terminal{}, err
+				}
+				return terminalOf(final), nil
+			}
+		case frame, ok := <-stream.frames:
 			if !ok {
-				frames = nil
+				stream.frames = nil
 				continue
 			}
 			if err := reader.take(ctx, frame.Data); err != nil {
@@ -628,6 +651,19 @@ func (profile *Nomad) Follow(ctx context.Context, encoded pluginsdk.Handle, offs
 			}
 		}
 	}
+}
+
+// logStream is one followed read of the task's log.
+type logStream struct {
+	frames <-chan *api.StreamFrame
+	errs   <-chan error
+	stop   context.CancelFunc
+}
+
+func (profile *Nomad) follow(ctx context.Context, alloc *api.Allocation, offset int64) logStream {
+	streamCtx, stop := context.WithCancel(ctx)
+	frames, errs := profile.logs(streamCtx, alloc, taskName, true, offset)
+	return logStream{frames: frames, errs: errs, stop: stop}
 }
 
 // drain re-reads the finished task's log from the last line boundary to its end;
