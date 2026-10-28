@@ -519,8 +519,10 @@ The receiver runs as root under its own unit,
 as `wherry receiver run --config-file /etc/wherry/config.yaml`, and
 its agent units run in [`examples/systemd/wherry.slice`](../examples/systemd/wherry.slice),
 outside the receiver's cgroup. Restarting or stopping the receiver never
-touches them: the receiver exits on `SIGTERM` without stopping its jobs,
-and the restarted receiver adopts them. A run is adopted only by a
+touches them: on `SIGTERM` the receiver lets held runs go on for up to the
+local configuration's 25-second `drain_timeout`, within the unit's
+`TimeoutStopSec=30`, then exits without stopping its jobs, and the
+restarted receiver adopts them. A run is adopted only by a
 receiver with the same plugin profile on the same host, so give each systemd
 receiver a pool of its own.
 

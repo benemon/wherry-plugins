@@ -5,6 +5,8 @@ bundle: /etc/wherry/bundle/bundle.yaml
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
+# Held runs go on for up to drain_timeout after SIGTERM, within receiver.yaml's terminationGracePeriodSeconds.
+drain_timeout: 25s
 # In the cluster the plugin authenticates as the receiver's service account, so no profile names a platform
 # credential. A platform credential, such as a token for another cluster, comes from a Secret mounted with defaultMode
 # 0440 or stricter, under the name the plugin's config gives in its credential key:

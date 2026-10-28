@@ -5,6 +5,8 @@ bundle: /etc/wherry/receiver.bundle
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
+# Held runs go on for up to drain_timeout after SIGTERM, within the 30 seconds docker stop --time 30 allows.
+drain_timeout: 25s
 # The receiver configuration's plugin config sets credential: nomad-token. The token can come from a file instead, a
 # regular file that its group cannot write and others cannot read, write or execute:
 # nomad-token: {file: /etc/wherry/nomad-token}

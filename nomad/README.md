@@ -566,8 +566,9 @@ image whose entrypoint is `wherry`. The container runs the receiver as
 `wherry receiver run --config-file FILE`, with `FILE` the receiver's local
 configuration mounted in the container.
 [`examples/nomad/config.yaml`](../examples/nomad/config.yaml) is one for
-this image, naming the bundle, state directory, plugin directory and
-metrics address, and a source for the `nomad-token` credential.
+this image, naming the bundle, state directory, plugin directory, metrics
+address and a 25-second `drain_timeout`, and a source for the `nomad-token`
+credential.
 
 Build it with Docker, the plugin's version and a wherry release version:
 
@@ -575,8 +576,8 @@ Build it with Docker, the plugin's version and a wherry release version:
 docker build -f examples/nomad/Containerfile --build-arg VERSION=<version> --build-arg WHERRY_VERSION=<version> .
 ```
 
-The receiver needs 30 seconds to stop before a forced kill, as
-[Upgrade wherry](https://benemon.github.io/wherry/operations#upgrade-wherry)
+The receiver's `drain_timeout` and the stop window are set together, as
+[Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)
 describes, so stop the container with `docker stop --time 30`.
 
 ## Run the receiver in Nomad
@@ -599,7 +600,8 @@ the owner needs a Nomad client running as root. Its local configuration
 keeps `state_dir` on the allocation's data directory, which the job's
 [`ephemeral_disk`](https://developer.hashicorp.com/nomad/docs/job-specification/ephemeral_disk),
 sticky with `migrate`, carries to the next allocation. The task's
-`kill_timeout` is 30 seconds.
+`kill_timeout` is 30 seconds, and its local configuration's
+`drain_timeout` is 25 seconds.
 
 The receiver reaches Nomad through the
 [task API](https://developer.hashicorp.com/nomad/api-docs/task-api) and

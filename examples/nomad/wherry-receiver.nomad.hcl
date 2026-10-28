@@ -38,7 +38,7 @@ job "wherry-receiver" {
 
     task "receiver" {
       driver = "docker"
-      # The receiver needs 30 seconds to stop before a forced kill.
+      # The receiver's drain_timeout, 25 seconds, stays below this window.
       kill_timeout = "30s"
 
       config {
@@ -77,6 +77,7 @@ job "wherry-receiver" {
           state_dir: /alloc/data/state
           plugin_dir: /usr/local/libexec/wherry/plugins
           metrics_addr: ":9464"
+          drain_timeout: 25s
         EOT
       }
 

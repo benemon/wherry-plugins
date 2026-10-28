@@ -2,7 +2,7 @@
 
 Every receiver needs the `wherry` binary, its plugins, and a local
 configuration whose elements, `bundle`, `state_dir`, `plugin_dir`,
-`metrics_addr` and `credentials`,
+`metrics_addr`, `drain_timeout` and `credentials`,
 [Receiver local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration)
 describes.
 
