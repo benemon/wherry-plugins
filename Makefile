@@ -96,7 +96,7 @@ dist: ## Cross-compile PLUGIN's release archives and checksums.txt into DIST
 	@set -e; for p in $(PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; name=wherry-plugin-$(PLUGIN)_$(VERSION)_$${os}_$${arch}; \
 		mkdir -p $(DIST)/$$name; \
-		(cd $(PLUGIN) && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -o ../$(DIST)/$$name/wherry-plugin-$(PLUGIN) .); \
+		(cd $(PLUGIN) && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-X main.version=$(VERSION)" -o ../$(DIST)/$$name/wherry-plugin-$(PLUGIN) .); \
 		if [ $(PLUGIN) = kubernetes ] && [ $$os = linux ]; then \
 			(cd kubernetes && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -o ../$(DIST)/$$name/wherry-k8s-helper ./cmd/wherry-k8s-helper); \
 		fi; \

@@ -12,7 +12,11 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// version is set by the release build.
+var version = "dev"
+
 func main() {
+	pluginsdk.Version = version
 	pluginsdk.Serve(newProfile)
 }
 

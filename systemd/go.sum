@@ -1,5 +1,5 @@
-github.com/benemon/wherry/pluginsdk v0.8.0-rc.1 h1:qbi24YyZK+LAoOd8yT9Mh4b8bn0kF/dAaACqn6euxKw=
-github.com/benemon/wherry/pluginsdk v0.8.0-rc.1/go.mod h1:aG3lWrGIa5pllsZbpZQwZuDW0G8nhX38XyAo+WAL0+Y=
+github.com/benemon/wherry/pluginsdk v0.8.0-rc.2 h1:P/BDCFDnE8P+UIDf+erME/Hbo0dc71g/fh57cMYNVkg=
+github.com/benemon/wherry/pluginsdk v0.8.0-rc.2/go.mod h1:aG3lWrGIa5pllsZbpZQwZuDW0G8nhX38XyAo+WAL0+Y=
 github.com/bufbuild/protocompile v0.14.1 h1:iA73zAf/fyljNjQKwYzUHD6AD4R8KMasmwa/FBatYVw=
 github.com/bufbuild/protocompile v0.14.1/go.mod h1:ppVdAIhbr2H8asPk6k4pY7t9zB1OU5DoEw9xY/FUi1c=
 github.com/coreos/go-systemd/v22 v22.7.0 h1:LAEzFkke61DFROc7zNLX/WA2i5J8gYqe0rSj9KI28KA=
