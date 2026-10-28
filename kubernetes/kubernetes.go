@@ -851,6 +851,9 @@ func judge(pod *corev1.Pod) (pluginsdk.JobState, pluginsdk.Terminal, bool) {
 		if ended.Signal != 0 {
 			terminal.Signal = strconv.Itoa(int(ended.Signal))
 		}
+		if ended.Reason != "Completed" {
+			terminal.Reason = ended.Reason
+		}
 	}
 	switch {
 	case pod.DeletionTimestamp != nil:

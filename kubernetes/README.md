@@ -503,6 +503,9 @@ A pod with a `deletionTimestamp`, such as one on a lost node, is ended:
 the plugin opens no log for it, reports exit code -1 when the agent has no
 recorded end, and does not collect from it.
 
+An agent container that ended other than `Completed` is reported with its
+exit code and its termination reason, such as 137 and `OOMKilled`.
+
 ### Secrets
 
 A run's Secret holds its prompt (`prompt`), each environment target
