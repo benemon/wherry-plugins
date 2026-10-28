@@ -11,7 +11,11 @@ import (
 	"github.com/hashicorp/go-hclog"
 )
 
+// version is set by the release build.
+var version = "dev"
+
 func main() {
+	pluginsdk.Version = version
 	pluginsdk.Serve(newProfile)
 }
 

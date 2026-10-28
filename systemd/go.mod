@@ -3,7 +3,7 @@ module github.com/benemon/wherry-plugins/systemd
 go 1.27
 
 require (
-	github.com/benemon/wherry/pluginsdk v0.8.0-rc.1
+	github.com/benemon/wherry/pluginsdk v0.8.0-rc.2
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/godbus/dbus/v5 v5.2.4
 	github.com/hashicorp/go-hclog v1.6.3
