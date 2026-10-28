@@ -1,0 +1,8 @@
+name: fake
+agent: fake
+labels:
+  e2e: fake
+config:
+  runtime:
+    config:
+      image: wherry-e2e-agent:e2e

@@ -30,4 +30,6 @@ along with the [Containerfile](kubernetes/Containerfile),
 This example builds a receiver image with the Nomad plugin, and its [local
 configuration](nomad/config.yaml) takes the Nomad token from `NOMAD_TOKEN`.
 See the [Nomad plugin's full container instructions](../nomad/README.md#run-the-receiver-in-a-container)
-and its [Containerfile](nomad/Containerfile).
+and its [Containerfile](nomad/Containerfile). The [Nomad job](nomad/wherry-receiver.nomad.hcl)
+runs that image as a receiver inside Nomad; see
+[Run the receiver in Nomad](../nomad/README.md#run-the-receiver-in-nomad).

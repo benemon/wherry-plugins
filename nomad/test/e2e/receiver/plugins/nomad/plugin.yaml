@@ -1,0 +1,8 @@
+config:
+  runtime:
+    driver: docker
+    user: "1001"
+    # The docker driver shows the task directory at /local.
+    env:
+      E2E_PROMPT: /local/prompt.txt
+    resources: {cpu: 100, memory_mb: 64}

@@ -562,6 +562,66 @@ The receiver needs 30 seconds to stop before a forced kill, as
 [Upgrade wherry](https://benemon.github.io/wherry/operations#upgrade-wherry)
 describes, so stop the container with `docker stop --time 30`.
 
+## Run the receiver in Nomad
+
+A receiver that drives Nomad can run as a Nomad job itself, in one of three
+shapes. Each receiver has its own bundle, so run one job, of count 1, per
+receiver.
+
+### The receiver container under the docker driver
+
+This is the primary shape, and the CI lane `nomad` in
+[`e2e.yml`](../.github/workflows/e2e.yml) deploys, upgrades and rolls it
+back. [`examples/nomad/wherry-receiver.nomad.hcl`](../examples/nomad/wherry-receiver.nomad.hcl)
+runs the image the [Containerfile](../examples/nomad/Containerfile) builds,
+pushed where the clients pull from:
+
+```sh
+nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle
+nomad job run -var image=registry.example.com/wherry-receiver:<version> examples/nomad/wherry-receiver.nomad.hcl
+```
+
+The job renders the bundle from that variable, which its workload
+identity reads, into the task's secrets directory, owned by the image's
+user with mode 0600; setting the owner needs a Nomad client running as
+root. Its local configuration keeps `state_dir` on the allocation's data
+directory, which the job's sticky ephemeral disk carries to the next
+allocation on the same node. The task's `kill_timeout` is 30 seconds. The
+task shares the client's network, so the plugin reaches the client's API on
+`127.0.0.1:4646` unless the receiver configuration sets `address`, and
+`identity { env = true }` gives it `NOMAD_TOKEN`. With ACLs enabled, attach
+the [ACL policy](#acl-policy) to the job:
+
+```sh
+nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
+```
+
+Upgrade or roll back by running the job again with another image. The old
+receiver releases its runs when it stops, and the new one adopts their
+agent jobs.
+
+### Release archives fetched with artifact blocks
+
+A job whose task fetches the wherry and `wherry-plugin-nomad` release
+archives with [`artifact`](https://developer.hashicorp.com/nomad/docs/job-specification/artifact)
+blocks, and runs `wherry receiver run` from them under the `exec` driver.
+An artifact cannot verify a cosign signature, so verify each release's
+`checksums.txt` as [Install](#install) describes and pin each archive's
+SHA-256 from it in `options.checksum`. The plugin directory the archive
+unpacks into must meet the receiver's ownership and mode checks. The
+version is part of each artifact's source, so an upgrade or rollback is a
+change to the job.
+
+### Versioned host paths
+
+A job that runs `wherry receiver run` from binaries installed on the client
+under a directory per version, such as `/opt/wherry/<version>/wherry` with
+the plugin directory `/opt/wherry/<version>/plugins`, under `raw_exec`, or
+under `exec` with that directory in the client's `chroot_env`. Install each
+version on every client that can run the job before the job names it; an
+upgrade or rollback changes the version the job names, and the previous
+version's directory stays for a rollback.
+
 ## Tests
 
 ```sh

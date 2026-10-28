@@ -27,6 +27,10 @@ RUN test -n "$WHERRY_VERSION" && \
     grep "  $archive\$" checksums.txt | sha256sum -c - && \
     tar -xzf "$archive" --strip-components=1 "${archive%.tar.gz}/wherry"
 
+# The verified wherry binary alone, for the CLI outside Nomad: --target wherry --output type=local,dest=DIR.
+FROM scratch AS wherry
+COPY --from=fetch /fetch/wherry /wherry
+
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8@sha256:2d4c4551af6831dcd26bbf86108c4385de5183ec8fe6b5868f6f9640fe47f4ed
 COPY --from=fetch --chown=0:0 --chmod=0755 /fetch/wherry /usr/local/bin/wherry
 COPY --from=build --chown=0:0 --chmod=0755 /out/wherry-plugin-nomad /usr/local/libexec/wherry/plugins/wherry-plugin-nomad

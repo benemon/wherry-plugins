@@ -1,0 +1,6 @@
+agents:
+  - name: fake
+default_agent: fake
+lock_duration: 15s
+producer_byte_rate: 1048576
+request_percentage: 10
