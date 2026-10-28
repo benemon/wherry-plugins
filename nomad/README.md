@@ -585,30 +585,41 @@ receiver.
 This is the primary shape, and the CI lane `nomad` in
 [`e2e.yml`](../.github/workflows/e2e.yml) deploys, upgrades and rolls it
 back. [`examples/nomad/wherry-receiver.nomad.hcl`](../examples/nomad/wherry-receiver.nomad.hcl)
-runs the image the [Containerfile](../examples/nomad/Containerfile) builds,
-pushed where the clients pull from:
+runs the image the [Containerfile](../examples/nomad/Containerfile) builds.
 
-```sh
-nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle
-nomad job run -var image=registry.example.com/wherry-receiver:<version> examples/nomad/wherry-receiver.nomad.hcl
-```
-
-The job renders the bundle from that variable, which its workload
-identity reads, into the task's secrets directory, owned by the image's
-user with mode 0600; setting the owner needs a Nomad client running as
-root. Its local configuration keeps `state_dir` on the allocation's data
-directory, which the job's
+The job renders the bundle from the Nomad variable
+`nomad/jobs/wherry-receiver`, which its workload identity reads, into the
+task's secrets directory, owned by the image's user with mode 0600; setting
+the owner needs a Nomad client running as root. Its local configuration
+keeps `state_dir` on the allocation's data directory, which the job's
 [`ephemeral_disk`](https://developer.hashicorp.com/nomad/docs/job-specification/ephemeral_disk),
 sticky with `migrate`, carries to the next allocation. The task's
 `kill_timeout` is 30 seconds. The task shares the client's network, so the
 plugin reaches the client's API on `127.0.0.1:4646` unless the receiver
 configuration sets `address` or the task's environment sets `NOMAD_ADDR`.
-`identity { env = true }` gives it `NOMAD_TOKEN`. With ACLs enabled, attach
-the [ACL policy](#acl-policy) to the job:
+`identity { env = true }` gives it `NOMAD_TOKEN`.
 
-```sh
-nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
-```
+Prerequisites: the image pushed where the clients pull from, the
+receiver's bundle `receiver.bundle`, and, with ACLs enabled, the
+[ACL policy](#acl-policy) in `policy.hcl`.
+
+1. Put the bundle in the job's variable:
+
+   ```sh
+   nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle
+   ```
+
+2. Run the job with the image:
+
+   ```sh
+   nomad job run -var image=registry.example.com/wherry-receiver:<version> examples/nomad/wherry-receiver.nomad.hcl
+   ```
+
+3. With ACLs enabled, attach the ACL policy to the job:
+
+   ```sh
+   nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
+   ```
 
 Upgrade or roll back by running the job again with another image. The old
 receiver releases its runs when it stops, and the new one adopts their
@@ -628,13 +639,56 @@ change to the job.
 
 ### Versioned host paths
 
-A job that runs `wherry receiver run` from binaries installed on the client
-under a directory per version, such as `/opt/wherry/<version>/wherry` with
-the plugin directory `/opt/wherry/<version>/plugins`, under `raw_exec`, or
-under `exec` with that directory in the client's `chroot_env`. Install each
-version on every client that can run the job before the job names it; an
-upgrade or rollback changes the version the job names, and the previous
-version's directory stays for a rollback.
+[`examples/nomad/wherry-receiver-host.nomad.hcl`](../examples/nomad/wherry-receiver-host.nomad.hcl)
+runs `wherry receiver run` under the
+[`exec`](https://developer.hashicorp.com/nomad/docs/drivers/exec) driver
+from binaries installed on the client under a directory per version: the
+binary `/usr/local/libexec/wherry/<version>/wherry` and the plugin
+directory `/usr/local/libexec/wherry/<version>/plugins`. The job's variable
+`version` names the directory. `/usr` is in the `exec` driver's default
+chroot, so the client needs no `chroot_env`. Nomad builds the chroot when
+the task starts and keeps each file's owner and mode, so the receiver's
+ownership and mode checks on the plugin directory see the client's.
+
+The job's bundle, state directory, `kill_timeout`, network and workload
+identity are those of
+[the docker shape](#the-receiver-container-under-the-docker-driver). The
+task runs as a dedicated `wherry` user, since the bundle holds the
+receiver's credentials, and the job's `uid` and `gid` variables give the
+rendered bundle's owner: Nomad sets a template's owner by numeric ID only.
+
+Prerequisites: a `wherry` system user and group on every client that can
+run the job, the wherry binary and `wherry-plugin-nomad`, verified as
+[Install](#install) describes, the receiver's bundle `receiver.bundle`,
+and, with ACLs enabled, the [ACL policy](#acl-policy) in `policy.hcl`.
+
+1. On every client that can run the job, install the binary as
+   `/usr/local/libexec/wherry/<version>/wherry` and the plugin in
+   `/usr/local/libexec/wherry/<version>/plugins`, owned by root and
+   writable by no group or other user.
+
+2. Put the bundle in the job's variable:
+
+   ```sh
+   nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle
+   ```
+
+3. Run the job with the version and the `wherry` user's IDs on the clients,
+   which are the same on every client:
+
+   ```sh
+   nomad job run -var version=<version> -var uid=<UID> -var gid=<GID> examples/nomad/wherry-receiver-host.nomad.hcl
+   ```
+
+4. With ACLs enabled, attach the ACL policy to the job:
+
+   ```sh
+   nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
+   ```
+
+Upgrade or roll back by installing the version on every client and
+running the job again with it. The previous version's directory stays for
+a rollback.
 
 ## Tests
 
@@ -675,7 +729,8 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
 4. `04-deploy.sh` builds the receiver image from the checkout and from the
    latest `nomad/v*` tag before `HEAD`, and the fake agent's image. It puts
    the receiver's bundle in its Nomad variable, validates the example job
-   and runs it with the checkout's image.
+   and the host paths example job, and runs the example job with the
+   checkout's image.
 5. `05-run.sh` submits a run as the host and checks its state, reply and
    output.
 6. `06-upgrade.sh` rolls the job to the previous release's image, submits a
