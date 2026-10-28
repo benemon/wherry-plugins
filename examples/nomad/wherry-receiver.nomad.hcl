@@ -1,8 +1,6 @@
 # The wherry receiver as a Nomad service job: the image examples/nomad/Containerfile builds, under the docker driver.
 # The receiver's bundle is the item bundle of the Nomad variable nomad/jobs/wherry-receiver, which the job's workload
-# identity reads; put it before the job runs:
-#   nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle
-#   nomad job run -var image=<image> examples/nomad/wherry-receiver.nomad.hcl
+# identity reads. nomad/README.md has the commands that put it and run the job.
 # Each receiver has its own bundle, so run one job, of count 1, per receiver.
 variable "image" {
   type        = string
@@ -15,8 +13,8 @@ job "wherry-receiver" {
   group "receiver" {
     count = 1
 
-    # The receiver's signing key is in its state directory on the allocation's data directory; a sticky disk carries
-    # it to the next allocation on the same node.
+    # The receiver's signing key is in its state directory on the allocation's data directory. The sticky disk with
+    # migrate carries it to the next allocation, as Nomad's ephemeral_disk documentation describes.
     ephemeral_disk {
       sticky  = true
       migrate = true
@@ -36,7 +34,8 @@ job "wherry-receiver" {
       config {
         image = var.image
         args  = ["receiver", "run", "--config-file", "/local/config.yaml"]
-        # The plugin reaches the Nomad API at NOMAD_ADDR, else the client's own 127.0.0.1:4646.
+        # The plugin reaches the Nomad API at the receiver configuration's address, else NOMAD_ADDR, else the
+        # client's own 127.0.0.1:4646.
         network_mode = "host"
       }
 
@@ -56,7 +55,8 @@ job "wherry-receiver" {
         EOT
       }
 
-      # examples/nomad/config.yaml with the paths of this job.
+      # examples/nomad/config.yaml with the paths of this job and no credentials. A plugin profile that names no
+      # credential takes NOMAD_TOKEN from the workload identity.
       template {
         destination = "local/config.yaml"
         data        = <<-EOT

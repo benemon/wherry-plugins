@@ -318,15 +318,15 @@ datacenters has the runtime's driver detected and healthy.
 
 A stop of an allocation that has finished, or that Nomad has purged or
 garbage-collected, succeeds at once. The plugin stops any other job by
-deregistering it: the agent task carries
+deregistering it. The agent task carries
 [`kill_signal`](https://developer.hashicorp.com/nomad/docs/job-specification/task#kill_signal)
-`SIGTERM` and a 15-second `kill_timeout`, so the Nomad client sends it
-`SIGTERM` and then `SIGKILL` once the timeout passes, a timeout the
-client's `max_kill_timeout`, 30 seconds by default, caps. The stop then
-waits for the allocation to finish, which Nomad bounds by the kill
-timeout, or by marking the allocation lost when its client is gone. A
-stop whose context ends during the wait returns at once with the
-context's error, the job already deregistered.
+`SIGTERM` and a 15-second
+[`kill_timeout`](https://developer.hashicorp.com/nomad/docs/job-specification/task#kill_timeout),
+which the client's
+[`max_kill_timeout`](https://developer.hashicorp.com/nomad/docs/configuration/client#max_kill_timeout)
+caps. The stop then waits for the allocation to finish, with no deadline of
+its own. A stop whose context ends during the wait returns at once with the
+context's error. The job stays deregistered.
 
 The signal goes to the task's main process. A `runtime.config` command that
 starts the agent through a shell must end with `exec <agent>`, so the agent
@@ -564,10 +564,10 @@ configuration mounted in the container.
 this image, naming the bundle, state directory, plugin directory and
 metrics address, and a source for the `nomad-token` credential.
 
-Build it with Docker and a wherry release version:
+Build it with Docker, the plugin's version and a wherry release version:
 
 ```sh
-docker build -f examples/nomad/Containerfile --build-arg WHERRY_VERSION=<version> .
+docker build -f examples/nomad/Containerfile --build-arg VERSION=<version> --build-arg WHERRY_VERSION=<version> .
 ```
 
 The receiver needs 30 seconds to stop before a forced kill, as
@@ -597,10 +597,12 @@ The job renders the bundle from that variable, which its workload
 identity reads, into the task's secrets directory, owned by the image's
 user with mode 0600; setting the owner needs a Nomad client running as
 root. Its local configuration keeps `state_dir` on the allocation's data
-directory, which the job's sticky ephemeral disk carries to the next
-allocation on the same node. The task's `kill_timeout` is 30 seconds. The
-task shares the client's network, so the plugin reaches the client's API on
-`127.0.0.1:4646` unless the receiver configuration sets `address`, and
+directory, which the job's
+[`ephemeral_disk`](https://developer.hashicorp.com/nomad/docs/job-specification/ephemeral_disk),
+sticky with `migrate`, carries to the next allocation. The task's
+`kill_timeout` is 30 seconds. The task shares the client's network, so the
+plugin reaches the client's API on `127.0.0.1:4646` unless the receiver
+configuration sets `address` or the task's environment sets `NOMAD_ADDR`.
 `identity { env = true }` gives it `NOMAD_TOKEN`. With ACLs enabled, attach
 the [ACL policy](#acl-policy) to the job:
 
@@ -644,3 +646,44 @@ Tests that need a Nomad agent run when `WHERRY_NOMAD_DEV_ADDR` names a dev
 agent with `raw_exec` enabled, such as `http://127.0.0.1:4646`, and skip
 otherwise. They include the protocol's conformance suite,
 `github.com/benemon/wherry/pluginsdk/pluginsdktest`.
+
+### End to end on Nomad
+
+[`test/e2e`](test/e2e) runs the receiver job
+[`examples/nomad/wherry-receiver.nomad.hcl`](../examples/nomad/wherry-receiver.nomad.hcl)
+on a Nomad dev agent, as the `nomad` lane of the `e2e` workflow does for
+every change to `nomad/`, `examples/nomad/`, the fake agent or the
+workflow. Each step is a script; with systemd, root through sudo, Docker,
+Nomad, the repository's `nomad/v*` tags on a Linux machine, and the wherry
+release the workflow pins:
+
+```sh
+export WHERRY_VERSION=$(sed -n 's/^  WHERRY_VERSION: //p' .github/workflows/e2e.yml)
+for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; break; }; done
+```
+
+1. `01-nomad.sh` replaces the systemd unit `wherry-nomad` with a Nomad dev
+   agent and the docker driver, and starts a single-broker Kafka with TLS
+   and SCRAM through `test/kafka/up.sh` of `WHERRY_VERSION`.
+2. `02-wherry.sh` fetches the wherry CLI of `WHERRY_VERSION` through the
+   receiver image's verifying fetch stage.
+3. `03-provision.sh` runs `wherry admin` from the machine: the pool, the
+   tenant, the host and the receiver, from the receiver configuration
+   directory `test/e2e/receiver`, whose plugin profile
+   `plugins/nomad/profiles/10-fake.yaml` runs a fake agent. It writes the
+   host's configuration, `config.yaml`, and runs `wherry init`.
+4. `04-deploy.sh` builds the receiver image from the checkout and from the
+   latest `nomad/v*` tag before `HEAD`, and the fake agent's image. It puts
+   the receiver's bundle in its Nomad variable, validates the example job
+   and runs it with the checkout's image.
+5. `05-run.sh` submits a run as the host and checks its state, reply and
+   output.
+6. `06-upgrade.sh` rolls the job to the previous release's image, submits a
+   slow run, and rolls the job to the checkout's image once the run's agent
+   task runs. The new receiver adopts the agent job and completes the run.
+7. `07-rollback.sh` rolls the job back to the previous release's image and
+   completes a run on it.
+
+`collect.sh` writes the Nomad agent's and the receiver's logs and the jobs'
+state to `artifacts` in the state directory, `$E2E_WORK`, by default
+`$TMPDIR/wherry-nomad-e2e`.
