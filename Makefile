@@ -5,7 +5,9 @@ CYCLONEDX           := $(shell go env GOPATH)/bin/cyclonedx-gomod
 
 VERSION   ?= dev
 DIST      ?= dist
-PLATFORMS ?= linux/amd64 linux/arm64
+# A receiver on macOS runs the nomad and kubernetes plugins on its host; the systemd plugin builds for Linux alone.
+DARWIN_PLUGINS := nomad kubernetes
+PLATFORMS ?= linux/amd64 linux/arm64 $(if $(filter $(PLUGIN),$(DARWIN_PLUGINS)),darwin/amd64 darwin/arm64)
 PLUGINS   := nomad kubernetes systemd
 PLUGIN    ?=
 # image builds the receiver image from this checkout and the wherry release WHERRY_VERSION, such as v0.4.0, with
@@ -86,6 +88,7 @@ sbom: $(CYCLONEDX) ## Write a CycloneDX SBOM for PLUGIN
 	fi
 
 .PHONY: dist
+# Agent pods run the Kubernetes helper, so only a Linux archive holds it.
 dist: ## Cross-compile PLUGIN's release archives and checksums.txt into DIST
 	@test -n "$(PLUGIN)" || { echo "FAIL: set PLUGIN"; exit 1; }
 	rm -rf $(DIST)/wherry-plugin-$(PLUGIN)_*
@@ -94,7 +97,7 @@ dist: ## Cross-compile PLUGIN's release archives and checksums.txt into DIST
 		os=$${p%/*}; arch=$${p#*/}; name=wherry-plugin-$(PLUGIN)_$(VERSION)_$${os}_$${arch}; \
 		mkdir -p $(DIST)/$$name; \
 		(cd $(PLUGIN) && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -o ../$(DIST)/$$name/wherry-plugin-$(PLUGIN) .); \
-		if [ $(PLUGIN) = kubernetes ]; then \
+		if [ $(PLUGIN) = kubernetes ] && [ $$os = linux ]; then \
 			(cd kubernetes && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -o ../$(DIST)/$$name/wherry-k8s-helper ./cmd/wherry-k8s-helper); \
 		fi; \
 		cp LICENSE $(PLUGIN)/README.md $(DIST)/$$name/; \

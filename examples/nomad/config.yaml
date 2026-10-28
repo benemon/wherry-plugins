@@ -6,7 +6,8 @@ state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
 # The receiver configuration's plugin config sets credential: nomad-token. The token can come from a file instead, a
-# regular file that its group cannot write and others cannot read: nomad-token: {file: /etc/wherry/nomad-token}
+# regular file that its group cannot write and others cannot read, write or execute:
+# nomad-token: {file: /etc/wherry/nomad-token}
 credentials:
   nomad-token:
     env: NOMAD_TOKEN
