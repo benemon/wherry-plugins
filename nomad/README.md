@@ -653,11 +653,12 @@ ownership and mode checks on the plugin directory see the client's.
 The job's bundle, state directory, `kill_timeout`, network and workload
 identity are those of
 [the docker shape](#the-receiver-container-under-the-docker-driver). The
-task runs as `nobody`, the `exec` driver's default user, and the job sets
-the rendered bundle's owner to 65534, `nobody` on most Linux
-distributions; set the IDs of the task's user on your clients.
+task runs as a dedicated `wherry` user, since the bundle holds the
+receiver's credentials, and the job's `uid` and `gid` variables give the
+rendered bundle's owner: Nomad sets a template's owner by numeric ID only.
 
-Prerequisites: the wherry binary and `wherry-plugin-nomad`, verified as
+Prerequisites: a `wherry` system user and group on every client that can
+run the job, the wherry binary and `wherry-plugin-nomad`, verified as
 [Install](#install) describes, the receiver's bundle `receiver.bundle`,
 and, with ACLs enabled, the [ACL policy](#acl-policy) in `policy.hcl`.
 
@@ -672,10 +673,11 @@ and, with ACLs enabled, the [ACL policy](#acl-policy) in `policy.hcl`.
    nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle
    ```
 
-3. Run the job with the version:
+3. Run the job with the version and the `wherry` user's IDs on the clients,
+   which are the same on every client:
 
    ```sh
-   nomad job run -var version=<version> examples/nomad/wherry-receiver-host.nomad.hcl
+   nomad job run -var version=<version> -var uid=<UID> -var gid=<GID> examples/nomad/wherry-receiver-host.nomad.hcl
    ```
 
 4. With ACLs enabled, attach the ACL policy to the job:

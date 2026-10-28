@@ -9,6 +9,16 @@ variable "version" {
   description = "The directory under /usr/local/libexec/wherry that holds the wherry binary and its plugin directory."
 }
 
+variable "uid" {
+  type        = number
+  description = "The user ID of the wherry user on the clients, which owns the rendered bundle."
+}
+
+variable "gid" {
+  type        = number
+  description = "The group ID of the wherry user's group on the clients."
+}
+
 job "wherry-receiver" {
   type = "service"
 
@@ -30,8 +40,8 @@ job "wherry-receiver" {
 
     task "receiver" {
       driver = "exec"
-      # The exec driver's default user, named here because the bundle's owner below is its ID.
-      user = "nobody"
+      # A dedicated user: the bundle holds the receiver's credentials, and nobody is shared by unrelated processes.
+      user = "wherry"
       # The receiver needs 30 seconds to stop before a forced kill.
       kill_timeout = "30s"
 
@@ -47,13 +57,12 @@ job "wherry-receiver" {
         env = true
       }
 
-      # The task's user reads the bundle. 65534 is nobody's user and group ID on most Linux distributions; set the
-      # IDs of the task's user on the client.
+      # The task's user reads the bundle; Nomad sets a template's owner by numeric ID only.
       template {
         destination = "secrets/receiver.bundle"
         perms       = "0600"
-        uid         = 65534
-        gid         = 65534
+        uid         = var.uid
+        gid         = var.gid
         data        = <<-EOT
           {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .bundle }}{{ end }}
         EOT

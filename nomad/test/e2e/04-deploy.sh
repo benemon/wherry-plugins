@@ -16,7 +16,7 @@ docker build -f "$repo/kubernetes/test/e2e/agent/Containerfile" -t wherry-e2e-ag
 
 nomad var put -out none nomad/jobs/wherry-receiver bundle=@"$work/receiver.bundle" >/dev/null
 nomad job validate -var image=wherry-receiver:e2e "$job"
-nomad job validate -var version=e2e "$host_job"
+nomad job validate -var version=e2e -var uid=1001 -var gid=1001 "$host_job"
 roll wherry-receiver:e2e
 nomad alloc logs -job wherry-receiver receiver | grep -F 'plugin nomad: version e2e ' >/dev/null ||
 	fail "the receiver did not log plugin nomad: version e2e"
