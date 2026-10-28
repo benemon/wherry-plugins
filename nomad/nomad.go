@@ -37,11 +37,13 @@ const (
 	// maxVariable is the size Nomad allows a variable's item keys and values together, measured on Nomad 2.0.7.
 	maxVariable = 64 << 10
 	outputsDir  = taskName + "/local/outputs"
-	stopGrace   = 15 * time.Second
+	// killTimeout is how long the Nomad client waits after the agent task's kill_signal before it sends SIGKILL; a
+	// client's max_kill_timeout, 30 s by default, caps it.
+	killTimeout = 15 * time.Second
 	followPoll  = time.Second
 	// maxBrokenStreams bounds how often a running task's followed log stream is opened again after it breaks.
 	maxBrokenStreams = 5
-	// collectPoll separates the reads of an allocation that Collect waits on, since Stop returns before it ends.
+	// collectPoll separates the reads of an allocation that Collect waits on, since a Stop cut short returns before it ends.
 	collectPoll = 500 * time.Millisecond
 	cleanupWait = 10 * time.Second
 )
@@ -479,8 +481,9 @@ func (profile *Nomad) buildJob(run pluginsdk.Run, path string) (*api.Job, error)
 	}
 	tasks := []*api.Task{{
 		Name: taskName, Driver: runtime.Driver, User: runtime.User, Config: taskConfig, Env: env,
-		Resources: &api.Resources{CPU: cmp.Or(runtime.Resources.CPU, new(defaultCPU)), MemoryMB: cmp.Or(runtime.Resources.MemoryMB, new(defaultMemoryMB))},
-		LogConfig: &api.LogConfig{MaxFiles: new(3), MaxFileSizeMB: new(10)},
+		Resources:  &api.Resources{CPU: cmp.Or(runtime.Resources.CPU, new(defaultCPU)), MemoryMB: cmp.Or(runtime.Resources.MemoryMB, new(defaultMemoryMB))},
+		LogConfig:  &api.LogConfig{MaxFiles: new(3), MaxFileSizeMB: new(10)},
+		KillSignal: "SIGTERM", KillTimeout: new(killTimeout),
 		Templates: templates, Artifacts: artifacts,
 	}}
 	return &api.Job{
@@ -809,9 +812,9 @@ func (profile *Nomad) finished(ctx context.Context, allocID string) *api.Allocat
 	return alloc
 }
 
-// Stop sends SIGTERM and stops the job if the task outlives the grace period;
-// stopping a batch allocation instead would migrate it to a replacement.
-// Requires the alloc-lifecycle and submit-job capabilities.
+// Stop deregisters the job, and the Nomad client sends the agent task its kill_signal, SIGTERM, then SIGKILL once
+// its kill_timeout passes; stopping a batch allocation instead would migrate it to a replacement. Stop returns once
+// the allocation is terminal, so a Lookup after it reads the job as not running. Requires the submit-job capability.
 func (profile *Nomad) Stop(ctx context.Context, encoded pluginsdk.Handle) error {
 	handle, err := decodeHandle(encoded)
 	if err != nil {
@@ -828,26 +831,21 @@ func (profile *Nomad) Stop(ctx context.Context, encoded pluginsdk.Handle) error 
 	if alloc.ClientTerminalStatus() {
 		return nil
 	}
-	// Nomad refuses to signal a task that has just exited, and the server learns of the exit only when the client
-	// next reports, so a refused signal waits for the allocation like a delivered one.
-	signalErr := profile.client.Allocations().Signal(alloc, (&api.QueryOptions{}).WithContext(ctx), taskName, "SIGTERM")
+	if _, _, err := profile.client.Jobs().Deregister(handle.Job, false, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+		return profile.failed("deregister job", err)
+	}
+	// The client kills the task within the kill timeout, and the server marks the allocation lost if the client is
+	// gone, so the wait ends without a deadline of its own.
 	poll := time.NewTicker(time.Second)
 	defer poll.Stop()
-	for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); {
-		if profile.finished(ctx, handle.Alloc) != nil {
-			return nil
-		}
+	for profile.finished(ctx, handle.Alloc) == nil {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-poll.C:
 		}
 	}
-	if signalErr != nil {
-		profile.handled("signal allocation", signalErr)
-	}
-	_, _, err = profile.client.Jobs().Deregister(handle.Job, false, (&api.WriteOptions{}).WithContext(ctx))
-	return profile.failed("deregister job", err)
+	return nil
 }
 
 // Release deletes the run's variables holding the credentials, the prompt and the inputs.

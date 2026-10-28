@@ -81,7 +81,7 @@ The plugin's calls need this policy, with the namespace adjusted:
 
 ```hcl
 namespace "agents" {
-  capabilities = ["submit-job", "list-jobs", "read-job", "read-logs", "read-fs", "alloc-lifecycle"]
+  capabilities = ["submit-job", "list-jobs", "read-job", "read-logs", "read-fs"]
 
   variables {
     path "nomad/jobs/agent-*" {
@@ -99,15 +99,14 @@ node_pool "default" {
 }
 ```
 
-- `submit-job`: register a run's job, deregister one that outlives its
-  stop signal or its dispatch wait, and purge one that never started or
+- `submit-job`: register a run's job, deregister one that is stopped or
+  outlives its dispatch wait, and purge one that never started or
   has been dead for 10 minutes.
 - `list-jobs`: find dead agent jobs to purge.
 - `read-job`: read a job and its allocations.
 - `read-logs`: stream the agent task's standard output.
 - `read-fs`: list and read the agent task's outputs directory once the job
   has stopped.
-- `alloc-lifecycle`: send `SIGTERM` to the agent task.
 - Variables `write`, `read` and `destroy`: hold each run's prompt,
   credentials and input files, and sweep them after the job
   ends. The sweep
@@ -319,13 +318,15 @@ datacenters has the runtime's driver detected and healthy.
 
 A stop of an allocation that has finished, or that Nomad has purged or
 garbage-collected, succeeds at once. The plugin stops any other job by
-sending `SIGTERM` to the agent task and waiting
-up to 15 seconds for its allocation to finish. Nomad refuses to signal a task
-that has just exited, and its server learns of the exit only when the client
-next reports, so a refused signal waits the same way. A stop whose task
-finishes in that time succeeds with nothing counted; otherwise the plugin
-counts a refused signal as a platform error and deregisters the job. A stop
-whose context ends during the wait returns at once with the context's error.
+deregistering it: the agent task carries
+[`kill_signal`](https://developer.hashicorp.com/nomad/docs/job-specification/task#kill_signal)
+`SIGTERM` and a 15-second `kill_timeout`, so the Nomad client sends it
+`SIGTERM` and then `SIGKILL` once the timeout passes, a timeout the
+client's `max_kill_timeout`, 30 seconds by default, caps. The stop then
+waits for the allocation to finish, which Nomad bounds by the kill
+timeout, or by marking the allocation lost when its client is gone. A
+stop whose context ends during the wait returns at once with the
+context's error, the job already deregistered.
 
 ### Credential targets
 
@@ -375,8 +376,8 @@ The agent task receives:
 - the runtime's `env`, driver `config` and `resources`.
 
 The plugin collects outputs from `$NOMAD_TASK_DIR/outputs` through the
-allocation filesystem API, once the allocation is terminal. Stopping a job
-returns before its allocation ends, so the plugin reads the allocation
+allocation filesystem API, once the allocation is terminal. A stop cut
+short returns before its allocation ends, so the plugin reads the allocation
 every 500 ms until it is terminal, for as long as the receiver's collect
 call lasts, and returns an error when the call ends with the allocation
 still running. It lists the whole tree first, and refuses it, reading
@@ -490,7 +491,7 @@ A failed call the plugin returns reaches the receiver with its operation,
 class and text, and the receiver logs it redacted. A log stream the API
 cannot decode fails as `log stream not decodable`, since the API's own error
 quotes the agent's output. A failed call the plugin handles itself, such as
-a refused signal or a poll of the allocation, logs one warning, `nomad call
+a poll of the allocation, logs one warning, `nomad call
 failed`, naming the plugin profile as `profile`, the operation and the class; the line holds no
 URL, token or response body.
 
