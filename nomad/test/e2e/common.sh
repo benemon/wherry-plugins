@@ -5,6 +5,7 @@ repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 e2e=$repo/nomad/test/e2e
 work=${E2E_WORK:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/wherry-nomad-e2e}
 job=$repo/examples/nomad/wherry-receiver.nomad.hcl
+host_job=$repo/examples/nomad/wherry-receiver-host.nomad.hcl
 host_config=$work/host/config.yaml
 export NOMAD_ADDR=http://127.0.0.1:4646 PATH=$work/bin:$PATH
 
