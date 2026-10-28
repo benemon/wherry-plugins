@@ -1,28 +1,10 @@
 # Receiver examples
 
 Every receiver needs the `wherry` binary, its plugins, and a local
-configuration, a YAML file at `/etc/wherry/config.yaml` or at the path
-`wherry receiver run --config-file` names. Its fields, as
-[wherry's configuration reference](https://benemon.github.io/wherry/configuration#receiver-local-configuration)
-describes them, are:
-
-- `bundle`: the receiver's bundle file, required.
-- `state_dir`: the directory holding the receiver's signing key, by default
-  `state` in the bundle file's directory.
-- `plugin_dir`: the directory holding `wherry-plugin-<type>` for each plugin
-  type in the receiver configuration, by default
-  `/usr/local/libexec/wherry/plugins`. The directory and plugin binaries must
-  be owned by root or by the receiver's user, and writable by neither group
-  nor others.
-- `metrics_addr`: the address the receiver serves `/metrics` on; without it
-  the receiver serves no metrics.
-- `credentials`: the source of each platform credential a plugin profile
-  names, a `file`, `env` or `command`. A file must be a regular file that its
-  group cannot write and others cannot read.
-
-The receiver starts a plugin only for a plugin type used in its
-configuration, and configures each of its plugin profiles in it. A plugin
-for an unused type in the directory never runs.
+configuration whose elements, `bundle`, `state_dir`, `plugin_dir`,
+`metrics_addr` and `credentials`,
+[Receiver local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration)
+describes.
 
 These examples show ways to run a receiver and its plugins. Adapt them to
 your environment. They are not published images or packages.

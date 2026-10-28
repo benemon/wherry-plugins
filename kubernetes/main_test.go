@@ -103,7 +103,11 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 	plugin.Config["ca_file"] = newFakeAPI(t).caFile
 	for _, profile := range plugin.Profiles {
 		config := merge(plugin.Config, profile.Config)
-		// The receiver resolves the credential's name and sends the plugin the config without it.
+		// The README says the profiles name kubernetes-token. The receiver resolves the credential's name and sends
+		// the plugin the config without it.
+		if name := config["credential"]; name != "kubernetes-token" {
+			t.Fatalf("profile %s: credential %v, want kubernetes-token", profile.Name, name)
+		}
 		delete(config, "credential")
 		encoded, err := json.Marshal(config)
 		if err != nil {

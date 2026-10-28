@@ -1,9 +1,9 @@
 # wherry-plugin-kubernetes
 
-The wherry plugin for Kubernetes. A wherry receiver starts it from its
-plugin directory for the plugin profiles of plugin type `kubernetes`, and
-runs each of the receiver's runs as one pod and one Secret in a namespace.
-One plugin process hosts every `kubernetes` plugin profile of a receiver.
+The wherry plugin for Kubernetes. A wherry receiver runs it from its
+plugin directory for its `kubernetes` plugin, and one plugin process hosts
+every plugin profile of that plugin. The plugin runs each of the receiver's
+runs as one pod and one Secret in a namespace.
 
 Kubernetes 1.31 or later is the platform. The plugin, the receiver image
 and the receiver's manifests also run unchanged on OpenShift 4.18 or later;
@@ -146,7 +146,8 @@ or as root.
 The API does not restrict the command an exec runs, and the outputs holder
 never mounts the credentials, but a process in it can read them through
 `/proc/<agent pid>/root` while the agent runs, since both share a UID and a
-process namespace. The holder's mounts are hygiene, not isolation.
+process namespace. The holder's mounts keep no process in it from the
+credentials.
 
 Do not:
 
@@ -159,18 +160,17 @@ Do not:
 
 ## Settings
 
-The `config` keys of a plugin profile in the receiver configuration. Each
-key can be set in the plugin's `config`, which every `kubernetes` plugin
-profile of the receiver inherits, or in a plugin profile's `config`. The
-receiver merges the two as
+The `config` keys below are set on the `kubernetes` plugin's `config`,
+which every plugin profile inherits, or on a plugin profile's `config`, and
+wherry merges the two as
 [Plugin profile merge](https://benemon.github.io/wherry/configuration#plugin-profile-merge)
-describes: maps merge recursively, the plugin profile winning on every key
-it sets; a list on a plugin profile replaces the plugin's whole; and
-`key: null` on a plugin profile deletes the inherited key.
+describes. The `credential` key names a [platform credential](#credentials),
+which the receiver resolves from its local configuration and removes from
+the `config` before the plugin sees it. The plugin reads the merged
+`config`:
 
 | Field | Default | Content |
 | --- | --- | --- |
-| `credential` | none | the name of a [platform credential](#credentials), which the receiver resolves from its local configuration and removes from the `config` before the plugin sees it |
 | `address` | in-cluster | API server URL; must be `https://` |
 | `ca_file` | the service account's CA when `address` is empty; the system roots otherwise | CA bundle for the API, a path on the receiver |
 | `namespace` | required | namespace for agent pods and their Secrets; a DNS-1123 label |
@@ -741,14 +741,7 @@ bundle or local configuration.
 
 The receiver runs as
 `wherry receiver run --config-file /etc/wherry/config/config.yaml`, with
-the ConfigMap mounted read-only at `/etc/wherry/config`. The local
-configuration names the bundle at `/etc/wherry/bundle/bundle.yaml`, the
-state directory `/var/lib/wherry/state`, the plugin directory
-`/usr/local/libexec/wherry/plugins` and the metrics address `:9464`, and
-holds no `credentials`. A platform credential, such as a token for a
-remote cluster, comes from a Secret mounted with `defaultMode` 0440 or
-stricter and named in `credentials` as a `file` source
-([Credentials](#credentials)).
+the ConfigMap mounted read-only at `/etc/wherry/config`.
 
 - One replica with the `Recreate` strategy: a receiver is one principal
   with one key pair, and a rolling update would briefly run two.

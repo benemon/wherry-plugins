@@ -1,10 +1,9 @@
 # wherry-plugin-systemd
 
-The wherry plugin for systemd. A wherry receiver starts it from its
-plugin directory for the `systemd` entry of its configuration's `plugins`,
-and runs each of the receiver's runs as one transient service on the
-receiver's own host. One plugin process hosts every `systemd` plugin
-profile of a receiver.
+The wherry plugin for systemd. A wherry receiver runs it from its plugin
+directory for its `systemd` plugin, and one plugin process hosts every
+plugin profile of that plugin. The plugin runs each of the receiver's runs
+as one transient service on the receiver's own host.
 
 systemd 252 or later with the unified cgroup v2 hierarchy, on Linux, is the
 platform. The plugin connects to systemd's
@@ -35,7 +34,7 @@ install it in the receiver's plugin directory, as
 describes with `plugin=systemd`. [Build](#build) covers building it from source.
 
 The receiver checks the plugin directory and binary before it runs them;
-see [Plugins](https://benemon.github.io/wherry/commands#plugins).
+see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
 The plugin is not run by hand.
 
 ## Credentials
@@ -77,20 +76,16 @@ file-write bug, with these settings:
 
 ## Settings
 
-The `config` keys of the receiver configuration's `systemd` plugin entry,
-set on the plugin or on a plugin profile:
+The `config` keys below are set on the `systemd` plugin's `config`, which
+every plugin profile inherits, or on a plugin profile's `config`, and wherry
+merges the two as
+[Plugin profile merge](https://benemon.github.io/wherry/configuration#plugin-profile-merge)
+describes. The `credential` key names a [platform credential](#credentials),
+which this plugin refuses. The plugin reads the merged `config`:
 
 | Field | Default | Content |
 | --- | --- | --- |
 | `runtime` | required | the agent's command, identity and limits |
-
-A plugin profile's `config` is the plugin's `config` merged with its own:
-maps merge recursively, the plugin profile winning on every key it sets; a
-list on a plugin profile replaces the plugin's whole; `key: null` on a
-plugin profile deletes the inherited key. A `credential` key names a
-platform credential, which the receiver resolves from its local
-configuration and this plugin refuses, as [Credentials](#credentials)
-describes.
 
 Unknown fields are errors. The plugin checks the merged section when the
 receiver configures the plugin profile, and the receiver exits with
@@ -575,7 +570,7 @@ From the repository root:
    systemctl daemon-reload && systemctl enable --now wherry-receiver
    ```
 
-The receiver's metrics listen on port 9465, the configuration's
+The receiver's metrics listen on port 9464, the configuration's
 `metrics_addr`. The endpoint has no authentication; admit only Prometheus to it
 with a `firewalld` rule.
 

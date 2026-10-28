@@ -1,10 +1,9 @@
 # wherry-plugin-nomad
 
 The wherry plugin for [HashiCorp Nomad](https://developer.hashicorp.com/nomad).
-A wherry receiver starts it from its plugin directory for its `nomad`
-plugin entry, and runs each of the receiver's runs as one Nomad batch job.
-One plugin process hosts every plugin profile of a receiver's `nomad`
-plugin.
+A wherry receiver runs it from its plugin directory for its `nomad` plugin,
+and one plugin process hosts every plugin profile of that plugin. The plugin
+runs each of the receiver's runs as one Nomad batch job.
 
 ## Build
 
@@ -119,16 +118,14 @@ node_pool "default" {
 
 ## Settings
 
-The `config` keys below are set on the `nomad` plugin's `config` in the
-receiver configuration, which every plugin profile inherits, or on a plugin
-profile's `config`. wherry merges the two as
+The `config` keys below are set on the `nomad` plugin's `config`, which
+every plugin profile inherits, or on a plugin profile's `config`, and wherry
+merges the two as
 [Plugin profile merge](https://benemon.github.io/wherry/configuration#plugin-profile-merge)
-describes: maps merge recursively and the plugin profile wins on every leaf
-it sets, a list replaces the inherited list whole, and `key: null` on a
-plugin profile deletes the inherited key. `credential` names a
-[platform credential](#credentials); the receiver resolves it from its
-local configuration and removes the key before the plugin sees the
-`config`. The plugin reads the merged `config`:
+describes. The `credential` key names a [platform credential](#credentials),
+which the receiver resolves from its local configuration and removes from
+the `config` before the plugin sees it. The plugin reads the merged
+`config`:
 
 | Field | Default | Content |
 | --- | --- | --- |
@@ -318,7 +315,9 @@ as the terminal's reason.
 A plugin profile is ready when some ready, eligible node in its node pool and
 datacenters has the runtime's driver detected and healthy.
 
-The plugin stops a job by sending `SIGTERM` to the agent task and waiting
+A stop of an allocation that has finished, or that Nomad has purged or
+garbage-collected, succeeds at once. The plugin stops any other job by
+sending `SIGTERM` to the agent task and waiting
 up to 15 seconds for its allocation to finish. Nomad refuses to signal a task
 that has just exited, and its server learns of the exit only when the client
 next reports, so a refused signal waits the same way. A stop whose task
@@ -547,19 +546,15 @@ configuration mounted in the container.
 this image, naming the bundle, state directory, plugin directory and
 metrics address, and a source for the `nomad-token` credential.
 
-The plugin needs the Nomad API address and token. Set the address with the
-`address` setting, on the plugin's or a plugin profile's `config`, or with
-`NOMAD_ADDR`. The plugin's `config` names the token with
-`credential: nomad-token`, and the local configuration resolves it with
-`env: NOMAD_TOKEN` from the container's environment, or with `file:` from a
-file mounted in the container that its group cannot write and others
-cannot read, as described in [Credentials](#credentials).
-
 Build it with Docker and a wherry release version:
 
 ```sh
 docker build -f examples/nomad/Containerfile --build-arg WHERRY_VERSION=<version> .
 ```
+
+The receiver needs 30 seconds to stop before a forced kill, as
+[Upgrade wherry](https://benemon.github.io/wherry/operations#upgrade-wherry)
+describes, so stop the container with `docker stop --time 30`.
 
 ## Tests
 
