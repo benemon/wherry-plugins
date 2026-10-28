@@ -2554,6 +2554,28 @@ func TestTerminalCarriesTheStartFailuresMessage(t *testing.T) {
 	}
 }
 
+func TestTerminalNamesAnOOMKill(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		oom  string
+		want pluginsdk.Terminal
+	}{
+		{"oom killed", "true", pluginsdk.Terminal{Started: true, ExitCode: 137, Signal: "9", Reason: "OOMKilled"}},
+		{"signalled", "false", pluginsdk.Terminal{Started: true, ExitCode: 137, Signal: "9"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			events := []*api.TaskEvent{
+				{Type: api.TaskStarted},
+				{Type: api.TaskTerminated, ExitCode: 137, Signal: 9, Details: map[string]string{"oom_killed": test.oom, "exit_code": "137", "signal": "9"}},
+			}
+			alloc := &api.Allocation{ClientStatus: api.AllocClientStatusFailed, TaskStates: map[string]*api.TaskState{taskName: {State: "dead", Failed: true, StartedAt: time.Now(), Events: events}}}
+			if got := terminalOf(alloc); got != test.want {
+				t.Fatalf("terminal %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestStopWaitsForATaskWhoseSignalWasRefused(t *testing.T) {
 	running := api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusRunning, TaskStates: map[string]*api.TaskState{taskName: {State: "running"}}}
 	for _, test := range []struct {

@@ -582,6 +582,10 @@ func terminalOf(alloc *api.Allocation) pluginsdk.Terminal {
 			if event.Signal != 0 {
 				result.Signal = strconv.Itoa(event.Signal)
 			}
+			// Nomad records an OOM kill only in the event's details.
+			if event.Details["oom_killed"] == "true" {
+				result.Reason = "OOMKilled"
+			}
 		}
 	}
 	return result
