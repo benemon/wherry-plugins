@@ -183,7 +183,7 @@ func TestBuildJobFromRuntime(t *testing.T) {
 	}
 	runtime := testConfig("").Runtime
 	wantEnv := maps.Clone(pluginsdk.AgentEnvironment)
-	maps.Copy(wantEnv, map[string]string{"WHERRY_TEST_ENV": "from-runtime", "HOME": "${NOMAD_TASK_DIR}",
+	maps.Copy(wantEnv, map[string]string{"WHERRY_TEST_ENV": "from-runtime",
 		"WHERRY_INPUT_DIR": "${NOMAD_TASK_DIR}/inputs", "WHERRY_OUTPUT_DIR": "${NOMAD_TASK_DIR}/outputs", "WHERRY_CREDENTIALS_DIR": "${NOMAD_SECRETS_DIR}/credentials"})
 	tasks := job.TaskGroups[0].Tasks
 	if len(tasks) != 1 || tasks[0].Name != taskName || tasks[0].Driver != "raw_exec" || !reflect.DeepEqual(tasks[0].Config, runtime.Config) ||
@@ -206,6 +206,27 @@ func TestBuildJobFromRuntime(t *testing.T) {
 	}
 	if templates := job.TaskGroups[0].Tasks[0].Templates; len(templates) != 1 || *templates[0].DestPath != "local/prompt.txt" {
 		t.Fatalf("run without a credential has templates %#v", templates)
+	}
+}
+
+// TestBuildJobHomeFollowsDriver checks that a driver isolating the task's filesystem gets HOME at the task directory
+// and raw_exec inherits the user's.
+func TestBuildJobHomeFollowsDriver(t *testing.T) {
+	for driver, want := range map[string]string{"raw_exec": "", "docker": "${NOMAD_TASK_DIR}", "podman": "${NOMAD_TASK_DIR}", "exec": "${NOMAD_TASK_DIR}"} {
+		config := testConfig("http://127.0.0.1:1")
+		config.Runtime.Driver = driver
+		profile, err := build(config, testPool, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		run := testRun("home")
+		job, err := profile.buildJob(run, profile.variablePath(run.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if home, set := job.TaskGroups[0].Tasks[0].Env["HOME"]; home != want || set != (want != "") {
+			t.Errorf("%s: HOME %q (set %t), want %q", driver, home, set, want)
+		}
 	}
 }
 
@@ -461,8 +482,9 @@ func TestDispatchDeliversPromptAndCredential(t *testing.T) {
 	run := testRun("render")
 	handle := dispatch(t, profile, ctx, run)
 	got := output(t, ctx, profile, handle)
-	if !strings.Contains(got, "prompt=hello-prompt token=test-credential env=from-runtime home=/") || !strings.Contains(got, "/agent/local\"}") {
-		t.Fatalf("task output does not prove prompt, credential, env and HOME delivered: %q", got)
+	// raw_exec leaves HOME to the Nomad client's environment.
+	if !strings.Contains(got, "prompt=hello-prompt token=test-credential env=from-runtime home=/") || strings.Contains(got, "/agent/local\"}") {
+		t.Fatalf("task output does not prove prompt, credential, env and an inherited HOME: %q", got)
 	}
 }
 

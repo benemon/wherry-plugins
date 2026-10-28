@@ -413,7 +413,10 @@ func (profile *Nomad) buildJob(run pluginsdk.Run, path string) (*api.Job, error)
 	runtime := profile.runtime
 	jobID := profile.jobID(run.ID)
 	env := pluginsdk.AgentEnv(runtime.Env)
-	env["HOME"] = "${NOMAD_TASK_DIR}"
+	// A task on a driver that does not isolate its filesystem keeps the user's HOME, so an agent CLI finds its login.
+	if slices.Contains(isolated, runtime.Driver) {
+		env["HOME"] = "${NOMAD_TASK_DIR}"
+	}
 	env["WHERRY_INPUT_DIR"] = "${NOMAD_TASK_DIR}/inputs"
 	env["WHERRY_OUTPUT_DIR"] = "${NOMAD_TASK_DIR}/outputs"
 	env["WHERRY_CREDENTIALS_DIR"] = "${NOMAD_SECRETS_DIR}/credentials"

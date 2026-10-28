@@ -180,8 +180,9 @@ the `exec`, `java` and `raw_exec` drivers set no group, so the plugin
 refuses either field on a driver that cannot set it, with an error naming
 the field and the driver.
 
-The plugin sets `HOME`, `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR`,
-`WHERRY_CREDENTIALS_DIR`, `WHERRY_MODEL` when the task names a model, and the
+The plugin sets `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR`,
+`WHERRY_CREDENTIALS_DIR`, `HOME` on a driver that isolates the task's
+filesystem, `WHERRY_MODEL` when the task names a model, and the
 variables of the plugin protocol's `AgentEnvironment` over `env`. [Agent jobs](#agent-jobs) describes the
 job it builds.
 
@@ -358,7 +359,11 @@ The agent task receives:
   driver the paths are on the host and depend on the allocation, so the
   plugin reports `${NOMAD_TASK_DIR}` and `${NOMAD_SECRETS_DIR}` forms and the
   prompt's template replaces them with the task's own values;
-- `HOME` set to the task directory;
+- `HOME` set to the task directory for the `docker`, `exec`, `java` and
+  `podman` drivers, which isolate the task's filesystem. On any other
+  driver, such as `raw_exec`, the plugin leaves `HOME` unset, so the task
+  keeps the `HOME` of the runtime's `env` or the Nomad client's environment
+  and an agent CLI finds its own login;
 - `WHERRY_MODEL` set to the task's model, one the pool's terms allow, when
   the task has one, and not set by the plugin otherwise. The plugin never puts
   it in the driver `config`; the command reads it from the environment, such
