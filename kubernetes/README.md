@@ -946,7 +946,7 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    agent's image, loads both into kind, and deploys the receiver as
    [Deploy](#deploy) says, into a namespace enforcing Pod Security
    `restricted`.
-5. `05-runs.sh` submits and awaits, as the host: a run it cancels, a plain
+5. `05-runs.sh` submits and watches, as the host: a run it cancels, a plain
    run, a credentialed run, a run with an input file and a run whose image
    is missing. It checks each state, the result and output, the
    credential's mode 0600 in a 0700 directory, the input's SHA-256, the

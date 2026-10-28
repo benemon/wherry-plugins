@@ -56,12 +56,13 @@ submit() {
 	echo "$run"
 }
 
-# complete awaits the run $1 into $work/<run>.await and its outputs into $work/outputs/<run>, and checks that it
-# completed with the agent's reply and its prompt as echo.txt.
+# complete watches the run $1 into $work/<run>.watch and its outputs into $work/outputs/<run>, and checks that it
+# completed with the agent's reply and its prompt as echo.txt. watch prints the transcript before the state line.
 complete() {
-	wherry await "$1" --config-file "$host_config" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.await" || true
-	[ "$(head -n 1 "$work/$1.await")" = TASK_STATE_COMPLETED ] ||
-		fail "run $1 ended $(head -n 1 "$work/$1.await"); want TASK_STATE_COMPLETED"
-	grep -x -F 'uid 1001' "$work/$1.await" >/dev/null || fail "run $1 did not reply 'uid 1001'"
+	local state
+	wherry watch "$1" --config-file "$host_config" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.watch" || true
+	state=$(grep -x 'TASK_STATE_[A-Z_]*' "$work/$1.watch" | tail -n 1)
+	[ "$state" = TASK_STATE_COMPLETED ] || fail "run $1 ended $state; want TASK_STATE_COMPLETED"
+	grep -x -F 'uid 1001' "$work/$1.watch" >/dev/null || fail "run $1 did not reply 'uid 1001'"
 	grep -F "$2" "$work/outputs/$1/echo.txt" >/dev/null || fail "run $1 returned no echo.txt"
 }

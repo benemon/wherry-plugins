@@ -15,7 +15,7 @@ permissions:
 env:
   # The wherry release whose CLI provisions and submits, and which the receiver image holds.
   # ci.yml's nomad-image job pins the same release; change both together.
-  WHERRY_VERSION: v0.1.0-rc.20
+  WHERRY_VERSION: v0.1.0-rc.24
   KIND_VERSION: v0.33.0
   KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
   # A Nomad CE release; NOMAD_SHA256 is its linux_amd64 zip's line in the release's SHA256SUMS.
@@ -55,7 +55,7 @@ jobs:
       - name: Build, load and deploy the receiver
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/04-deploy.sh
-      - name: Submit and await the runs
+      - name: Submit and watch the runs
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/05-runs.sh
       - name: Collect the receiver log and cluster state
@@ -105,7 +105,7 @@ jobs:
       - name: Build the images, validate the example job and run the receiver
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/04-deploy.sh
-      - name: Submit and await a run
+      - name: Submit and watch a run
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/05-run.sh
       - name: Upgrade from the previous release with a run in flight
