@@ -812,9 +812,8 @@ func (profile *Nomad) finished(ctx context.Context, allocID string) *api.Allocat
 	return alloc
 }
 
-// Stop deregisters the job, and the Nomad client sends the agent task its kill_signal, SIGTERM, then SIGKILL once
-// its kill_timeout passes; stopping a batch allocation instead would migrate it to a replacement. Stop returns once
-// the allocation is terminal, so a Lookup after it reads the job as not running. Requires the submit-job capability.
+// Stop deregisters the job, since Nomad replaces a batch allocation stopped alone. Stop returns once the allocation
+// is terminal, so a Lookup after it reads the job as not running. Requires the submit-job capability.
 func (profile *Nomad) Stop(ctx context.Context, encoded pluginsdk.Handle) error {
 	handle, err := decodeHandle(encoded)
 	if err != nil {

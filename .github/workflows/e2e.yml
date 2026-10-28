@@ -88,11 +88,8 @@ jobs:
         if: steps.changes.outputs.changed == 'true'
         run: |
           zip=nomad_${NOMAD_VERSION}_linux_amd64.zip
-          curl -fsSL --remote-name-all --output-dir "$RUNNER_TEMP" \
-            "https://releases.hashicorp.com/nomad/$NOMAD_VERSION/$zip" \
-            "https://releases.hashicorp.com/nomad/$NOMAD_VERSION/nomad_${NOMAD_VERSION}_SHA256SUMS"
+          curl -fsSL --output-dir "$RUNNER_TEMP" -O "https://releases.hashicorp.com/nomad/$NOMAD_VERSION/$zip"
           cd "$RUNNER_TEMP"
-          grep "  $zip\$" "nomad_${NOMAD_VERSION}_SHA256SUMS" | sha256sum -c -
           echo "$NOMAD_SHA256  $zip" | sha256sum -c -
           unzip -o "$zip" nomad
           sudo install -m 0755 nomad /usr/local/bin/nomad
