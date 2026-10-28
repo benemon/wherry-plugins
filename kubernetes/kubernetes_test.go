@@ -1756,9 +1756,9 @@ var capturedStates = []struct {
 }{
 	{"running", pluginsdk.JobRunning, true, "", ""},
 	{"exit-0", pluginsdk.JobEnded, true, "", ""},
-	{"exit-1", pluginsdk.JobEnded, true, "", ""},
-	{"sigterm", pluginsdk.JobEnded, true, "", ""},
-	{"oom", pluginsdk.JobEnded, true, "", ""},
+	{"exit-1", pluginsdk.JobEnded, true, "", "Error"},
+	{"sigterm", pluginsdk.JobEnded, true, "", "Error"},
+	{"oom", pluginsdk.JobEnded, true, "", "OOMKilled"},
 	{"image-pull-backoff", pluginsdk.JobNeverStarted, true, "image", `Back-off pulling image "registry.invalid/wherry-conformance:0": ErrImagePull: initializing source docker://registry.invalid/wherry-conformance:0: pinging container registry registry.invalid: Get "https://registry.invalid/v2/": dial tcp: lookup registry.invalid: no such host`},
 	{"create-container-config-error", pluginsdk.JobNeverStarted, true, "config", `container has runAsNonRoot and image will run as root (pod: "agent-44575cf5b285-capture-create-container-config-error_wherry-agents(6f1c0b8e)", container: agent)`},
 	{"start-error", pluginsdk.JobNeverStarted, true, "start", `failed to create containerd task: exec: "/bin/agent-run": stat /bin/agent-run: no such file or directory`},
@@ -2067,6 +2067,37 @@ func TestFollowReturnsTerminal(t *testing.T) {
 	_, terminal, err := followAll(t, profile, handle, 0)
 	if want := (pluginsdk.Terminal{Started: true, ExitCode: 137, Signal: "9", Node: "worker-2"}); err != nil || terminal != want {
 		t.Fatalf("terminal %+v, %v; want %+v", terminal, err, want)
+	}
+}
+
+func TestFollowCarriesTheAgentsTermination(t *testing.T) {
+	fast(t)
+	for _, test := range []struct {
+		reason string
+		code   int32
+		want   pluginsdk.Terminal
+	}{
+		{"OOMKilled", 137, pluginsdk.Terminal{Started: true, ExitCode: 137, Node: "worker-1", Reason: "OOMKilled"}},
+		{"Completed", 0, pluginsdk.Terminal{Started: true, Node: "worker-1"}},
+		{"Error", 1, pluginsdk.Terminal{Started: true, ExitCode: 1, Node: "worker-1", Reason: "Error"}},
+	} {
+		t.Run(test.reason, func(t *testing.T) {
+			api := newFakeAPI(t)
+			profile, _ := api.profile(t)
+			logs, _ := logStream(func(int) []byte { return []byte("done\n") }, nil)
+			api.set(func() {
+				api.logs = logs
+				api.kubelet = func(pod *corev1.Pod) {
+					agent := exited("agent", test.code)
+					agent.State.Terminated.Reason = test.reason
+					setStatus(pod, corev1.PodRunning, exited("inputs", 0), agent, runningStatus("outputs"))
+				}
+			})
+			_, terminal, err := followAll(t, profile, handleOf(api.agentPod(t, profile, "ended", nil)), 0)
+			if err != nil || terminal != test.want {
+				t.Fatalf("terminal %+v, %v; want %+v", terminal, err, test.want)
+			}
+		})
 	}
 }
 
@@ -3396,8 +3427,8 @@ func TestCollectAfterAgentOOMOnKubernetes(t *testing.T) {
 		c.Runtime.Resources.Memory = "64Mi"
 	})
 	handle, _, terminal := devTurn(t, ctx, profile, devRun(t, profile, "oom"))
-	if !terminal.Started || terminal.ExitCode == 0 {
-		t.Fatalf("terminal %+v; want the agent killed", terminal)
+	if !terminal.Started || terminal.ExitCode != 137 || terminal.Reason != "OOMKilled" {
+		t.Fatalf("terminal %+v; want the agent OOMKilled with exit code 137", terminal)
 	}
 	if got := devOutputs(t, ctx, profile, handle, limits)["report.md"].Data; string(got) != "report\n" {
 		t.Fatalf("collected %q after the agent's OOM", got)
