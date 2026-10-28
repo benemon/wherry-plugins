@@ -189,6 +189,7 @@ func TestBuildJobFromRuntime(t *testing.T) {
 	if len(tasks) != 1 || tasks[0].Name != taskName || tasks[0].Driver != "raw_exec" || !reflect.DeepEqual(tasks[0].Config, runtime.Config) ||
 		*tasks[0].Resources.CPU != 100 || *tasks[0].Resources.MemoryMB != 64 ||
 		*tasks[0].LogConfig.MaxFiles != 3 || *tasks[0].LogConfig.MaxFileSizeMB != 10 ||
+		tasks[0].KillSignal != "SIGTERM" || tasks[0].KillTimeout == nil || *tasks[0].KillTimeout != killTimeout ||
 		!reflect.DeepEqual(tasks[0].Env, wantEnv) {
 		t.Fatalf("runtime not carried: %#v", tasks)
 	}
@@ -661,32 +662,53 @@ func TestStopDoesNotReplace(t *testing.T) {
 	}
 }
 
-func TestStopSignalsRun(t *testing.T) {
+// Stop deregisters the job, and Nomad delivers the task's kill signal; a task that exits on it keeps its outputs.
+func TestStopDeregistersAndNomadSignalsTheTask(t *testing.T) {
 	profile, ctx := devProfile(t)
-	script := `trap 'echo "{\"type\":\"result\",\"result\":\"terminated\"}"; exit 143' TERM; echo started; sleep 60 & wait $!`
-	handle := dispatch(t, profile, ctx, scriptRun(profile, "stop-signal", script))
+	script := `mkdir -p "$WHERRY_OUTPUT_DIR"; trap 'echo stopped > "$WHERRY_OUTPUT_DIR/report.md"; echo "{\"type\":\"result\",\"result\":\"terminated\"}"; exit 143' TERM; echo started; sleep 60 & wait $!`
+	run := scriptRun(profile, "stop-signal", script)
+	handle := dispatch(t, profile, ctx, run)
 	waitRunning(t, ctx, profile, handle)
 	if err := profile.Stop(ctx, handle); err != nil {
 		t.Fatal(err)
+	}
+	if job, err := profile.Lookup(ctx, run.ID); err != nil || job.State != pluginsdk.JobEnded {
+		t.Fatalf("lookup after stop = %+v, %v; want ended", job, err)
 	}
 	lines := collect(t, ctx, profile, handle)
 	if len(lines) == 0 || string(lines[len(lines)-1].Data) != `{"type":"result","result":"terminated"}` {
 		t.Fatalf("lines = %#v, want the trap's output last", lines)
 	}
-	alloc, _, err := profile.client.Allocations().Info(decoded(t, handle).Alloc, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	job, _, err := profile.client.Jobs().Info(decoded(t, handle).Job, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !alloc.ClientTerminalStatus() || alloc.DesiredStatus != api.AllocDesiredStatusRun || *job.Stop {
-		t.Fatalf("client=%s desired=%s job stopped=%v; want the signal alone to end the run", alloc.ClientStatus, alloc.DesiredStatus, *job.Stop)
+	task := job.TaskGroups[0].Tasks[0]
+	if !*job.Stop || task.KillSignal != "SIGTERM" || *task.KillTimeout != killTimeout {
+		t.Fatalf("job stopped=%v, kill signal %q, kill timeout %v; want deregistered with SIGTERM and %v", *job.Stop, task.KillSignal, *task.KillTimeout, killTimeout)
+	}
+	alloc, _, err := profile.client.Allocations().Info(decoded(t, handle).Alloc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !alloc.ClientTerminalStatus() || alloc.DesiredStatus != api.AllocDesiredStatusStop {
+		t.Fatalf("client=%s desired=%s; want the deregistration to end the run", alloc.ClientStatus, alloc.DesiredStatus)
+	}
+	outputs := make(chan pluginsdk.Output, 4)
+	if err := profile.Collect(ctx, handle, wide, outputs); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	close(outputs)
+	var got []string
+	for output := range outputs {
+		got = append(got, output.Name+"="+string(output.Data))
+	}
+	if !slices.Equal(got, []string{"report.md=stopped\n"}) {
+		t.Fatalf("outputs %v; want the trap's report", got)
 	}
 }
 
-func TestStopAlreadyTerminalDoesNotSignal(t *testing.T) {
+func TestStopAlreadyTerminalDoesNotDeregister(t *testing.T) {
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requests = append(requests, request.Method+" "+request.URL.Path)
@@ -1965,7 +1987,7 @@ func TestCollectStreamsTheOutcomeFile(t *testing.T) {
 	}
 }
 
-// Stop on Nomad returns before the allocation ends, so Collect waits for it within its context.
+// A Stop cut short returns before the allocation ends, so Collect waits for it within its context.
 func TestCollectWaitsForTheAllocationToEnd(t *testing.T) {
 	profile, _, reads := collectServer(t, 2, nil, capturedFiles)
 	if outputs, err := collectAll(profile, wide); err != nil || len(outputs) != 6 || !slices.Equal(reads(), []string{"report.md", "sub/notes.txt"}) {
@@ -2576,59 +2598,51 @@ func TestTerminalNamesAnOOMKill(t *testing.T) {
 	}
 }
 
-func TestStopWaitsForATaskWhoseSignalWasRefused(t *testing.T) {
+func TestStopDeregistersAndWaitsForTheAllocation(t *testing.T) {
 	running := api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusRunning, TaskStates: map[string]*api.TaskState{taskName: {State: "running"}}}
-	for _, test := range []struct {
-		name string
-		// exitedAt is the allocation read from which Nomad reports the task complete; 0 is never.
-		exitedAt int
-		// stopped is whether Stop counts the signal's failure and stops the job.
-		stopped bool
-	}{
-		{"exit reported late", 3, false},
-		{"still running", 0, true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			reads := 0
-			profile, requests := nomadServer(t, map[string]http.HandlerFunc{
-				"GET /v1/allocation/alloc-1": func(response http.ResponseWriter, _ *http.Request) {
-					alloc := running
-					if reads++; test.exitedAt > 0 && reads >= test.exitedAt {
-						alloc = api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusComplete}
-					}
-					_ = json.NewEncoder(response).Encode(&alloc)
-				},
-				"PUT /v1/client/allocation/alloc-1/signal": func(response http.ResponseWriter, _ *http.Request) {
-					http.Error(response, "task not running", http.StatusInternalServerError)
-				},
-				"DELETE /v1/job/agent-1": serve([]byte(`{"EvalID":"eval-1"}`)),
-			})
-			if err := profile.Stop(context.Background(), pluginsdk.Handle{Data: []byte(`{"v":1,"job":"agent-1","alloc":"alloc-1","format":""}`)}); err != nil {
-				t.Fatal(err)
+	reads := 0
+	var purge string
+	profile, requests := nomadServer(t, map[string]http.HandlerFunc{
+		"GET /v1/allocation/alloc-1": func(response http.ResponseWriter, _ *http.Request) {
+			alloc := running
+			// Nomad reports the task complete from the third read, after the client has delivered the kill signal.
+			if reads++; reads >= 3 {
+				alloc = api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusComplete}
 			}
-			counted, want := samples(t, profile)["wherry_plugin_platform_errors_total/unavailable"].Value, 0.0
-			if test.stopped {
-				want = 1
-			}
-			if stopped := slices.Contains(requests(), "DELETE /v1/job/agent-1"); counted != want || stopped != test.stopped {
-				t.Fatalf("counted %v errors, stopped the job %t; want %v, %t", counted, stopped, want, test.stopped)
-			}
-		})
+			_ = json.NewEncoder(response).Encode(&alloc)
+		},
+		"DELETE /v1/job/agent-1": func(response http.ResponseWriter, request *http.Request) {
+			purge = request.URL.Query().Get("purge")
+			_, _ = response.Write([]byte(`{"EvalID":"eval-1"}`))
+		},
+	})
+	if err := profile.Stop(context.Background(), pluginsdk.Handle{Data: []byte(`{"v":1,"job":"agent-1","alloc":"alloc-1","format":""}`)}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"GET /v1/allocation/alloc-1", "DELETE /v1/job/agent-1", "GET /v1/allocation/alloc-1", "GET /v1/allocation/alloc-1"}
+	if got := requests(); !slices.Equal(got, want) || purge == "true" {
+		t.Fatalf("requests %v, purge %q; want %v without a purge", got, purge, want)
+	}
+	if counted := samples(t, profile)["wherry_plugin_platform_errors_total/unavailable"].Value; counted != 0 {
+		t.Fatalf("counted %v errors; want none", counted)
 	}
 }
 
-func TestStopReturnsWhenCancelledDuringTheGrace(t *testing.T) {
+func TestStopReturnsWhenCancelledDuringTheWait(t *testing.T) {
 	running := api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusRunning, TaskStates: map[string]*api.TaskState{taskName: {State: "running"}}}
-	profile, _ := nomadServer(t, map[string]http.HandlerFunc{
-		"GET /v1/allocation/alloc-1":               func(response http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(response).Encode(&running) },
-		"PUT /v1/client/allocation/alloc-1/signal": serve([]byte(`{}`)),
+	profile, requests := nomadServer(t, map[string]http.HandlerFunc{
+		"GET /v1/allocation/alloc-1": func(response http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(response).Encode(&running) },
+		"DELETE /v1/job/agent-1":     serve([]byte(`{"EvalID":"eval-1"}`)),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 	err := profile.Stop(ctx, pluginsdk.Handle{Data: []byte(`{"v":1,"job":"agent-1","alloc":"alloc-1","format":""}`)})
 	if elapsed := time.Since(start); !errors.Is(err, context.DeadlineExceeded) || elapsed > 3*time.Second {
-		t.Fatalf("Stop returned %v after %v; want the context's error well inside the %v grace", err, elapsed, stopGrace)
+		t.Fatalf("Stop returned %v after %v; want the context's error well inside the %v kill timeout", err, elapsed, killTimeout)
+	}
+	if !slices.Contains(requests(), "DELETE /v1/job/agent-1") {
+		t.Fatalf("requests %v; want the job deregistered before the wait", requests())
 	}
 }
 
