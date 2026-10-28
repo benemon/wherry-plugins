@@ -328,6 +328,12 @@ timeout, or by marking the allocation lost when its client is gone. A
 stop whose context ends during the wait returns at once with the
 context's error, the job already deregistered.
 
+The signal goes to the task's main process. A `runtime.config` command that
+starts the agent through a shell must end with `exec <agent>`, so the agent
+becomes that process; an agent the shell keeps as a child never receives
+`SIGTERM` and is killed when the timeout passes, with or without the
+driver's `init`.
+
 ### Credential targets
 
 Nomad renders environment targets through `$NOMAD_SECRETS_DIR/wherry.env`, a
@@ -397,6 +403,11 @@ delivered credential values covers it.
 
 The plugin reads the agent task's standard output. For the `podman` driver
 it reads the logs in CRI format.
+
+On a client with SELinux enforcing, the Podman driver must relabel the task
+directory, or the agent cannot read its prompt and inputs: set
+[`volumes { selinuxlabel = "z" }`](https://developer.hashicorp.com/nomad/plugins/drivers/podman#plugin-options)
+in the client's Podman plugin configuration.
 
 ### Variables
 
