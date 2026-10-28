@@ -564,10 +564,10 @@ configuration mounted in the container.
 this image, naming the bundle, state directory, plugin directory and
 metrics address, and a source for the `nomad-token` credential.
 
-Build it with Docker and a wherry release version:
+Build it with Docker, the plugin's version and a wherry release version:
 
 ```sh
-docker build -f examples/nomad/Containerfile --build-arg WHERRY_VERSION=<version> .
+docker build -f examples/nomad/Containerfile --build-arg VERSION=<version> --build-arg WHERRY_VERSION=<version> .
 ```
 
 The receiver needs 30 seconds to stop before a forced kill, as

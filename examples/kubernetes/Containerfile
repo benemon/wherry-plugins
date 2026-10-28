@@ -5,9 +5,10 @@ FROM --platform=$BUILDPLATFORM ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06
 
 FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS build
 ARG TARGETARCH
+ARG VERSION=dev
 WORKDIR /src
 COPY kubernetes/ .
-RUN export CGO_ENABLED=0 GOARCH=$TARGETARCH && go build -trimpath -o /out/wherry-plugin-kubernetes . && \
+RUN export CGO_ENABLED=0 GOARCH=$TARGETARCH && go build -trimpath -ldflags "-X main.version=${VERSION}" -o /out/wherry-plugin-kubernetes . && \
     go build -trimpath -o /out/wherry-k8s-helper ./cmd/wherry-k8s-helper
 
 # WHERRY_OS and WHERRY_ARCH fetch another platform's archive for the wherry target, such as darwin for a workstation.
