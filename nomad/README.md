@@ -599,10 +599,21 @@ the owner needs a Nomad client running as root. Its local configuration
 keeps `state_dir` on the allocation's data directory, which the job's
 [`ephemeral_disk`](https://developer.hashicorp.com/nomad/docs/job-specification/ephemeral_disk),
 sticky with `migrate`, carries to the next allocation. The task's
-`kill_timeout` is 30 seconds. The task shares the client's network, so the
-plugin reaches the client's API on `127.0.0.1:4646` unless the receiver
-configuration sets `address` or the task's environment sets `NOMAD_ADDR`.
-`identity { env = true }` gives it `NOMAD_TOKEN`.
+`kill_timeout` is 30 seconds.
+
+The receiver reaches Nomad through the
+[task API](https://developer.hashicorp.com/nomad/api-docs/task-api) and
+Kafka through the network. The task's environment sets `NOMAD_ADDR` to
+`unix:///secrets/api.sock`, the task API socket in the task's secrets
+directory, which the plugin dials when the receiver configuration leaves
+`address` unset. `identity { env = true }` gives it `NOMAD_TOKEN`, the
+workload identity's token, which the task API takes. The group's
+[`network`](https://developer.hashicorp.com/nomad/docs/job-specification/network)
+block runs the task in a bridge network, which needs the
+[CNI reference plugins](https://developer.hashicorp.com/nomad/docs/networking/cni)
+on the client, and maps the receiver's metrics on 9464 to the dynamic port
+`metrics`. The task reaches the Kafka brokers through the bridge, so the
+brokers must advertise an address other than loopback.
 
 Prerequisites: the image pushed where the clients pull from, the
 receiver's bundle `receiver.bundle`, and, with ACLs enabled, the
@@ -654,9 +665,12 @@ directory `/usr/local/libexec/wherry/<version>/plugins`. The job's variable
 [default chroot](https://developer.hashicorp.com/nomad/docs/deploy/task-driver/exec#chroot),
 so the client needs no `chroot_env`.
 
-The job's bundle, state directory, `kill_timeout`, network and workload
-identity are those of
+The job's bundle, state directory, `kill_timeout` and workload identity
+are those of
 [the docker shape](#the-receiver-container-under-the-docker-driver). The
+task shares the client's network, so the plugin reaches the client's API
+on `127.0.0.1:4646` unless the receiver configuration sets `address` or the
+task's environment sets `NOMAD_ADDR`. The
 task runs as a dedicated `wherry` user, since the bundle holds the
 receiver's credentials. The job's `uid` and `gid` variables set the
 rendered bundle's owner through the template's

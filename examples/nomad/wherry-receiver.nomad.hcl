@@ -1,4 +1,5 @@
 # The wherry receiver as a Nomad service job: the image examples/nomad/Containerfile builds, under the docker driver.
+# The receiver reaches the Nomad API through the task API socket and Kafka through the group's bridge network.
 # The receiver's bundle is the item bundle of the Nomad variable nomad/jobs/wherry-receiver, which the job's workload
 # identity reads. nomad/README.md has the commands that put it and run the job.
 # Each receiver has its own bundle, so run one job, of count 1, per receiver.
@@ -20,6 +21,15 @@ job "wherry-receiver" {
       migrate = true
     }
 
+    # The receiver's metrics listen on 9464 in the allocation's network namespace, mapped to a dynamic port on the
+    # client.
+    network {
+      mode = "bridge"
+      port "metrics" {
+        to = 9464
+      }
+    }
+
     update {
       max_parallel      = 1
       healthy_deadline  = "2m"
@@ -34,9 +44,12 @@ job "wherry-receiver" {
       config {
         image = var.image
         args  = ["receiver", "run", "--config-file", "/local/config.yaml"]
-        # The plugin reaches the Nomad API at the receiver configuration's address, else NOMAD_ADDR, else the
-        # client's own 127.0.0.1:4646.
-        network_mode = "host"
+      }
+
+      # The plugin reaches the Nomad API at the receiver configuration's address, else NOMAD_ADDR: the task API socket
+      # in the task's secrets directory, which takes the workload identity's token.
+      env {
+        NOMAD_ADDR = "unix:///secrets/api.sock"
       }
 
       # NOMAD_TOKEN for the plugin; with ACLs enabled, attach the plugin's ACL policy to this job.
