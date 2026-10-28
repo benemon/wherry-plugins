@@ -18,6 +18,9 @@ env:
   WHERRY_VERSION: v0.1.0-rc.20
   KIND_VERSION: v0.33.0
   KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+  # A Nomad CE release; NOMAD_SHA256 is its linux_amd64 zip's line in the release's SHA256SUMS.
+  NOMAD_VERSION: 2.0.7
+  NOMAD_SHA256: 4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1
 
 jobs:
   kind:
@@ -64,4 +67,63 @@ jobs:
         with:
           name: e2e-state
           path: ${{ runner.temp }}/wherry-e2e/artifacts
+          retention-days: 7
+
+  nomad:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The upgrade starts from the latest nomad/v* tag.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find changes to the Nomad plugin, its example or the fake agent
+        id: changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: .github/changed.sh "$BASE" '^(nomad/|examples/nomad/|kubernetes/test/e2e/agent/|\.github/workflows/e2e\.yml$|\.github/changed\.sh$)'
+      - name: Install Nomad
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          zip=nomad_${NOMAD_VERSION}_linux_amd64.zip
+          curl -fsSL --remote-name-all --output-dir "$RUNNER_TEMP" \
+            "https://releases.hashicorp.com/nomad/$NOMAD_VERSION/$zip" \
+            "https://releases.hashicorp.com/nomad/$NOMAD_VERSION/nomad_${NOMAD_VERSION}_SHA256SUMS"
+          cd "$RUNNER_TEMP"
+          grep "  $zip\$" "nomad_${NOMAD_VERSION}_SHA256SUMS" | sha256sum -c -
+          echo "$NOMAD_SHA256  $zip" | sha256sum -c -
+          unzip -o "$zip" nomad
+          sudo install -m 0755 nomad /usr/local/bin/nomad
+      - name: Start the Nomad agent and Kafka
+        if: steps.changes.outputs.changed == 'true'
+        run: nomad/test/e2e/01-nomad.sh
+      - name: Fetch the wherry CLI
+        if: steps.changes.outputs.changed == 'true'
+        run: nomad/test/e2e/02-wherry.sh
+      - name: Provision the pool, tenant, host and receiver
+        if: steps.changes.outputs.changed == 'true'
+        run: nomad/test/e2e/03-provision.sh
+      - name: Build the images, validate the example job and run the receiver
+        if: steps.changes.outputs.changed == 'true'
+        run: nomad/test/e2e/04-deploy.sh
+      - name: Submit and await a run
+        if: steps.changes.outputs.changed == 'true'
+        run: nomad/test/e2e/05-run.sh
+      - name: Upgrade from the previous release with a run in flight
+        if: steps.changes.outputs.changed == 'true'
+        run: nomad/test/e2e/06-upgrade.sh
+      - name: Roll back to the previous release
+        if: steps.changes.outputs.changed == 'true'
+        run: nomad/test/e2e/07-rollback.sh
+      - name: Collect the Nomad and receiver logs and the jobs' state
+        if: failure() && steps.changes.outputs.changed == 'true'
+        run: nomad/test/e2e/collect.sh
+      - name: Upload the collected state
+        if: failure() && steps.changes.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-nomad-state
+          path: ${{ runner.temp }}/wherry-nomad-e2e/artifacts
           retention-days: 7
