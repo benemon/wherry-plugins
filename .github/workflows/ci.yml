@@ -63,6 +63,10 @@ jobs:
       - name: Run the plugin's gates
         if: steps.changes.outputs.changed == 'true'
         run: make check PLUGINS="$PLUGIN"
+      # The release's own build, so a target that stops compiling fails here before a tag.
+      - name: Cross-compile the plugin's release archives
+        if: steps.changes.outputs.changed == 'true'
+        run: make dist PLUGIN="$PLUGIN"
 
   # The systemd plugin's real-host suite, as root on the runner's systemd.
   systemd-host:

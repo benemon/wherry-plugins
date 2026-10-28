@@ -20,9 +20,11 @@ make build
 
 This writes `wherry-plugin-kubernetes` and `wherry-k8s-helper` at the
 repository root. `wherry-k8s-helper` is the helper agent pods run; it uses
-the Go standard library alone. `make check` runs the CI gates,
-`make dist PLUGIN=kubernetes VERSION=<version>` writes release archives,
-which hold both binaries, and `checksums.txt` into `dist`, and
+the Go standard library alone. `make check` runs the CI gates, and
+`make dist PLUGIN=kubernetes VERSION=<version>` writes release archives
+for linux and darwin, amd64 and arm64, and `checksums.txt` into `dist`.
+The linux archives hold both binaries and the darwin archives the plugin
+alone, for a receiver on macOS that reaches a remote cluster.
 `make image VERSION=<version> WHERRY_VERSION=<wherry version>` builds the
 receiver image ([Image](#image)).
 

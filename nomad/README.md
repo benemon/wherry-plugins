@@ -17,7 +17,8 @@ make build
 This writes `wherry-plugin-nomad` at the repository root. For a Linux
 receiver host, set `GOOS=linux GOARCH=amd64`. `make check` runs the CI
 gates, and `make dist PLUGIN=nomad VERSION=<version>` writes release
-archives and `checksums.txt` into `dist`.
+archives for linux and darwin, amd64 and arm64, and `checksums.txt` into
+`dist`. A receiver on macOS runs the darwin plugin on its host.
 
 ## Install
 
