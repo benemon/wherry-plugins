@@ -755,6 +755,9 @@ the ConfigMap mounted read-only at `/etc/wherry/config`.
 
 - One replica with the `Recreate` strategy: a receiver is one principal
   with one key pair, and a rolling update would briefly run two.
+- `terminationGracePeriodSeconds: 30`, with `drain_timeout: 25s` in the
+  local configuration, so held runs go on for up to 25 seconds after
+  `SIGTERM` before the receiver releases them for adoption.
 - The receiver's service account token is mounted, and the plugin, a child
   process of the receiver, uses it.
 - The pod sets no `runAsUser`, so it runs as the image's UID 1001 with

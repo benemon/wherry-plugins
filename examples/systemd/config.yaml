@@ -5,3 +5,5 @@ bundle: /etc/wherry/receiver.bundle
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
+# Held runs go on for up to drain_timeout after SIGTERM, within the unit's TimeoutStopSec.
+drain_timeout: 25s

@@ -49,6 +49,8 @@ spec:
     metadata: {labels: {app: wherry-receiver}}
     spec:
       serviceAccountName: wherry-receiver
+      # config.yaml's drain_timeout, 25 seconds, stays below this window.
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}

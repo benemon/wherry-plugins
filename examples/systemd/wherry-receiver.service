@@ -12,6 +12,8 @@ Type=exec
 ExecStart=/usr/local/bin/wherry receiver run --config-file /etc/wherry/config.yaml
 Restart=on-failure
 RestartSec=5s
+# config.yaml's drain_timeout, 25 seconds, stays below this window.
+TimeoutStopSec=30
 StateDirectory=wherry
 StateDirectoryMode=0700
 RuntimeDirectory=wherry-systemd

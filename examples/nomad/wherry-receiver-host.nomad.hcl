@@ -42,7 +42,7 @@ job "wherry-receiver" {
       driver = "exec"
       # A dedicated user: the bundle holds the receiver's credentials, and nobody is shared by unrelated processes.
       user = "wherry"
-      # The receiver needs 30 seconds to stop before a forced kill.
+      # The receiver's drain_timeout, 25 seconds, stays below this window.
       kill_timeout = "30s"
 
       # The task shares the client's network, so the plugin reaches the Nomad API at the receiver configuration's
@@ -77,6 +77,7 @@ job "wherry-receiver" {
           state_dir: /alloc/data/state
           plugin_dir: /usr/local/libexec/wherry/${var.version}/plugins
           metrics_addr: ":9464"
+          drain_timeout: 25s
         EOT
       }
 
