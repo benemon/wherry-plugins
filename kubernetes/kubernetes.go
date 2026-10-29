@@ -139,10 +139,10 @@ type Kubernetes struct {
 	logger        hclog.Logger
 }
 
-// fetchError is a fetch that failed, in words that never quote the URL.
-type fetchError struct{ name, reason string }
-
-func (e *fetchError) Error() string { return "fetch " + e.name + ": " + e.reason }
+// fetchFailed is a fetch that failed, in words that never quote the URL. Its class ends the run before any pod exists.
+func fetchFailed(name, reason string) error {
+	return &pluginsdk.Error{Op: "fetch " + name, Class: pluginsdk.ClassFetch, Err: errors.New(reason)}
+}
 
 // newClient builds the API configuration for config's address and CA with token, or the in-cluster one.
 func newClient(config Config, token string) (*rest.Config, error) {
@@ -651,15 +651,15 @@ func verified(root *os.Root, name string, fetch pluginsdk.Fetch) bool {
 func (profile *Kubernetes) fetch(ctx context.Context, root *os.Root, fetch pluginsdk.Fetch) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fetch.URL, nil)
 	if err != nil {
-		return &fetchError{fetch.Name, "invalid URL"}
+		return fetchFailed(fetch.Name, "invalid URL")
 	}
 	response, err := profile.fetcher.Do(request)
 	if err != nil {
-		return &fetchError{fetch.Name, unreached(err)}
+		return fetchFailed(fetch.Name, unreached(err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return &fetchError{fetch.Name, strconv.Itoa(response.StatusCode)}
+		return fetchFailed(fetch.Name, strconv.Itoa(response.StatusCode))
 	}
 	name := "inputs/" + fetch.Name
 	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -674,13 +674,13 @@ func (profile *Kubernetes) fetch(ctx context.Context, root *os.Root, fetch plugi
 	case errors.As(err, &write):
 		return fmt.Errorf("write input %s: %w", fetch.Name, err)
 	case err != nil:
-		return &fetchError{fetch.Name, unreached(err)}
+		return fetchFailed(fetch.Name, unreached(err))
 	case n < fetch.Size:
-		return &fetchError{fetch.Name, "shorter than its size"}
+		return fetchFailed(fetch.Name, "shorter than its size")
 	case n > fetch.Size:
-		return &fetchError{fetch.Name, "longer than its size"}
+		return fetchFailed(fetch.Name, "longer than its size")
 	case hex.EncodeToString(hash.Sum(nil)) != fetch.SHA256:
-		return &fetchError{fetch.Name, "does not match its digest"}
+		return fetchFailed(fetch.Name, "does not match its digest")
 	}
 	return file.Close()
 }

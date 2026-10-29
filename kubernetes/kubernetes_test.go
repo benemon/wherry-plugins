@@ -1404,8 +1404,8 @@ func TestFetchFailureCreatesNoPod(t *testing.T) {
 			store := newObjects(t, test.serve)
 			run := fetchRun("fetch", store, map[string][]byte{"data.csv": data})
 			outcome, _, err := profile.Dispatch(context.Background(), run)
-			var failed *fetchError
-			if outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &failed) || err.Error() != "fetch data.csv: "+test.reason {
+			var failed *pluginsdk.Error
+			if outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &failed) || failed.Class != pluginsdk.ClassFetch || err.Error() != "fetch data.csv: "+test.reason {
 				t.Fatalf("dispatch = %v, %v; want fetch data.csv: %s and nothing created", outcome, err, test.reason)
 			}
 			if created := paths(api.recorded(), http.MethodPost); created != nil || store.count("/elsewhere/data.csv") != 0 {
@@ -3026,8 +3026,8 @@ func TestFetchOnKubernetes(t *testing.T) {
 	}
 	mismatch := devRun(t, profile, "mismatch")
 	mismatch.Fetches = []pluginsdk.Fetch{{Name: "data.csv", URL: store.URL + "/data.csv", Size: int64(len(files["data.csv"])), SHA256: strings.Repeat("0", 64)}}
-	var failed *fetchError
-	if outcome, _, err := profile.Dispatch(ctx, mismatch); outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &failed) {
+	var failed *pluginsdk.Error
+	if outcome, _, err := profile.Dispatch(ctx, mismatch); outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &failed) || failed.Class != pluginsdk.ClassFetch {
 		t.Fatalf("dispatch = %v, %v; want the fetch failed and nothing created", outcome, err)
 	}
 }
