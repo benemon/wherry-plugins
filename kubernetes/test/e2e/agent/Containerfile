@@ -1,5 +1,6 @@
 # The e2e's fake agent; it reports through the A2A outcome file.
 FROM docker.io/library/alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
-RUN apk add --no-cache openssh-keygen
+# ssh-keygen and ssh refuse to run for a UID with no passwd entry; the receiver and the agent run as 1001.
+RUN apk add --no-cache openssh-keygen && adduser -D -H -u 1001 agent
 COPY --chmod=0755 agent.sh /agent.sh
 ENTRYPOINT ["/agent.sh"]
