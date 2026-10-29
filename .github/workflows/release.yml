@@ -50,11 +50,10 @@ jobs:
       id-token: write      # provenance attestation and keyless signing
       attestations: write
     steps:
+      # The tag alone: the snapshot takes its version from VERSION and writes no changelog, and gh writes the release
+      # notes.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          # goreleaser reads the tags from the history, which a shallow clone lacks.
-          fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -96,3 +95,58 @@ jobs:
           gh release upload "$RELEASE_TAG" --clobber \
             dist/wherry-plugin-"$PLUGIN"_*.tar.gz dist/wherry-plugin-"$PLUGIN"_*.tar.gz.sbom.json \
             dist/checksums.txt dist/checksums.txt.sigstore.json
+
+  # Checks the published release as a user receives it, from the release alone: the assets against
+  # .github/release-contents/<plugin>.txt, the checksums' signature, the checksums, and each archive's provenance.
+  verify:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Pick the plugin and version from the tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          case "$RELEASE_TAG" in (*[!A-Za-z0-9._/-]*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
+          case "$RELEASE_TAG" in (nomad/v*|kubernetes/v*|systemd/v*) ;; (*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
+          case "${RELEASE_TAG#*/}" in (*/*) echo "refusing tag: $RELEASE_TAG"; exit 1;; esac
+          echo "PLUGIN=${RELEASE_TAG%%/*}" >> "$GITHUB_ENV"
+          echo "VERSION=${RELEASE_TAG#*/}" >> "$GITHUB_ENV"
+      - name: Install cosign
+        run: |
+          .github/release-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Download the release's assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -D "$RUNNER_TEMP/assets"
+      # Each archive in .github/release-contents/<plugin>.txt, its SBOM, and the signed checksums, and nothing else.
+      - name: Compare the assets with the expected list
+        run: |
+          export LC_ALL=C
+          grep -v '^ ' ".github/release-contents/$PLUGIN.txt" | sed "s/_VERSION_/_${VERSION}_/" |
+            while read -r archive; do printf '%s\n%s.sbom.json\n' "$archive" "$archive"; done |
+            { cat; printf 'checksums.txt\nchecksums.txt.sigstore.json\n'; } | sort > "$RUNNER_TEMP/assets-expected.txt"
+          find "$RUNNER_TEMP/assets" -type f -printf '%f\n' | sort > "$RUNNER_TEMP/assets-actual.txt"
+          diff -u "$RUNNER_TEMP/assets-expected.txt" "$RUNNER_TEMP/assets-actual.txt"
+          .github/release-contents.sh "$RUNNER_TEMP/assets" | diff -u ".github/release-contents/$PLUGIN.txt" -
+      # The identity docs/operations.md in benemon/wherry gives users.
+      - name: Verify the checksums' signature and the checksums
+        working-directory: ${{ runner.temp }}/assets
+        run: |
+          cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+            --certificate-identity-regexp "^https://github\.com/benemon/wherry-plugins/\.github/workflows/release\.yml@refs/tags/$PLUGIN/v" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          sha256sum --strict -c checksums.txt
+      - name: Verify each archive's provenance
+        working-directory: ${{ runner.temp }}/assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: for archive in wherry-plugin-*.tar.gz; do gh attestation verify "$archive" -R benemon/wherry-plugins; done

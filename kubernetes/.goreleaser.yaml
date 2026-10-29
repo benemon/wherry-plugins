@@ -54,6 +54,11 @@ checksum:
 
 sboms:
   - artifacts: archive
+    # The binary in an archive names its Go modules but not their licences, which the remote search reads from the
+    # module proxy. Setting env replaces goreleaser's default for archives, the file metadata cataloger, so it is kept.
+    env:
+      - SYFT_FILE_METADATA_CATALOGER_ENABLED=true
+      - SYFT_GOLANG_SEARCH_REMOTE_LICENSES=true
 
 # Keyless, through the release workflow's OIDC token; ci.yml's snapshot build skips it. Verify with:
 #   cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
