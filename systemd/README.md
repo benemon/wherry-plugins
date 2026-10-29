@@ -20,9 +20,9 @@ make build
 
 This writes `wherry-plugin-systemd` at the repository root. The plugin
 builds for Linux alone; on another OS, set `GOOS=linux GOARCH=amd64`.
-`make check` runs the CI gates, and
-`make dist PLUGIN=systemd VERSION=<version>` writes release archives for
-linux amd64 and arm64, and `checksums.txt`, into `dist`.
+`make check` runs the CI gates, and the release build,
+`systemd/.goreleaser.yaml`, writes release archives for linux amd64 and
+arm64, and `checksums.txt`, into `dist` (see the [repository README](../README.md)).
 
 ## Install
 
