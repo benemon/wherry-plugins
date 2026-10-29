@@ -1,0 +1,55 @@
+# The systemd plugin's release build. goreleaser OSS cannot take its version from a systemd/v* tag, so it runs as a
+# snapshot with VERSION, the tag less its systemd/ prefix: .github/workflows/release.yml builds and signs with it, then
+# publishes against the prefixed tag; ci.yml's release-build job checks it and runs it with a placeholder VERSION.
+version: 2
+
+project_name: wherry-plugin-systemd
+
+snapshot:
+  version_template: "{{ .Env.VERSION }}"
+
+builds:
+  - id: wherry-plugin-systemd
+    dir: systemd
+    binary: wherry-plugin-systemd
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -X main.version={{ .Env.VERSION }}
+    goos: [linux]
+    goarch: [amd64, arm64]
+archives:
+  - id: wherry-plugin-systemd
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    wrap_in_directory: true
+    files:
+      - LICENSE
+      - src: systemd/README.md
+        strip_parent: true
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# One SBOM per archive, written by syft.
+sboms:
+  - artifacts: archive
+
+# Keyless, through the release workflow's OIDC token; ci.yml's snapshot build skips it. Verify with:
+#   cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+#     --certificate-identity-regexp '^https://github.com/benemon/wherry-plugins/\.github/workflows/release\.yml@' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: [sign-blob, --yes, "--bundle=${signature}", "${artifact}"]
+
+# The release workflow publishes against the systemd/v* tag.
+release:
+  disable: true
+changelog:
+  disable: true

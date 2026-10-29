@@ -1,15 +1,8 @@
 GO_LICENSES_VERSION := v1.6.0
 GO_LICENSES         := $(shell go env GOPATH)/bin/go-licenses
-CYCLONEDX_VERSION   := v1.11.0
-CYCLONEDX           := $(shell go env GOPATH)/bin/cyclonedx-gomod
 
 VERSION   ?= dev
-DIST      ?= dist
-# A receiver on macOS runs the nomad and kubernetes plugins on its host; the systemd plugin builds for Linux alone.
-DARWIN_PLUGINS := nomad kubernetes
-PLATFORMS ?= linux/amd64 linux/arm64 $(if $(filter $(PLUGIN),$(DARWIN_PLUGINS)),darwin/amd64 darwin/arm64)
 PLUGINS   := nomad kubernetes systemd
-PLUGIN    ?=
 # image builds the receiver image from this checkout and the wherry release WHERRY_VERSION, such as v0.4.0, with
 # CONTAINER, podman or docker.
 WHERRY_VERSION ?=
@@ -47,9 +40,6 @@ test: ## Test every plugin with the race detector; one with no package for this 
 $(GO_LICENSES):
 	go install github.com/google/go-licenses@$(GO_LICENSES_VERSION)
 
-$(CYCLONEDX):
-	go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@$(CYCLONEDX_VERSION)
-
 .PHONY: check-licenses
 # A failure means a dependency changed licence on upgrade: investigate the
 # module, do not widen the list to get green.
@@ -70,41 +60,6 @@ check-markers: ## Fail on tool-attribution markers in tracked files
 
 .PHONY: check
 check: check-fmt vet test check-licenses check-markers ## Run every CI gate
-
-.PHONY: sbom
-# app mode describes what the plugin binary links, not the module graph with
-# its test-only dependencies. The tool reads tags through go-git, so run it
-# from a plain clone with tags fetched.
-sbom: $(CYCLONEDX) ## Write a CycloneDX SBOM for PLUGIN
-	@test -n "$(PLUGIN)" || { echo "FAIL: set PLUGIN"; exit 1; }
-	mkdir -p $(DIST)
-	cd $(PLUGIN) && $(CYCLONEDX) app -json -licenses -main . -output ../$(DIST)/wherry-plugin-$(PLUGIN).cdx.json .
-	@# The tool versions the module from root v* tags only, so a PLUGIN/v* release gets a pseudo-version.
-	@if [ "$(VERSION)" != dev ]; then \
-		f=$(DIST)/wherry-plugin-$(PLUGIN).cdx.json; old=$$(jq -r .metadata.component.version $$f); \
-		jq --arg old "$$old" --arg new "$(VERSION)" \
-			'(.metadata.component.version, .metadata.component.purl, .metadata.component["bom-ref"], (.dependencies[] | select(.ref | contains($$old)) | .ref)) |= (split($$old) | join($$new))' \
-			$$f > $$f.tmp && mv $$f.tmp $$f; \
-	fi
-
-.PHONY: dist
-# Agent pods run the Kubernetes helper, so only a Linux archive holds it.
-dist: ## Cross-compile PLUGIN's release archives and checksums.txt into DIST
-	@test -n "$(PLUGIN)" || { echo "FAIL: set PLUGIN"; exit 1; }
-	rm -rf $(DIST)/wherry-plugin-$(PLUGIN)_*
-	mkdir -p $(DIST)
-	@set -e; for p in $(PLATFORMS); do \
-		os=$${p%/*}; arch=$${p#*/}; name=wherry-plugin-$(PLUGIN)_$(VERSION)_$${os}_$${arch}; \
-		mkdir -p $(DIST)/$$name; \
-		(cd $(PLUGIN) && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-X main.version=$(VERSION)" -o ../$(DIST)/$$name/wherry-plugin-$(PLUGIN) .); \
-		if [ $(PLUGIN) = kubernetes ] && [ $$os = linux ]; then \
-			(cd kubernetes && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -o ../$(DIST)/$$name/wherry-k8s-helper ./cmd/wherry-k8s-helper); \
-		fi; \
-		cp LICENSE $(PLUGIN)/README.md $(DIST)/$$name/; \
-		tar -C $(DIST) -czf $(DIST)/$$name.tar.gz $$name; \
-		rm -rf $(DIST)/$$name; \
-	done
-	cd $(DIST) && sha256sum wherry-plugin-$(PLUGIN)_*.tar.gz > checksums.txt
 
 .PHONY: image
 image: ## Build the receiver image (VERSION, WHERRY_VERSION, CONTAINER)

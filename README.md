@@ -29,9 +29,21 @@ follow each platform:
 Each plugin is its own Go module and builds against the tagged plugin
 protocol module, `github.com/benemon/wherry/pluginsdk`. `make build` builds
 every plugin, `make check` runs the CI gates, and
-`make dist PLUGIN=<directory> VERSION=<version>` writes a plugin's release
-archives into `dist`. `make image` builds the Kubernetes receiver image
-example in [`examples/`](examples/).
+[goreleaser](https://goreleaser.com/) builds a plugin's release from
+`<directory>/.goreleaser.yaml`. `make image` builds the Kubernetes receiver
+image example in [`examples/`](examples/).
+
+A `<plugin>/v*` tag releases that plugin: `.github/workflows/release.yml`
+checks that the tagged commit's `ci` run on `main` passed, runs goreleaser
+as a snapshot versioned from the tag less its prefix, which writes the
+archives, `checksums.txt`, an SBOM per archive
+(`<archive>.sbom.json`) and the cosign signature over the checksums, then
+attests the archives' provenance and publishes them against the tag. The
+same build, unsigned, writes them into `dist` locally:
+
+```sh
+VERSION=<version> goreleaser release --snapshot --clean --skip=sign --config <directory>/.goreleaser.yaml
+```
 
 To develop against a local wherry checkout beside this repository, create
 a Go workspace from the repository root. `go.work` is for local development
