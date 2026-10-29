@@ -53,8 +53,10 @@ A receiver outside the cluster mounts the file system behind the runs claim,
 such as the claim's NFS export, at `runs_dir`, and runs as the agents' UID
 ([Agent pods](#agent-pods)).
 
-The receiver checks the plugin directory and binary before it runs them;
-see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
+The receiver runs the plugin only from a binary whose SHA-256 is the pin
+its record holds for the type, which `receiver add` and `receiver update`
+take as `--plugin-sha256 kubernetes=HEX` from the binary's line in the release's
+`checksums.txt`; see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
 The plugin is not run by hand.
 
 ## Credentials
@@ -695,7 +697,7 @@ The image is based on `registry.access.redhat.com/ubi9/ubi-minimal`, whose
 CA bundle the receiver's S3 uploads and the plugin's S3 fetches trust. It
 holds `/usr/local/bin/wherry` and
 `/usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes`, each mode
-0755 and owned by root, so the receiver's checks pass under any UID. It
+0755 and owned by root. It
 runs as UID 1001 and group 0, with the entrypoint `wherry`; its writable
 paths are volumes whose mount points, `/var/lib/wherry` and `/tmp`, group 0
 can write. It holds no Nomad plugin. Agent pods run the agent's image
@@ -720,9 +722,12 @@ from.
    says, with a `kubernetes` plugin whose `config` sets the receiver's
    `namespace`, `runs_claim: wherry-runs` and
    `runs_dir: /var/lib/wherry/runs` ([Settings](#settings)), and the
-   receiver's plugin profiles. The
-   in-cluster receiver's configuration names no platform credential; the
-   service account supplies the token.
+   receiver's plugin profiles. The image builds the plugin from the
+   checkout, so its pin is the SHA-256 of the image's binary,
+   `--plugin-sha256 kubernetes=HEX` from
+   `podman run --rm --entrypoint sha256sum <image> /usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes`.
+   The in-cluster receiver's configuration names no platform credential;
+   the service account supplies the token.
 
 3. Apply the receiver with [`examples/kubernetes/apply.sh`](../examples/kubernetes/apply.sh):
 

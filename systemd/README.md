@@ -33,8 +33,10 @@ install it in the receiver's plugin directory, as
 [Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
 describes with `plugin=systemd`. [Build](#build) covers building it from source.
 
-The receiver checks the plugin directory and binary before it runs them;
-see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
+The receiver runs the plugin only from a binary whose SHA-256 is the pin
+its record holds for the type, which `receiver add` and `receiver update`
+take as `--plugin-sha256 systemd=HEX` from the binary's line in the release's
+`checksums.txt`; see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
 The plugin is not run by hand.
 
 ## Credentials

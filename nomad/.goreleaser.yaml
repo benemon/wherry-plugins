@@ -29,6 +29,12 @@ archives:
       - LICENSE
       - src: nomad/README.md
         strip_parent: true
+  # Lists each plugin binary's SHA-256 in checksums.txt under its own name, the pin for receiver update
+  # --plugin-sha256. The release publishes the archives alone; the binary in each has that SHA-256.
+  - id: wherry-plugin-nomad-binary
+    ids: [wherry-plugin-nomad]
+    formats: [binary]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: checksums.txt
