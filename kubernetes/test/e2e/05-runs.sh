@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Submits and watches, as the host runner, a cancelled run, a plain run, a credentialed run, a run with an input file and
-# a run that never starts, and checks what each brings back. Ends once the sweep has removed the cancelled run's pod.
+# Submits and watches, as the host runner, a cancelled run, a plain run, a credentialed run with an input file and an
+# SSH private key, a run with an input file and a run that never starts, and checks what each brings back. Ends once
+# the sweep has removed the cancelled run's pod.
 . "$(dirname "$0")/common.sh"
 fail() {
 	echo "FAIL: $*" >&2
@@ -47,12 +48,15 @@ finish "$plain" TASK_STATE_COMPLETED
 replied "$plain" 'uid 1001'
 grep -F 'e2e: plain' "$work/outputs/$plain/echo.txt" >/dev/null || fail "run $plain returned no echo.txt"
 
-credentialed=$(submit e2e=fake --prompt 'e2e: credential' --credential dummy:file=token)
-finish "$credentialed" TASK_STATE_COMPLETED
-replied "$credentialed" 'dir 700 1001'
-replied "$credentialed" "file token 600 1001 $(sha256 "$work/host/dummy")"
-
 head -c 4096 /dev/urandom >"$work/input.bin"
+credentialed=$(submit e2e=fake --prompt 'e2e: credential' --input "$work/input.bin" \
+	--credential dummy:file=token --credential deploy:file=id_ed25519)
+finish "$credentialed" TASK_STATE_COMPLETED
+replied "$credentialed" "file token 440 0 $(sha256 "$work/host/dummy")"
+replied "$credentialed" "file id_ed25519 440 0 $(sha256 "$work/host/deploy-key")"
+replied "$credentialed" "file input.bin 600 1001 $(sha256 "$work/input.bin")"
+replied "$credentialed" 'ssh-keygen accepted id_ed25519'
+
 input=$(submit e2e=fake --prompt 'e2e: input' --input "$work/input.bin")
 finish "$input" TASK_STATE_COMPLETED
 replied "$input" "file input.bin 600 1001 $(sha256 "$work/input.bin")"
@@ -67,6 +71,7 @@ grep -F "run $broken: job never started (image): " "$work/receiver.log" >/dev/nu
 kubectl get pods,events -n "$namespace" -o yaml >"$work/objects.yaml"
 for file in "$work/receiver.log" "$work/objects.yaml"; do
 	if grep -F "$(cat "$work/host/dummy")" "$file" >/dev/null; then fail "the dummy credential is in $file"; fi
+	if grep -F "$(sed -n 2p "$work/host/deploy-key")" "$file" >/dev/null; then fail "the SSH private key is in $file"; fi
 done
 
 wait_for 900 gone pods

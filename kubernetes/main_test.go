@@ -32,27 +32,32 @@ func settings(t *testing.T, name string, config map[string]any) pluginsdk.Settin
 	return pluginsdk.Settings{Name: name, Pool: testPool, Agent: "claude", Config: encoded, Credential: testToken}
 }
 
-func podConfig(address, caFile, helperImage, image string, command ...string) map[string]any {
+func podConfig(address, caFile, runsDir, image string, command ...string) map[string]any {
 	return map[string]any{
-		"address": address, "ca_file": caFile, "namespace": testNamespace, "helper_image": helperImage,
+		"address": address, "ca_file": caFile, "namespace": testNamespace, "runs_claim": "wherry-runs", "runs_dir": runsDir,
 		"runtime": map[string]any{"image": image, "command": command},
 	}
 }
 
 func TestFactoryDecodesStrictly(t *testing.T) {
 	api := newFakeAPI(t)
-	valid := podConfig(api.server.URL, api.caFile, testHelperImage, testImage)
-	withCredentialEnv := podConfig(api.server.URL, api.caFile, testHelperImage, testImage)
+	valid := podConfig(api.server.URL, api.caFile, "/var/lib/wherry/runs", testImage)
+	withCredentialEnv := podConfig(api.server.URL, api.caFile, "/var/lib/wherry/runs", testImage)
 	withCredentialEnv["credential_env"] = "MODEL_API_KEY"
 	if _, err := newProfile(settings(t, "lab", withCredentialEnv), hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "credential_env") {
 		t.Fatalf("got %v, want credential_env refused as an unknown member", err)
 	}
-	unknown := podConfig(api.server.URL, api.caFile, testHelperImage, testImage)
+	unknown := podConfig(api.server.URL, api.caFile, "/var/lib/wherry/runs", testImage)
 	unknown["kubeconfig"] = "/root/.kube/config"
 	if _, err := newProfile(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
 		t.Fatal("accepted profile config with an unknown member")
 	}
-	unknown = podConfig(api.server.URL, api.caFile, testHelperImage, testImage)
+	helperImage := podConfig(api.server.URL, api.caFile, "/var/lib/wherry/runs", testImage)
+	helperImage["helper_image"] = "registry.example.com/wherry-receiver:0.1.0"
+	if _, err := newProfile(settings(t, "lab", helperImage), hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), "helper_image") {
+		t.Fatalf("got %v, want helper_image refused as an unknown member", err)
+	}
+	unknown = podConfig(api.server.URL, api.caFile, "/var/lib/wherry/runs", testImage)
 	unknown["runtime"].(map[string]any)["driver"] = "docker"
 	if _, err := newProfile(settings(t, "lab", unknown), hclog.NewNullLogger()); err == nil {
 		t.Fatal("accepted a runtime with an unknown member")
@@ -142,7 +147,7 @@ func merge(base, over map[string]any) map[string]any {
 func TestFactoryGivesTheProfileServesLogger(t *testing.T) {
 	api := newFakeAPI(t)
 	logger := hclog.New(&hclog.LoggerOptions{Name: "served"})
-	built, err := newProfile(settings(t, "lab", podConfig(api.server.URL, api.caFile, testHelperImage, testImage)), logger)
+	built, err := newProfile(settings(t, "lab", podConfig(api.server.URL, api.caFile, "/var/lib/wherry/runs", testImage)), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,9 +173,9 @@ func TestFactoryTokenFromCredentialElseServiceAccount(t *testing.T) {
 	host, port, _ := strings.Cut(strings.TrimPrefix(api.server.URL, "https://"), ":")
 	t.Setenv("KUBERNETES_SERVICE_HOST", host)
 	t.Setenv("KUBERNETES_SERVICE_PORT", port)
-	inCluster := settings(t, "in-cluster", podConfig("", "", testHelperImage, testImage))
+	inCluster := settings(t, "in-cluster", podConfig("", "", t.TempDir(), testImage))
 	inCluster.Credential = ""
-	withCredential := settings(t, "credential", podConfig("", "", testHelperImage, testImage))
+	withCredential := settings(t, "credential", podConfig("", "", t.TempDir(), testImage))
 	withCredential.Credential = "platform-credential"
 	for _, s := range []pluginsdk.Settings{inCluster, withCredential} {
 		a, err := newProfile(s, hclog.NewNullLogger())
@@ -188,7 +193,7 @@ func TestFactoryTokenFromCredentialElseServiceAccount(t *testing.T) {
 	if len(tokens) != 2 || tokens[0] != "Bearer service-account-token" || tokens[1] != "Bearer platform-credential" {
 		t.Fatalf("tokens %v; want the service account's without a platform credential, else the credential", tokens)
 	}
-	remote := settings(t, "remote", podConfig(api.server.URL, api.caFile, testHelperImage, testImage))
+	remote := settings(t, "remote", podConfig(api.server.URL, api.caFile, "/var/lib/wherry/runs", testImage))
 	remote.Credential = ""
 	if _, err := newProfile(remote, hclog.NewNullLogger()); err == nil || err.Error() != "address needs a platform credential" {
 		t.Fatalf("address without a platform credential: %v", err)
@@ -198,13 +203,13 @@ func TestFactoryTokenFromCredentialElseServiceAccount(t *testing.T) {
 func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings) {
 	t.Helper()
 	dev := devConfig(t)
-	completes := settings(t, "completes", podConfig(dev.Address, dev.CAFile, dev.HelperImage, "registry.access.redhat.com/ubi9/ubi-minimal",
+	completes := settings(t, "completes", podConfig(dev.Address, dev.CAFile, dev.RunsDir, "registry.access.redhat.com/ubi9/ubi-minimal",
 		"/bin/sh", "-c", `sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`))
-	neverStarts := settings(t, "never-starts", podConfig(dev.Address, dev.CAFile, dev.HelperImage, "registry.invalid/wherry-conformance:0"))
+	neverStarts := settings(t, "never-starts", podConfig(dev.Address, dev.CAFile, dev.RunsDir, "registry.invalid/wherry-conformance:0"))
 	for _, s := range []*pluginsdk.Settings{&completes, &neverStarts} {
 		var config map[string]any
 		_ = json.Unmarshal(s.Config, &config)
-		config["namespace"] = dev.Namespace
+		config["namespace"], config["runs_claim"] = dev.Namespace, dev.RunsClaim
 		if user := os.Getenv("WHERRY_KUBERNETES_DEV_USER"); user != "" {
 			config["runtime"].(map[string]any)["user"] = user
 		}
@@ -333,7 +338,7 @@ func TestClientIsNotRateLimited(t *testing.T) {
 	if client.QPS != 50 || client.Burst != 100 {
 		t.Fatalf("QPS %v, burst %d; want 50 and 100", client.QPS, client.Burst)
 	}
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	began := time.Now()
 	for range 200 {
 		if _, err := profile.Ready(context.Background()); err != nil {
@@ -355,7 +360,7 @@ func TestClientWritesNothingToStderr(t *testing.T) {
 	stderr := os.Stderr
 	os.Stderr = write
 	defer func() { os.Stderr = stderr }()
-	built, err := newProfile(settings(t, "lab", podConfig(api.server.URL, api.caFile, testHelperImage, testImage)), hclog.NewNullLogger())
+	built, err := newProfile(settings(t, "lab", podConfig(api.server.URL, api.caFile, "/var/lib/wherry/runs", testImage)), hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}

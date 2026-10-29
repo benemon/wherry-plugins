@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -25,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benemon/wherry-plugins/kubernetes/helper"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/benemon/wherry/pluginsdk/pluginsdktest"
 	"github.com/hashicorp/go-hclog"
@@ -39,26 +39,25 @@ import (
 )
 
 const (
-	credentialEnv   = "WHERRY_TEST_CREDENTIAL"
-	testPool        = "build"
-	testNamespace   = "agents"
-	testProfile     = "container"
-	testToken       = "kube-token-secret"
-	testImage       = "registry.example.com/agent:1.0"
-	testHelperImage = "registry.example.com/wherry-receiver:0.1.0"
+	credentialEnv = "WHERRY_TEST_CREDENTIAL"
+	testPool      = "build"
+	testNamespace = "agents"
+	testProfile   = "container"
+	testToken     = "kube-token-secret"
+	testImage     = "registry.example.com/agent:1.0"
 	// poolPrefix is agent- and the first 12 hex digits of sha256("build").
 	poolPrefix = "agent-44575cf5b285-"
 	agentUID   = 1000690000
-	// agentPID and holderPID are the processes a fake pod's helper sees beside its own.
-	agentPID  = 100
-	holderPID = 7
 )
 
 var getOptions = metav1.GetOptions{}
 
+// The README's profiles and the tests' run as UID 1001, the receiver image's user.
+func init() { receiverUID = 1001 }
+
 func testConfig(address, caFile string) Config {
 	return Config{
-		Address: address, CAFile: caFile, Namespace: testNamespace, HelperImage: testHelperImage,
+		Address: address, CAFile: caFile, Namespace: testNamespace, RunsClaim: "wherry-runs", RunsDir: "/var/lib/wherry/runs",
 		Runtime: Runtime{
 			Image: testImage, Command: []string{"/bin/sh", "-c"}, Args: []string{"exec agent-run < /wherry/prompt.txt"},
 			Env: map[string]string{"WHERRY_TEST_ENV": "from-runtime"},
@@ -82,12 +81,12 @@ func testRun(name string) pluginsdk.Run {
 	}
 }
 
-// fast shortens the profile's polls and grace for one test.
+// fast shortens the profile's polls for one test.
 func fast(t *testing.T) {
 	t.Helper()
-	saved := []time.Duration{waitPoll, followPoll, collectPoll, stopGrace}
-	waitPoll, followPoll, collectPoll, stopGrace = 10*time.Millisecond, 10*time.Millisecond, 10*time.Millisecond, 100*time.Millisecond
-	t.Cleanup(func() { waitPoll, followPoll, collectPoll, stopGrace = saved[0], saved[1], saved[2], saved[3] })
+	saved := []time.Duration{waitPoll, followPoll, collectPoll}
+	waitPoll, followPoll, collectPoll = 10*time.Millisecond, 10*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { waitPoll, followPoll, collectPoll = saved[0], saved[1], saved[2] })
 }
 
 // request is one request the fake API server answered.
@@ -174,16 +173,16 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 	return api
 }
 
-// profile builds a plugin profile against the fake, with a fake execer.
-func (api *fakeAPI) profile(t *testing.T) (*Kubernetes, *fakeExec) {
+// profile builds a plugin profile against the fake, with a runs directory of its own.
+func (api *fakeAPI) profile(t *testing.T) *Kubernetes {
 	t.Helper()
-	profile, err := build(testConfig(api.server.URL, api.caFile), testPool, testToken)
+	config := testConfig(api.server.URL, api.caFile)
+	config.RunsDir = t.TempDir()
+	profile, err := build(config, testPool, testToken)
 	if err != nil {
 		t.Fatal(err)
 	}
-	execer := newFakeExec(t)
-	profile.exec = execer
-	return profile, execer
+	return profile
 }
 
 func (api *fakeAPI) set(edit func()) {
@@ -428,16 +427,14 @@ func (api *fakeAPI) listSecrets(response http.ResponseWriter, r *http.Request) {
 	writeJSON(response, http.StatusOK, &list)
 }
 
-// assignUser admits a pod as restricted-v2 does, giving every container the namespace's first UID.
+// assignUser admits a pod as restricted-v2 does, giving its container the namespace's first UID.
 func assignUser(pod *corev1.Pod) {
-	for _, containers := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
-		for i := range containers {
-			if containers[i].SecurityContext == nil {
-				containers[i].SecurityContext = &corev1.SecurityContext{}
-			}
-			if containers[i].SecurityContext.RunAsUser == nil {
-				containers[i].SecurityContext.RunAsUser = new(int64(agentUID))
-			}
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].SecurityContext == nil {
+			pod.Spec.Containers[i].SecurityContext = &corev1.SecurityContext{}
+		}
+		if pod.Spec.Containers[i].SecurityContext.RunAsUser == nil {
+			pod.Spec.Containers[i].SecurityContext.RunAsUser = new(int64(agentUID))
 		}
 	}
 }
@@ -457,17 +454,16 @@ func waiting(name, reason, message string) corev1.ContainerStatus {
 }
 
 // status sets a pod's phase and container statuses.
-func setStatus(pod *corev1.Pod, phase corev1.PodPhase, inputs corev1.ContainerStatus, containers ...corev1.ContainerStatus) {
+func setStatus(pod *corev1.Pod, phase corev1.PodPhase, containers ...corev1.ContainerStatus) {
 	pod.Spec.NodeName = "worker-1"
 	pod.Status.Phase = phase
-	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{inputs}
 	pod.Status.ContainerStatuses = containers
 }
 
 // startAgent is a kubelet that starts a new pod's agent at once.
 func startAgent(pod *corev1.Pod) {
 	if pod.Status.Phase == "" {
-		setStatus(pod, corev1.PodRunning, exited("inputs", 0), runningStatus("agent"), runningStatus("outputs"))
+		setStatus(pod, corev1.PodRunning, runningStatus("agent"))
 	}
 }
 
@@ -486,115 +482,6 @@ func (api *fakeAPI) agentPod(t *testing.T, profile *Kubernetes, name string, edi
 func handleOf(pod *corev1.Pod) pluginsdk.Handle {
 	data, _ := json.Marshal(handle{V: 1, Pod: pod.Name, UID: string(pod.UID)})
 	return pluginsdk.Handle{Data: data, Name: pod.Name}
-}
-
-// fakeExec runs the helper in-process against a temporary root per pod.
-type fakeExec struct {
-	t     *testing.T
-	mu    sync.Mutex
-	roots map[string]string
-	calls []string
-	// fail fails an invocation in transport when it returns an error.
-	fail func(container string, args []string) error
-	// output answers an invocation in place of the helper when it returns true.
-	output func(args []string, stdout io.Writer) bool
-	// signal is the pod's signal call; it records every signal.
-	signal  func(pid int, sig syscall.Signal) error
-	signals []string
-	// stdin counts the bytes each invocation could read from its stdin.
-	stdin []int64
-}
-
-func newFakeExec(t *testing.T) *fakeExec {
-	return &fakeExec{t: t, roots: map[string]string{}}
-}
-
-// root is the pod's filesystem, laid out as its volumes are, with its process list and holder pid.
-func (f *fakeExec) root(pod string) string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if root, ok := f.roots[pod]; ok {
-		return root
-	}
-	root := f.t.TempDir()
-	for _, dir := range []string{"run/wherry/material", "wherry", "run/wherry/credentials", "run/wherry/hold", "proc/1", "proc/" + strconv.Itoa(agentPID), "proc/" + strconv.Itoa(holderPID)} {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
-			f.t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(root, "run/wherry/hold/pid"), []byte(strconv.Itoa(holderPID)), 0o600); err != nil {
-		f.t.Fatal(err)
-	}
-	f.roots[pod] = root
-	return root
-}
-
-func (f *fakeExec) exec(ctx context.Context, pod, container string, command []string, stdin io.Reader, stdout io.Writer) error {
-	if len(command) < 2 || command[0] != helperPath {
-		f.t.Errorf("exec of %v; want the helper", command)
-	}
-	args := command[2:]
-	root := f.root(pod)
-	f.mu.Lock()
-	f.calls = append(f.calls, container+" "+strings.Join(args, " "))
-	fail, output := f.fail, f.output
-	f.mu.Unlock()
-	if fail != nil {
-		if err := fail(container, args); err != nil {
-			return err
-		}
-	}
-	if output != nil && output(args, stdout) {
-		return nil
-	}
-	if stdin == nil {
-		stdin = strings.NewReader("")
-	}
-	counted := &counter{reader: stdin}
-	var stderr bytes.Buffer
-	code := helper.Run(helper.Env{Root: root, Stdin: counted, Stdout: stdout, Stderr: &stderr, Signal: f.send}, command[1:])
-	_, _ = io.Copy(io.Discard, counted)
-	f.mu.Lock()
-	f.stdin = append(f.stdin, counted.n)
-	f.mu.Unlock()
-	if code != 0 {
-		return &exitError{code: code, message: stderr.String()}
-	}
-	return nil
-}
-
-func (f *fakeExec) send(pid int, sig syscall.Signal) error {
-	f.mu.Lock()
-	f.signals = append(f.signals, fmt.Sprintf("%d %s", pid, sig))
-	signal := f.signal
-	f.mu.Unlock()
-	if signal != nil {
-		return signal(pid, sig)
-	}
-	return nil
-}
-
-func (f *fakeExec) set(edit func()) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	edit()
-}
-
-func (f *fakeExec) recorded() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Clone(f.calls)
-}
-
-type counter struct {
-	reader io.Reader
-	n      int64
-}
-
-func (c *counter) Read(p []byte) (int, error) {
-	n, err := c.reader.Read(p)
-	c.n += int64(n)
-	return n, err
 }
 
 func paths(requests []request, method string) []string {
@@ -631,11 +518,6 @@ func podJSON(t *testing.T, pod *corev1.Pod) string {
 }
 
 func container(pod *corev1.Pod, name string) *corev1.Container {
-	for i := range pod.Spec.InitContainers {
-		if pod.Spec.InitContainers[i].Name == name {
-			return &pod.Spec.InitContainers[i]
-		}
-	}
 	for i := range pod.Spec.Containers {
 		if pod.Spec.Containers[i].Name == name {
 			return &pod.Spec.Containers[i]
@@ -672,6 +554,7 @@ func envOf(c *corev1.Container) map[string]string {
 func plainProfile(t *testing.T, edit func(*Config)) *Kubernetes {
 	t.Helper()
 	config := testConfig("https://127.0.0.1:1", "")
+	config.RunsDir = t.TempDir()
 	if edit != nil {
 		edit(&config)
 	}
@@ -683,8 +566,9 @@ func plainProfile(t *testing.T, edit func(*Config)) *Kubernetes {
 }
 
 func TestBuildPodFromRuntime(t *testing.T) {
-	profile := plainProfile(t, nil)
+	profile := plainProfile(t, func(c *Config) { c.Runtime.User = "1001:1002" })
 	run := testRun("build")
+	run.Credentials = append(run.Credentials, pluginsdk.Secret{Name: "deploy", File: "id_ed25519", Value: []byte("key")})
 	name := profile.jobName(run.ID)
 	pod := profile.buildPod(run, name)
 	wantLabels := map[string]string{labelPool: testPool, "wherry.io/profile": testProfile, labelAgent: "coder", labelRun: run.ID}
@@ -692,16 +576,15 @@ func TestBuildPodFromRuntime(t *testing.T) {
 		pod.Annotations[annotationAttempt] != "2" || pod.Spec.RestartPolicy != corev1.RestartPolicyNever || *pod.Spec.TerminationGracePeriodSeconds != 15 {
 		t.Fatalf("unexpected pod identity: %#v", pod.ObjectMeta)
 	}
-	agent, inputs, outputs := container(pod, "agent"), container(pod, "inputs"), container(pod, "outputs")
+	if len(pod.Spec.Containers) != 1 || pod.Spec.InitContainers != nil || pod.Spec.ShareProcessNamespace != nil {
+		t.Fatalf("containers %v, init containers %v, shared process namespace %v; want the agent alone", pod.Spec.Containers, pod.Spec.InitContainers, pod.Spec.ShareProcessNamespace)
+	}
+	agent := container(pod, "agent")
 	if agent.Image != testImage || !slices.Equal(agent.Command, []string{"/bin/sh", "-c"}) || !slices.Equal(agent.Args, []string{"exec agent-run < /wherry/prompt.txt"}) {
 		t.Fatalf("runtime not carried: %#v", agent)
 	}
-	if inputs.Image != testHelperImage || !slices.Equal(inputs.Command, []string{helperPath, "v1", "inputs"}) || inputs.Args != nil ||
-		outputs.Image != testHelperImage || !slices.Equal(outputs.Command, []string{helperPath, "v1", "hold"}) {
-		t.Fatalf("helper containers %#v, %#v", inputs, outputs)
-	}
 	wantEnv := maps.Clone(pluginsdk.AgentEnvironment)
-	maps.Copy(wantEnv, map[string]string{"WHERRY_TEST_ENV": "from-runtime", "HOME": "/wherry",
+	maps.Copy(wantEnv, map[string]string{"WHERRY_TEST_ENV": "from-runtime", "HOME": "/wherry", "WHERRY_RUN_DIR": name,
 		"WHERRY_INPUT_DIR": "/wherry/inputs", "WHERRY_OUTPUT_DIR": "/wherry/outputs", "WHERRY_CREDENTIALS_DIR": "/run/wherry/credentials/files", credentialEnv: ""})
 	if env := envOf(agent); !maps.Equal(env, wantEnv) {
 		t.Fatalf("agent env %v; want %v", env, wantEnv)
@@ -710,12 +593,23 @@ func TestBuildPodFromRuntime(t *testing.T) {
 	if last.Name != credentialEnv || last.ValueFrom.SecretKeyRef.Name != name || last.ValueFrom.SecretKeyRef.Key != "env."+credentialEnv {
 		t.Fatalf("credential variable %#v; want a reference to the Secret's credential key", last)
 	}
-	if material := volume(pod, "material"); material.Secret.SecretName != name || *material.Secret.DefaultMode != 0o444 {
-		t.Fatalf("material volume %#v", material)
+	wantMounts := []corev1.VolumeMount{
+		{Name: "runs", MountPath: "/wherry", SubPathExpr: "runs/$(WHERRY_RUN_DIR)"},
+		{Name: "material", MountPath: "/wherry/prompt.txt", SubPath: "prompt", ReadOnly: true},
+		{Name: "material", MountPath: "/run/wherry/credentials/files", SubPath: "files", ReadOnly: true},
 	}
-	run.Fetches = []pluginsdk.Fetch{{Name: "data.csv", URL: "https://storage.example.com/data.csv?X-Amz-Signature=s", Size: 12, SHA256: strings.Repeat("a", 64)}}
-	if args := container(profile.buildPod(run, name), "inputs").Args; !slices.Equal(args, []string{"--await", "data.csv", "12", strings.Repeat("a", 64)}) {
-		t.Fatalf("inputs args %v; want --await and the fetch's name, size and digest", args)
+	if !reflect.DeepEqual(agent.VolumeMounts, wantMounts) {
+		t.Fatalf("agent mounts %+v; want %+v", agent.VolumeMounts, wantMounts)
+	}
+	if runs := volume(pod, "runs"); len(pod.Spec.Volumes) != 2 || runs.PersistentVolumeClaim == nil || runs.PersistentVolumeClaim.ClaimName != "wherry-runs" || runs.PersistentVolumeClaim.ReadOnly {
+		t.Fatalf("volumes %+v; want the runs claim and the material", pod.Spec.Volumes)
+	}
+	wantItems := []corev1.KeyToPath{{Key: "prompt", Path: "prompt"}, {Key: "credentials.id_ed25519", Path: "files/id_ed25519"}}
+	if material := volume(pod, "material").Secret; material.SecretName != name || *material.DefaultMode != 0o440 || !reflect.DeepEqual(material.Items, wantItems) {
+		t.Fatalf("material volume %+v; want the prompt and file credentials of the Secret at mode 0440", material)
+	}
+	if security := pod.Spec.SecurityContext; security.FSGroup == nil || *security.FSGroup != 1002 || *security.RunAsUser != 1001 {
+		t.Fatalf("pod security %+v; want fsGroup the agent's group", security)
 	}
 	run.Credentials = nil
 	if env := container(profile.buildPod(run, name), "agent").Env; slices.ContainsFunc(env, func(v corev1.EnvVar) bool { return v.Name == credentialEnv }) {
@@ -739,24 +633,19 @@ func TestBuildPodDefaultsAgentResources(t *testing.T) {
 }
 
 func TestBuildPodSetsStorageLimitsOnlyWhenConfigured(t *testing.T) {
-	pod := plainProfile(t, nil).buildPod(testRun("unset"), "agent-x")
-	agent := container(pod, "agent")
-	if _, set := agent.Resources.Requests[corev1.ResourceEphemeralStorage]; set || volume(pod, "work").EmptyDir.SizeLimit != nil {
-		t.Fatalf("storage limits set unconfigured: %v, %v", agent.Resources, volume(pod, "work").EmptyDir)
+	agent := container(plainProfile(t, nil).buildPod(testRun("unset"), "agent-x"), "agent")
+	if _, set := agent.Resources.Requests[corev1.ResourceEphemeralStorage]; set {
+		t.Fatalf("storage limits set unconfigured: %v", agent.Resources)
 	}
-	pod = plainProfile(t, func(c *Config) {
-		c.Runtime.WorkLimit, c.Runtime.Resources.EphemeralStorage = "20Gi", "30Gi"
-	}).buildPod(testRun("set"), "agent-x")
-	agent = container(pod, "agent")
-	if agent.Resources.Requests.StorageEphemeral().String() != "30Gi" || agent.Resources.Limits.StorageEphemeral().String() != "30Gi" ||
-		volume(pod, "work").EmptyDir.SizeLimit.String() != "20Gi" {
-		t.Fatalf("storage limits not set: %v, %v", agent.Resources, volume(pod, "work").EmptyDir)
+	agent = container(plainProfile(t, func(c *Config) { c.Runtime.Resources.EphemeralStorage = "30Gi" }).buildPod(testRun("set"), "agent-x"), "agent")
+	if agent.Resources.Requests.StorageEphemeral().String() != "30Gi" || agent.Resources.Limits.StorageEphemeral().String() != "30Gi" {
+		t.Fatalf("storage limits not set: %v", agent.Resources)
 	}
 }
 
 func TestPodSpecGivesEveryContainerResources(t *testing.T) {
 	pod := plainProfile(t, nil).buildPod(testRun("resources"), "agent-x")
-	for _, c := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
+	for _, c := range pod.Spec.Containers {
 		for _, list := range []corev1.ResourceList{c.Resources.Requests, c.Resources.Limits} {
 			if list.Cpu().IsZero() || list.Memory().IsZero() {
 				t.Fatalf("container %s resources %v; want cpu and memory requests and limits", c.Name, c.Resources)
@@ -769,17 +658,14 @@ func TestPodSpecSecurity(t *testing.T) {
 	pod := plainProfile(t, nil).buildPod(testRun("security"), "agent-x")
 	spec := pod.Spec
 	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken || spec.EnableServiceLinks == nil || *spec.EnableServiceLinks ||
-		spec.ShareProcessNamespace == nil || !*spec.ShareProcessNamespace || spec.SecurityContext.RunAsNonRoot == nil || !*spec.SecurityContext.RunAsNonRoot ||
+		spec.ShareProcessNamespace != nil || spec.SecurityContext.RunAsNonRoot == nil || !*spec.SecurityContext.RunAsNonRoot ||
 		spec.SecurityContext.SeccompProfile == nil || spec.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Fatalf("pod security %#v", spec)
 	}
-	for _, c := range slices.Concat(spec.InitContainers, spec.Containers) {
+	for _, c := range spec.Containers {
 		s := c.SecurityContext
 		if s == nil || s.AllowPrivilegeEscalation == nil || *s.AllowPrivilegeEscalation || s.Capabilities == nil || !slices.Equal(s.Capabilities.Drop, []corev1.Capability{"ALL"}) {
 			t.Fatalf("container %s security %#v", c.Name, s)
-		}
-		if helperContainer := c.Name != "agent"; helperContainer && (s.ReadOnlyRootFilesystem == nil || !*s.ReadOnlyRootFilesystem) {
-			t.Fatalf("helper container %s has a writable root", c.Name)
 		}
 	}
 }
@@ -798,30 +684,10 @@ func TestPodSpecHoldsNoMaterial(t *testing.T) {
 			t.Fatalf("pod spec holds %q: %s", secret, encoded)
 		}
 	}
-	for _, c := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
-		if slices.Contains(mounts(&c), "material") != (c.Name == "inputs") {
-			t.Fatalf("container %s mounts %v; only inputs mounts the material", c.Name, mounts(&c))
+	for _, variable := range container(pod, "agent").Env {
+		if variable.Name == credentialEnv && (variable.Value != "" || variable.ValueFrom == nil || variable.ValueFrom.SecretKeyRef == nil) {
+			t.Fatalf("credential variable %#v; want a Secret reference", variable)
 		}
-		for _, variable := range c.Env {
-			if variable.Name == credentialEnv && (variable.Value != "" || variable.ValueFrom == nil || variable.ValueFrom.SecretKeyRef == nil) {
-				t.Fatalf("credential variable %#v; want a Secret reference", variable)
-			}
-		}
-	}
-}
-
-func TestHolderMountsNoCredentials(t *testing.T) {
-	pod := plainProfile(t, nil).buildPod(testRun("holder"), "agent-x")
-	if got := mounts(container(pod, "outputs")); !slices.Equal(got, []string{"work", "hold"}) {
-		t.Fatalf("outputs mounts %v; want work and hold alone", got)
-	}
-	for _, mount := range container(pod, "outputs").VolumeMounts {
-		if mount.Name == "work" && !mount.ReadOnly {
-			t.Fatal("outputs mounts work writable")
-		}
-	}
-	if credentials := volume(pod, "credentials").EmptyDir; credentials == nil || credentials.Medium != corev1.StorageMediumMemory {
-		t.Fatalf("credentials volume %#v; want a memory emptyDir", credentials)
 	}
 }
 
@@ -894,9 +760,8 @@ func TestPluginCodeNamesNoGit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	more, _ := filepath.Glob("helper/*.go")
 	word := regexp.MustCompile(`(?i)\bgit\b`)
-	for _, source := range append(sources, append(more, "cmd/wherry-k8s-helper/main.go")...) {
+	for _, source := range sources {
 		if strings.HasSuffix(source, "_test.go") {
 			continue
 		}
@@ -920,13 +785,16 @@ func TestNewValidatesConfig(t *testing.T) {
 		"http address":              func(c *Config) { c.Address = "http://127.0.0.1:6443" },
 		"no namespace":              func(c *Config) { c.Namespace = "" },
 		"namespace not a label":     func(c *Config) { c.Namespace = "Agents_1" },
-		"no helper image":           func(c *Config) { c.HelperImage = "" },
+		"no runs claim":             func(c *Config) { c.RunsClaim = "" },
+		"runs claim not a name":     func(c *Config) { c.RunsClaim = "Runs_1" },
+		"relative runs dir":         func(c *Config) { c.RunsDir = "runs" },
+		"runs_floor not a quantity": func(c *Config) { c.RunsFloor = "lots" },
+		"another user than ours":    func(c *Config) { c.Runtime.User = "1002" },
 		"no image":                  func(c *Config) { c.Runtime.Image = "" },
 		"image with whitespace":     func(c *Config) { c.Runtime.Image = "agent :1" },
 		"env name":                  func(c *Config) { c.Runtime.Env = map[string]string{"A-B": "1"} },
 		"cpu not a quantity":        func(c *Config) { c.Runtime.Resources.CPU = "fast" },
 		"memory not a quantity":     func(c *Config) { c.Runtime.Resources.Memory = "2 GiB" },
-		"work_limit not a quantity": func(c *Config) { c.Runtime.WorkLimit = "lots" },
 		"node selector key":         func(c *Config) { c.NodeSelector = map[string]string{"bad key": "x"} },
 		"node selector value":       func(c *Config) { c.NodeSelector = map[string]string{"zone": "a b"} },
 		"toleration operator":       func(c *Config) { c.Tolerations = []Toleration{{Key: "k", Operator: "In", Effect: "NoSchedule"}} },
@@ -946,8 +814,12 @@ func TestNewValidatesConfig(t *testing.T) {
 	}
 	config := testConfig("https://127.0.0.1:6443", "")
 	config.Runtime.User = "1001"
-	if _, err := build(config, testPool, testToken); err != nil {
-		t.Fatalf("UID alone refused: %v", err)
+	profile, err := build(config, testPool, testToken)
+	if err != nil {
+		t.Fatalf("the receiver's UID refused: %v", err)
+	}
+	if profile.floor != 1<<30 || profile.runs != "/var/lib/wherry/runs/runs" {
+		t.Fatalf("floor %d, runs %q; want 1Gi and runs below runs_dir", profile.floor, profile.runs)
 	}
 }
 
@@ -998,7 +870,7 @@ func TestBuildPodCarriesTheRuntimeGroups(t *testing.T) {
 		}
 		security := profile.buildPod(testRun("groups"), "agent-x").Spec.SecurityContext
 		gid := security.RunAsGroup
-		if (gid == nil) != (test.gid == nil) || gid != nil && *gid != *test.gid || !slices.Equal(security.SupplementalGroups, test.groups) {
+		if (gid == nil) != (test.gid == nil) || gid != nil && *gid != *test.gid || !slices.Equal(security.SupplementalGroups, test.groups) || security.FSGroup != gid {
 			t.Fatalf("%s: runAsGroup %v supplementalGroups %v, want %v %v", name, gid, security.SupplementalGroups, test.gid, test.groups)
 		}
 	}
@@ -1028,12 +900,13 @@ func dispatch(t *testing.T, profile *Kubernetes, run pluginsdk.Run) pluginsdk.Ha
 
 func TestSameRunInTwoPoolsCreatesTwoPods(t *testing.T) {
 	api := newFakeAPI(t)
-	build1, _ := api.profile(t)
-	review, err := build(testConfig(api.server.URL, api.caFile), "review", testToken)
+	build1 := api.profile(t)
+	config := testConfig(api.server.URL, api.caFile)
+	config.RunsDir = t.TempDir()
+	review, err := build(config, "review", testToken)
 	if err != nil {
 		t.Fatal(err)
 	}
-	review.exec = newFakeExec(t)
 	run := testRun("shared")
 	first, second := dispatch(t, build1, run), dispatch(t, review, run)
 	if first.Name == second.Name || api.pod(first.Name) == nil || api.pod(second.Name) == nil {
@@ -1043,7 +916,7 @@ func TestSameRunInTwoPoolsCreatesTwoPods(t *testing.T) {
 
 func TestDispatchCreatesSecretThenPod(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	run := testRun("create")
 	run.Inputs = []pluginsdk.File{{Name: "notes.md", Data: []byte("notes")}}
 	run.Credentials = append(run.Credentials, pluginsdk.Secret{Name: "deploy", File: "id_ed25519", Value: []byte("key")})
@@ -1055,7 +928,7 @@ func TestDispatchCreatesSecretThenPod(t *testing.T) {
 		t.Fatalf("requests %v; want %v", got, want)
 	}
 	secret := api.secret(name)
-	wantData := map[string]string{"prompt": "hello-prompt", "env." + credentialEnv: "test-credential", "inputs.notes.md": "notes", "credentials.id_ed25519": "key"}
+	wantData := map[string]string{"prompt": "hello-prompt", "env." + credentialEnv: "test-credential", "credentials.id_ed25519": "key"}
 	if secret.Type != corev1.SecretTypeOpaque || len(secret.Data) != len(wantData) || secret.Labels[labelRun] != run.ID {
 		t.Fatalf("secret %#v", secret)
 	}
@@ -1070,7 +943,7 @@ func TestDispatchCreatesSecretThenPod(t *testing.T) {
 }
 
 // Each env credential reaches the agent as a reference into the run's Secret, and each file credential as a key the
-// inputs helper writes into the credentials directory.
+// material volume maps into the credentials directory.
 func TestDispatchDeliversCredentialsAtTheirTargets(t *testing.T) {
 	for name, credentials := range map[string][]pluginsdk.Secret{
 		"conformance": pluginsdktest.Credentials,
@@ -1081,7 +954,7 @@ func TestDispatchDeliversCredentialsAtTheirTargets(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			api := newFakeAPI(t)
-			profile, _ := api.profile(t)
+			profile := api.profile(t)
 			run := testRun("credentials")
 			run.Credentials = credentials
 			dispatch(t, profile, run)
@@ -1099,6 +972,10 @@ func TestDispatchDeliversCredentialsAtTheirTargets(t *testing.T) {
 				if string(secret.Data[key]) != string(credential.Value) {
 					t.Fatalf("secret %s = %q; want credential %s", key, secret.Data[key], credential.Name)
 				}
+				items := volume(api.pod(job), "material").Secret.Items
+				if credential.File != "" && !slices.ContainsFunc(items, func(item corev1.KeyToPath) bool { return item.Key == key && item.Path == "files/"+credential.File }) {
+					t.Fatalf("material items %v; want %s at its file", items, key)
+				}
 			}
 			if len(secret.Data) != 1+len(credentials) {
 				t.Fatalf("secret keys %v; want the prompt and one per credential", slices.Sorted(maps.Keys(secret.Data)))
@@ -1109,7 +986,7 @@ func TestDispatchDeliversCredentialsAtTheirTargets(t *testing.T) {
 
 func TestDispatchConvergesOnExistingPod(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	existing := api.agentPod(t, profile, "existing", nil)
 	if handle := dispatch(t, profile, testRun("existing")); handle.Name != existing.Name {
 		t.Fatalf("handle %q; want the existing pod", handle.Name)
@@ -1142,31 +1019,36 @@ func TestDispatchConvergesOnExistingPod(t *testing.T) {
 
 func TestDispatchLeavesTheSecretOfAnExistingPod(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
-	api.agentPod(t, profile, "existing", nil)
-	dispatch(t, profile, testRun("existing"))
+	profile := api.profile(t)
+	pod := api.agentPod(t, profile, "existing", nil)
+	run := testRun("existing")
+	run.Inputs = []pluginsdk.File{{Name: "notes.md", Data: []byte("notes")}}
+	dispatch(t, profile, run)
 	for _, r := range api.recorded() {
 		if strings.Contains(r.path, "/secrets") {
 			t.Fatalf("dispatch onto an existing pod requested %s", r)
 		}
 	}
+	if _, err := os.Stat(runDir(profile, pod.Name)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("dispatch onto an existing pod wrote its inputs: %v", err)
+	}
 }
 
 func TestDispatchRefusesAForeignPod(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.put(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: poolPrefix + "run-foreign"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent"}}}})
 	if outcome, _, err := profile.Dispatch(context.Background(), testRun("foreign")); outcome != pluginsdk.OutcomeUnknown || err == nil || err.Error() != "existing pod is not an agent pod" {
 		t.Fatalf("dispatch onto a foreign pod = %v, %v", outcome, err)
 	}
-	if len(execer.recorded()) != 0 || api.secret(poolPrefix+"run-foreign") != nil {
-		t.Fatalf("execs %v or a Secret for a foreign pod", execer.recorded())
+	if _, err := os.Stat(runDir(profile, poolPrefix+"run-foreign")); api.secret(poolPrefix+"run-foreign") != nil || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("a Secret or a run directory for a foreign pod")
 	}
 }
 
 func TestDispatchOverwritesStaleSecret(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	name := poolPrefix + "run-stale"
 	api.set(func() {
 		api.secrets[name] = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, ResourceVersion: "41"}, Data: map[string][]byte{"prompt": []byte("stale"), "inputs.old": []byte("old")}}
@@ -1238,7 +1120,7 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 	} {
 		t.Run(test.test, func(t *testing.T) {
 			api := newFakeAPI(t)
-			profile, _ := api.profile(t)
+			profile := api.profile(t)
 			api.set(func() { api.intercept = test.intercept(api) })
 			outcome, _, err := profile.Dispatch(context.Background(), testRun("outcome"))
 			if outcome != test.outcome || err == nil {
@@ -1252,7 +1134,7 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 	}
 	t.Run("wait fails", func(t *testing.T) {
 		api := newFakeAPI(t)
-		profile, _ := api.profile(t)
+		profile := api.profile(t)
 		reads := 0
 		api.set(func() {
 			api.intercept = func(response http.ResponseWriter, r *http.Request) bool {
@@ -1271,53 +1153,43 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 	})
 }
 
-func TestDispatchRefusesInputsOverTheSecretLimit(t *testing.T) {
+// The Secret holds the prompt and credentials alone, so inputs pass its limit.
+func TestDispatchWritesInputsPastTheSecretLimit(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	run := testRun("limit")
-	run.Credentials = []pluginsdk.Secret{{Name: "model", Env: credentialEnv, Value: []byte("cred")}, {Name: "deploy", File: "key", Value: []byte("key")}}
-	run.Inputs = []pluginsdk.File{{Name: "first.bin", Data: []byte("abc")}, {Name: "fill.bin", Data: bytes.Repeat([]byte{0xff}, maxSecret-len(run.Prompt)-4-3-3)}}
+	run.Inputs = []pluginsdk.File{{Name: "fill.bin", Data: bytes.Repeat([]byte{0xff}, maxSecret+1)}}
 	dispatch(t, profile, run)
-	run.ID = "run-over"
-	run.Inputs[1].Data = append(run.Inputs[1].Data, 0)
-	before := len(api.recorded())
-	outcome, _, err := profile.Dispatch(context.Background(), run)
-	var tooLarge *pluginsdk.InputTooLargeError
-	if outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &tooLarge) || tooLarge.Name != "fill.bin" {
-		t.Fatalf("dispatch one byte over = %v, %v; want fill.bin too large and nothing created", outcome, err)
+	name := profile.jobName(run.ID)
+	if data, err := os.ReadFile(filepath.Join(runDir(profile, name), "inputs/fill.bin")); err != nil || !bytes.Equal(data, run.Inputs[0].Data) {
+		t.Fatalf("input of %d bytes, %v; want it whole", len(data), err)
 	}
-	if after := len(api.recorded()); after != before {
-		t.Fatalf("an oversized turn made %d requests", after-before)
+	if secret := api.secret(name); len(secret.Data) != 2 {
+		t.Fatalf("secret keys %v; want the prompt and the credential", slices.Sorted(maps.Keys(secret.Data)))
 	}
 }
 
 func TestDispatchRefusesANameOverTheKeyLimit(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	for i, test := range []struct {
-		input, file string
-		refused     string
+		file    string
+		refused bool
 	}{
-		{input: strings.Repeat("i", 246)},
-		{input: strings.Repeat("i", 247), refused: strings.Repeat("i", 247)},
 		{file: strings.Repeat("f", 241)},
-		{file: strings.Repeat("f", 242), refused: strings.Repeat("f", 242)},
+		{file: strings.Repeat("f", 242), refused: true},
 	} {
 		run := testRun("key-" + strconv.Itoa(i))
-		if test.input != "" {
-			run.Inputs = []pluginsdk.File{{Name: test.input, Data: []byte("x")}}
-		} else {
-			run.Credentials = []pluginsdk.Secret{{Name: "c", File: test.file, Value: []byte("x")}}
-		}
+		run.Credentials = []pluginsdk.Secret{{Name: "c", File: test.file, Value: []byte("x")}}
 		before := len(api.recorded())
 		outcome, _, err := profile.Dispatch(context.Background(), run)
 		var tooLarge *pluginsdk.InputTooLargeError
 		switch {
-		case test.refused == "" && (err != nil || outcome != pluginsdk.OutcomeCreated):
-			t.Fatalf("name of %d characters: %v, %v; want created", len(test.input+test.file), outcome, err)
-		case test.refused != "" && (outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &tooLarge) || tooLarge.Name != test.refused):
-			t.Fatalf("name of %d characters: %v, %v; want it too large", len(test.refused), outcome, err)
-		case test.refused != "" && len(api.recorded()) != before:
+		case !test.refused && (err != nil || outcome != pluginsdk.OutcomeCreated):
+			t.Fatalf("name of %d characters: %v, %v; want created", len(test.file), outcome, err)
+		case test.refused && (outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &tooLarge) || tooLarge.Name != test.file):
+			t.Fatalf("name of %d characters: %v, %v; want it too large", len(test.file), outcome, err)
+		case test.refused && len(api.recorded()) != before:
 			t.Fatalf("a refused name made %d requests", len(api.recorded())-before)
 		}
 	}
@@ -1325,7 +1197,7 @@ func TestDispatchRefusesANameOverTheKeyLimit(t *testing.T) {
 
 func TestDispatchRefusesAnOversizedPrompt(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	run := testRun("prompt")
 	run.Prompt = bytes.Repeat([]byte("p"), maxSecret)
 	outcome, _, err := profile.Dispatch(context.Background(), run)
@@ -1338,37 +1210,14 @@ func TestDispatchRefusesAnOversizedPrompt(t *testing.T) {
 	}
 }
 
-func TestDispatchRefusesPodsOfMixedUsers(t *testing.T) {
-	for name, admit := range map[string]func(*corev1.Pod){
-		"different": func(pod *corev1.Pod) {
-			assignUser(pod)
-			pod.Spec.Containers[1].SecurityContext.RunAsUser = new(int64(1001))
-		},
-		"unset": func(pod *corev1.Pod) {},
-	} {
-		t.Run(name, func(t *testing.T) {
-			api := newFakeAPI(t)
-			profile, _ := api.profile(t)
-			api.set(func() { api.admit = admit })
-			outcome, _, err := profile.Dispatch(context.Background(), testRun("mixed"))
-			if outcome != pluginsdk.OutcomeNothingCreated || err == nil || err.Error() != "agent pod containers run as different users; set runtime.user" {
-				t.Fatalf("dispatch = %v, %v; want mixed users refused", outcome, err)
-			}
-			if api.pod(poolPrefix+"run-mixed") != nil || api.secret(poolPrefix+"run-mixed") != nil {
-				t.Fatal("the refused pod or its Secret remains")
-			}
-		})
-	}
-}
-
 func pendingKubelet(pod *corev1.Pod) {
-	setStatus(pod, corev1.PodPending, runningStatus("inputs"), waiting("agent", "PodInitializing", ""), waiting("outputs", "PodInitializing", ""))
+	setStatus(pod, corev1.PodPending, waiting("agent", "ContainerCreating", ""))
 }
 
 func TestDispatchTimeoutDeletesThePod(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = pendingKubelet })
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -1386,7 +1235,7 @@ func TestDispatchTimeoutDeletesThePod(t *testing.T) {
 
 func TestDispatchReportsPlacement(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	dispatch(t, profile, testRun("placed"))
 	placement := samples(t, profile)["wherry_plugin_placement_seconds/"].Histogram
 	if placement.Count != 1 || len(placement.Buckets) != len(pluginsdk.PlacementBuckets) || placement.Buckets[len(placement.Buckets)-1] != 1 {
@@ -1424,65 +1273,6 @@ func (o *objects) count(path string) int {
 	return o.gets[path]
 }
 
-// initContainer is the helper's inputs container run in-process in a fake pod's root.
-type initContainer struct {
-	mu      sync.Mutex
-	ended   bool
-	code    int
-	message string
-}
-
-// startInit runs the inputs container of the pod for fetches and makes the fake's kubelet report it; the agent starts
-// once it exits 0.
-func startInit(t *testing.T, api *fakeAPI, execer *fakeExec, pod string, fetches []pluginsdk.Fetch, before func(reads int) bool) *initContainer {
-	t.Helper()
-	root := execer.root(pod)
-	if err := os.WriteFile(filepath.Join(root, "run/wherry/material/prompt"), []byte("hello-prompt"), 0o444); err != nil {
-		t.Fatal(err)
-	}
-	args := []string{helper.Protocol, "inputs", "--await"}
-	for _, fetch := range fetches {
-		args = append(args, fetch.Name, strconv.FormatInt(fetch.Size, 10), fetch.SHA256)
-	}
-	init := &initContainer{}
-	go func() {
-		var stderr bytes.Buffer
-		code := helper.Run(helper.Env{Root: root, Stdin: strings.NewReader(""), Stdout: io.Discard, Stderr: &stderr}, args)
-		init.mu.Lock()
-		init.ended, init.code, init.message = true, code, stderr.String()
-		init.mu.Unlock()
-	}()
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		if _, err := os.Stat(filepath.Join(root, "wherry/.inputs/lock")); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the init container never waited")
-		}
-	}
-	reads := 0
-	api.set(func() {
-		api.kubelet = func(p *corev1.Pod) {
-			reads++
-			init.mu.Lock()
-			defer init.mu.Unlock()
-			switch {
-			case before != nil && before(reads):
-				setStatus(p, corev1.PodPending, waiting("inputs", "PodInitializing", ""), waiting("agent", "PodInitializing", ""), waiting("outputs", "PodInitializing", ""))
-			case !init.ended:
-				pendingKubelet(p)
-			case init.code == 0:
-				setStatus(p, corev1.PodRunning, exited("inputs", 0), runningStatus("agent"), runningStatus("outputs"))
-			default:
-				ended := exited("inputs", int32(init.code))
-				ended.State.Terminated.Message = init.message
-				setStatus(p, corev1.PodFailed, ended, waiting("agent", "PodInitializing", ""), waiting("outputs", "PodInitializing", ""))
-			}
-		}
-	})
-	return init
-}
-
 func fetchRun(name string, objects *objects, files map[string][]byte) pluginsdk.Run {
 	run := testRun(name)
 	for _, file := range slices.Sorted(maps.Keys(files)) {
@@ -1502,216 +1292,135 @@ func serveFiles(files map[string][]byte) func(http.ResponseWriter, *http.Request
 	}
 }
 
-func TestDispatchDeliversFetches(t *testing.T) {
-	fast(t)
+// runDir is the directory of pod's run on the profile's runs claim.
+func runDir(profile *Kubernetes, pod string) string {
+	return filepath.Join(profile.runs, pod)
+}
+
+// tree reads every file below dir as its mode and content, by path.
+func tree(dir string) (map[string]string, error) {
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		name, _ := filepath.Rel(dir, path)
+		files[name] = info.Mode().String()
+		if entry.Type().IsRegular() {
+			data, err := os.ReadFile(path)
+			files[name] += " " + string(data)
+			return err
+		}
+		return nil
+	})
+	return files, err
+}
+
+func TestDispatchWritesInputsBeforeThePod(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	files := map[string][]byte{"data.csv": []byte("a,b\n1,2\n"), "model.bin": {0, 1, 2, 255}}
-	store := newObjects(t, serveFiles(files))
-	run := fetchRun("fetch", store, files)
-	name := profile.jobName(run.ID)
-	startInit(t, api, execer, name, run.Fetches, nil)
-	dispatch(t, profile, run)
-	for file, data := range files {
-		if got, err := os.ReadFile(filepath.Join(execer.root(name), "wherry/inputs", file)); err != nil || !bytes.Equal(got, data) {
-			t.Fatalf("delivered %s = %q, %v", file, got, err)
+	run := fetchRun("inputs", newObjects(t, serveFiles(files)), files)
+	run.Inputs = []pluginsdk.File{{Name: "notes.md", Data: []byte("notes")}}
+	dir := runDir(profile, profile.jobName(run.ID))
+	var created map[string]string
+	api.set(func() {
+		api.intercept = func(_ http.ResponseWriter, r *http.Request) bool {
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pods") {
+				created, _ = tree(dir)
+			}
+			return false
 		}
-	}
-	if calls := execer.recorded(); !slices.Equal(calls, []string{"inputs inputs put data.csv", "inputs inputs put model.bin", "inputs inputs done"}) {
-		t.Fatalf("execs %v; want a put of each fetch, then done", calls)
+	})
+	dispatch(t, profile, run)
+	want := map[string]string{".": "drwx------", "inputs": "drwx------", "inputs/notes.md": "-rw------- notes",
+		"inputs/data.csv": "-rw------- a,b\n1,2\n", "inputs/model.bin": "-rw------- \x00\x01\x02\xff"}
+	if !maps.Equal(created, want) {
+		t.Fatalf("run directory %q when the pod was created; want %q", created, want)
 	}
 }
 
-func TestDispatchWaitsForTheInitContainer(t *testing.T) {
-	fast(t)
+func TestDispatchKeepsACompleteRunDirectory(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	files := map[string][]byte{"data.csv": []byte("data")}
-	run := fetchRun("init", newObjects(t, serveFiles(files)), files)
-	var mu sync.Mutex
-	initRunning := false
-	startInit(t, api, execer, profile.jobName(run.ID), run.Fetches, func(reads int) bool {
-		mu.Lock()
-		defer mu.Unlock()
-		initRunning = reads > 3
-		return !initRunning
-	})
-	execer.set(func() {
-		execer.fail = func(string, []string) error {
-			mu.Lock()
-			defer mu.Unlock()
-			if !initRunning {
-				t.Error("exec before the init container ran")
-			}
-			return nil
-		}
-	})
+	store := newObjects(t, serveFiles(files))
+	run := fetchRun("again", store, files)
+	run.Inputs = []pluginsdk.File{{Name: "notes.md", Data: []byte("notes")}}
+	name := profile.jobName(run.ID)
 	dispatch(t, profile, run)
+	// A receiver that restarted between the inputs and the pod finds the directory complete and no pod.
+	api.set(func() { delete(api.pods, name) })
+	dispatch(t, profile, run)
+	api.set(func() { delete(api.pods, name) })
+	if store.count("/data.csv") != 1 {
+		t.Fatalf("fetched %d times; want the complete directory kept", store.count("/data.csv"))
+	}
+	for _, partial := range []func(dir string) error{
+		func(dir string) error { return os.Truncate(filepath.Join(dir, "inputs/data.csv"), 2) },
+		func(dir string) error { return os.WriteFile(filepath.Join(dir, "inputs/stray"), nil, 0o600) },
+		func(dir string) error { return os.Mkdir(filepath.Join(dir, "outputs"), 0o700) },
+		func(dir string) error { return os.Remove(filepath.Join(dir, "inputs/notes.md")) },
+	} {
+		if err := partial(runDir(profile, name)); err != nil {
+			t.Fatal(err)
+		}
+		before := store.count("/data.csv")
+		dispatch(t, profile, run)
+		api.set(func() { delete(api.pods, name) })
+		got, err := tree(runDir(profile, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if store.count("/data.csv") != before+1 || len(got) != 4 || got["inputs/data.csv"] != "-rw------- data" || got["inputs/notes.md"] != "-rw------- notes" {
+			t.Fatalf("run directory %q; want it rewritten whole", got)
+		}
+	}
 }
 
-// transportFailure is how an exec that failed in transport reads.
-var transportFailure = errors.New("error dialing backend: connection reset by peer")
-
-func TestDispatchRetriesAFailedPut(t *testing.T) {
-	fast(t)
-	files := map[string][]byte{"data.csv": []byte("data")}
+func TestFetchFailureCreatesNoPod(t *testing.T) {
+	data := []byte("data")
 	for _, test := range []struct {
-		name     string
-		failures int
-		failFail bool
-		state    pluginsdk.JobState
-		gets     int
-		failure  error
+		reason string
+		serve  func(http.ResponseWriter, *http.Request)
 	}{
-		{"one transport failure", 1, false, pluginsdk.JobRunning, 2, transportFailure},
-		{"three transport failures", 3, false, pluginsdk.JobNeverStarted, 3, transportFailure},
-		{"a failed fail", 3, true, 0, 3, transportFailure},
-		{"a put before the init container waits", 1, false, pluginsdk.JobRunning, 2, &exitError{code: helper.ExitNotWaiting, message: "the init container is not waiting for inputs"}},
+		{"403", func(response http.ResponseWriter, _ *http.Request) {
+			http.Error(response, "AccessDenied", http.StatusForbidden)
+		}},
+		{"302", func(response http.ResponseWriter, r *http.Request) {
+			http.Redirect(response, r, "/elsewhere/data.csv", http.StatusFound)
+		}},
+		{"shorter than its size", func(response http.ResponseWriter, _ *http.Request) { _, _ = response.Write(data[:3]) }},
+		{"longer than its size", func(response http.ResponseWriter, _ *http.Request) { _, _ = response.Write(bytes.Repeat(data, 2<<20)) }},
+		{"does not match its digest", func(response http.ResponseWriter, _ *http.Request) { _, _ = response.Write([]byte("date")) }},
 	} {
-		t.Run(test.name, func(t *testing.T) {
+		t.Run(test.reason, func(t *testing.T) {
 			api := newFakeAPI(t)
-			profile, execer := api.profile(t)
-			store := newObjects(t, serveFiles(files))
-			run := fetchRun("retry", store, files)
-			startInit(t, api, execer, profile.jobName(run.ID), run.Fetches, nil)
-			puts := 0
-			execer.set(func() {
-				execer.fail = func(_ string, args []string) error {
-					if args[1] == "put" {
-						if puts++; puts <= test.failures {
-							return test.failure
-						}
-					}
-					if args[1] == "fail" && test.failFail {
-						return transportFailure
-					}
-					return nil
-				}
-			})
-			outcome, handle, err := profile.Dispatch(context.Background(), run)
-			if store.count("/data.csv") != test.gets {
-				t.Fatalf("fetched %d times; want %d", store.count("/data.csv"), test.gets)
+			profile := api.profile(t)
+			store := newObjects(t, test.serve)
+			run := fetchRun("fetch", store, map[string][]byte{"data.csv": data})
+			outcome, _, err := profile.Dispatch(context.Background(), run)
+			var failed *fetchError
+			if outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &failed) || err.Error() != "fetch data.csv: "+test.reason {
+				t.Fatalf("dispatch = %v, %v; want fetch data.csv: %s and nothing created", outcome, err, test.reason)
 			}
-			if test.failFail {
-				if outcome != pluginsdk.OutcomeUnknown || err == nil {
-					t.Fatalf("dispatch with a failed fail = %v, %v; want its error", outcome, err)
-				}
-				return
+			if created := paths(api.recorded(), http.MethodPost); created != nil || store.count("/elsewhere/data.csv") != 0 {
+				t.Fatalf("created %v, or followed a redirect, for a failed fetch", created)
 			}
-			if err != nil || outcome != pluginsdk.OutcomeCreated {
-				t.Fatalf("dispatch = %v, %v", outcome, err)
-			}
-			job, err := profile.Lookup(context.Background(), run.ID)
-			if err != nil || job.State != test.state || job.Handle.Name != handle.Name {
-				t.Fatalf("lookup = %+v, %v; want state %v", job, err, test.state)
+			if info, err := os.Stat(filepath.Join(runDir(profile, profile.jobName(run.ID)), "inputs/data.csv")); err == nil && info.Size() > int64(len(data))+1 {
+				t.Fatalf("wrote %d bytes of a fetch of %d", info.Size(), len(data))
 			}
 		})
 	}
 }
 
-func TestDispatchStopsDeliveringToAnEndedInitContainer(t *testing.T) {
-	fast(t)
-	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	files := map[string][]byte{"a.csv": []byte("a"), "b.csv": []byte("b")}
-	run := fetchRun("ended", newObjects(t, serveFiles(files)), files)
-	name := profile.jobName(run.ID)
-	init := startInit(t, api, execer, name, run.Fetches, nil)
-	execer.set(func() {
-		execer.fail = func(_ string, args []string) error {
-			if args[1] == "put" && args[2] == "b.csv" {
-				// Another dispatch delivered b.csv and finished the init container.
-				root := execer.roots[name]
-				if err := os.WriteFile(filepath.Join(root, "wherry/inputs/b.csv"), []byte("b"), 0o600); err != nil {
-					t.Error(err)
-				}
-				if code := helper.Run(helper.Env{Root: root, Stdin: strings.NewReader(""), Stdout: io.Discard, Stderr: io.Discard}, []string{helper.Protocol, "inputs", "done"}); code != 0 {
-					t.Errorf("done exited %d", code)
-				}
-				for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-					init.mu.Lock()
-					ended := init.ended
-					init.mu.Unlock()
-					if ended {
-						break
-					}
-				}
-				return transportFailure
-			}
-			return nil
-		}
-	})
-	dispatch(t, profile, run)
-	if calls := execer.recorded(); !slices.Equal(calls, []string{"inputs inputs put a.csv", "inputs inputs put b.csv"}) {
-		t.Fatalf("execs %v; want none after the init container ended", calls)
-	}
-}
-
-func TestFetchRefusesRedirects(t *testing.T) {
-	fast(t)
-	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	files := map[string][]byte{"data.csv": []byte("data")}
-	store := newObjects(t, func(response http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/data.csv" {
-			http.Redirect(response, r, "/elsewhere/data.csv", http.StatusFound)
-			return
-		}
-		_, _ = response.Write(files["data.csv"])
-	})
-	run := fetchRun("redirect", store, files)
-	startInit(t, api, execer, profile.jobName(run.ID), run.Fetches, nil)
-	dispatch(t, profile, run)
-	if store.count("/elsewhere/data.csv") != 0 {
-		t.Fatal("the fetch followed a redirect")
-	}
-	if calls := execer.recorded(); !slices.Equal(calls, []string{"inputs inputs fail data.csv"}) {
-		t.Fatalf("execs %v; want the fetch failed", calls)
-	}
-}
-
-func TestFetchBoundsTheBody(t *testing.T) {
-	fast(t)
-	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	files := map[string][]byte{"data.csv": []byte("data")}
-	store := newObjects(t, func(response http.ResponseWriter, _ *http.Request) {
-		_, _ = response.Write(bytes.Repeat([]byte("x"), 8<<20))
-	})
-	run := fetchRun("bounded", store, files)
-	startInit(t, api, execer, profile.jobName(run.ID), run.Fetches, nil)
-	dispatch(t, profile, run)
-	execer.mu.Lock()
-	defer execer.mu.Unlock()
-	if len(execer.stdin) == 0 || execer.stdin[0] > 5 {
-		t.Fatalf("the put could read %v bytes; want at most the size and one more", execer.stdin)
-	}
-}
-
-func TestFetchFailureNeverStartsTheAgent(t *testing.T) {
-	fast(t)
-	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	files := map[string][]byte{"data.csv": []byte("data")}
-	store := newObjects(t, func(response http.ResponseWriter, _ *http.Request) {
-		http.Error(response, "AccessDenied", http.StatusForbidden)
-	})
-	run := fetchRun("denied", store, files)
-	startInit(t, api, execer, profile.jobName(run.ID), run.Fetches, nil)
-	handle := dispatch(t, profile, run)
-	job, err := profile.Lookup(context.Background(), run.ID)
-	if err != nil || job.State != pluginsdk.JobNeverStarted {
-		t.Fatalf("lookup = %+v, %v; want never started", job, err)
-	}
-	terminal, err := profile.Follow(context.Background(), handle, 0, make(chan pluginsdk.Line))
-	if err != nil || terminal.Started || terminal.Class != pluginsdk.ClassFetch || terminal.Reason != "input data.csv: not fetched" {
-		t.Fatalf("terminal %+v, %v; want never started with class fetch", terminal, err)
-	}
-}
-
 func TestLookupMissingPod(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	if job, err := profile.Lookup(context.Background(), "run-missing"); err != nil || job.State != pluginsdk.JobAbsent {
 		t.Fatalf("lookup = %+v, %v; want absent", job, err)
 	}
@@ -1719,7 +1428,7 @@ func TestLookupMissingPod(t *testing.T) {
 
 func TestLookupReadsDispatchMetadata(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	run := testRun("meta")
 	handle := dispatch(t, profile, run)
 	job, err := profile.Lookup(context.Background(), run.ID)
@@ -1762,9 +1471,6 @@ var capturedStates = []struct {
 	{"image-pull-backoff", pluginsdk.JobNeverStarted, true, "image", `Back-off pulling image "registry.invalid/wherry-conformance:0": ErrImagePull: initializing source docker://registry.invalid/wherry-conformance:0: pinging container registry registry.invalid: Get "https://registry.invalid/v2/": dial tcp: lookup registry.invalid: no such host`},
 	{"create-container-config-error", pluginsdk.JobNeverStarted, true, "config", `container has runAsNonRoot and image will run as root (pod: "agent-44575cf5b285-capture-create-container-config-error_wherry-agents(6f1c0b8e)", container: agent)`},
 	{"start-error", pluginsdk.JobNeverStarted, true, "start", `failed to create containerd task: exec: "/bin/agent-run": stat /bin/agent-run: no such file or directory`},
-	{"fetch-failure", pluginsdk.JobNeverStarted, true, pluginsdk.ClassFetch, "input data.csv: not fetched"},
-	{"setup-failure", pluginsdk.JobNeverStarted, true, "setup", "cannot create files"},
-	{"protocol-mismatch", pluginsdk.JobNeverStarted, true, "setup", "helper protocol v1 not supported"},
 	{"evicted", pluginsdk.JobNeverStarted, true, "pod", "Evicted: The node was low on resource: ephemeral-storage. Threshold quantity: 4902142351, available: 3893504Ki. "},
 	{"err-image-pull", 0, false, "", ""},
 	{"unschedulable", 0, false, "", ""},
@@ -1781,7 +1487,7 @@ func TestLookupMapsCapturedPods(t *testing.T) {
 				t.Fatalf("judged %v, %+v, settled %t; want %v, class %q, reason %q, settled %t", state, terminal, settled, test.state, test.class, test.reason, test.settled)
 			}
 			api := newFakeAPI(t)
-			profile, _ := api.profile(t)
+			profile := api.profile(t)
 			api.set(func() { api.kubelet = nil })
 			api.put(pod)
 			ctx, cancel := context.Background(), context.CancelFunc(func() {})
@@ -1805,7 +1511,7 @@ func TestLookupMapsCapturedPods(t *testing.T) {
 
 func TestLookupTreatsADeletingPodAsEnded(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = nil })
 	for file, want := range map[string]pluginsdk.JobState{"lost-node-running": pluginsdk.JobEnded, "lost-node-pending": pluginsdk.JobNeverStarted} {
 		api.put(captured(t, file))
@@ -1822,7 +1528,7 @@ func TestLookupTreatsADeletingPodAsEnded(t *testing.T) {
 
 func TestLookupRefusesAForeignPod(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	api.put(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: poolPrefix + "run-foreign"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent"}}}})
 	if _, err := profile.Lookup(context.Background(), "run-foreign"); err == nil || err.Error() != "existing pod is not an agent pod" {
 		t.Fatalf("lookup of a foreign pod: %v", err)
@@ -1832,7 +1538,7 @@ func TestLookupRefusesAForeignPod(t *testing.T) {
 func TestLookupWaitsForAPendingPod(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	reads := 0
 	api.set(func() {
 		api.kubelet = func(pod *corev1.Pod) {
@@ -1840,7 +1546,7 @@ func TestLookupWaitsForAPendingPod(t *testing.T) {
 				pendingKubelet(pod)
 				return
 			}
-			setStatus(pod, corev1.PodRunning, exited("inputs", 0), runningStatus("agent"), runningStatus("outputs"))
+			setStatus(pod, corev1.PodRunning, runningStatus("agent"))
 		}
 	})
 	api.agentPod(t, profile, "pending", nil)
@@ -1852,7 +1558,7 @@ func TestLookupWaitsForAPendingPod(t *testing.T) {
 func TestLookupTimeoutDeletesThePod(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = pendingKubelet })
 	pod := api.agentPod(t, profile, "stuck", nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -1949,17 +1655,17 @@ func endsAfter(reads int, code int32) func(*corev1.Pod) {
 	seen := 0
 	return func(pod *corev1.Pod) {
 		if seen++; seen <= reads {
-			setStatus(pod, corev1.PodRunning, exited("inputs", 0), runningStatus("agent"), runningStatus("outputs"))
+			setStatus(pod, corev1.PodRunning, runningStatus("agent"))
 			return
 		}
-		setStatus(pod, corev1.PodRunning, exited("inputs", 0), exited("agent", code), runningStatus("outputs"))
+		setStatus(pod, corev1.PodRunning, exited("agent", code))
 	}
 }
 
 func TestFollowOffsetsAndReattach(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	logs, _ := logStream(func(int) []byte { return []byte("a\nbb\nccc\n") }, nil)
 	api.set(func() { api.logs, api.kubelet = logs, endsAfter(0, 0) })
 	handle := handleOf(api.agentPod(t, profile, "offsets", nil))
@@ -1976,7 +1682,7 @@ func TestFollowOffsetsAndReattach(t *testing.T) {
 func TestFollowReadsTheStreamToItsEnd(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	logs, opened := logStream(func(int) []byte { return []byte("one\ntwo\n{\"type\":\"result\"}") }, []byte("rotated"))
 	api.set(func() { api.logs, api.kubelet = logs, endsAfter(1, 0) })
 	handle := handleOf(api.agentPod(t, profile, "end", nil))
@@ -1992,7 +1698,7 @@ func TestFollowReadsTheStreamToItsEnd(t *testing.T) {
 func TestFollowSurvivesRotationWithoutReattach(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	line := append(bytes.Repeat([]byte("x"), 1023), '\n')
 	whole := bytes.Repeat(line, 60<<10)
 	logs, _ := logStream(func(int) []byte { return whole }, whole[len(whole)-10<<20:])
@@ -2009,7 +1715,7 @@ func TestFollowSurvivesRotationWithoutReattach(t *testing.T) {
 func TestFollowReopensAStreamThatClosedEarly(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	logs, opened := logStream(func(n int) []byte {
 		if n == 1 {
 			return []byte("one\ntw")
@@ -2020,10 +1726,10 @@ func TestFollowReopensAStreamThatClosedEarly(t *testing.T) {
 		api.logs = logs
 		api.kubelet = func(pod *corev1.Pod) {
 			if opened() < 2 {
-				setStatus(pod, corev1.PodRunning, exited("inputs", 0), runningStatus("agent"), runningStatus("outputs"))
+				setStatus(pod, corev1.PodRunning, runningStatus("agent"))
 				return
 			}
-			setStatus(pod, corev1.PodRunning, exited("inputs", 0), exited("agent", 0), runningStatus("outputs"))
+			setStatus(pod, corev1.PodRunning, exited("agent", 0))
 		}
 	})
 	handle := handleOf(api.agentPod(t, profile, "early", nil))
@@ -2040,7 +1746,7 @@ func TestFollowReopensAStreamThatClosedEarly(t *testing.T) {
 func TestFollowFailsOnALogShorterThanTheOffset(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	logs, _ := logStream(func(int) []byte { return []byte("short\n") }, nil)
 	api.set(func() { api.logs, api.kubelet = logs, endsAfter(0, 0) })
 	handle := handleOf(api.agentPod(t, profile, "short", nil))
@@ -2052,14 +1758,14 @@ func TestFollowFailsOnALogShorterThanTheOffset(t *testing.T) {
 func TestFollowReturnsTerminal(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	logs, _ := logStream(func(int) []byte { return []byte("done\n") }, nil)
 	api.set(func() {
 		api.logs = logs
 		api.kubelet = func(pod *corev1.Pod) {
 			agent := exited("agent", 137)
 			agent.State.Terminated.Signal = 9
-			setStatus(pod, corev1.PodRunning, exited("inputs", 0), agent, runningStatus("outputs"))
+			setStatus(pod, corev1.PodRunning, agent)
 			pod.Spec.NodeName = "worker-2"
 		}
 	})
@@ -2083,14 +1789,14 @@ func TestFollowCarriesTheAgentsTermination(t *testing.T) {
 	} {
 		t.Run(test.reason, func(t *testing.T) {
 			api := newFakeAPI(t)
-			profile, _ := api.profile(t)
+			profile := api.profile(t)
 			logs, _ := logStream(func(int) []byte { return []byte("done\n") }, nil)
 			api.set(func() {
 				api.logs = logs
 				api.kubelet = func(pod *corev1.Pod) {
 					agent := exited("agent", test.code)
 					agent.State.Terminated.Reason = test.reason
-					setStatus(pod, corev1.PodRunning, exited("inputs", 0), agent, runningStatus("outputs"))
+					setStatus(pod, corev1.PodRunning, agent)
 				}
 			})
 			_, terminal, err := followAll(t, profile, handleOf(api.agentPod(t, profile, "ended", nil)), 0)
@@ -2103,7 +1809,7 @@ func TestFollowCarriesTheAgentsTermination(t *testing.T) {
 
 func TestFollowOfANeverStartedPod(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = nil })
 	pod := api.put(captured(t, "image-pull-backoff"))
 	_, terminal, err := followAll(t, profile, handleOf(pod), 0)
@@ -2120,7 +1826,7 @@ func blipsThen(reads int, next func(*corev1.Pod)) func(*corev1.Pod) {
 	seen := 0
 	return func(pod *corev1.Pod) {
 		if seen++; seen <= reads {
-			setStatus(pod, corev1.PodRunning, exited("inputs", 0))
+			setStatus(pod, corev1.PodRunning)
 			return
 		}
 		next(pod)
@@ -2130,7 +1836,7 @@ func blipsThen(reads int, next func(*corev1.Pod)) func(*corev1.Pod) {
 func TestFollowWaitsOutAnUnsettledPod(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	logs, _ := logStream(func(int) []byte { return []byte("a\n") }, nil)
 	api.set(func() { api.logs, api.kubelet = logs, blipsThen(2, endsAfter(0, 0)) })
 	handle := handleOf(api.agentPod(t, profile, "blip", nil))
@@ -2146,7 +1852,7 @@ func TestFollowOfADeletingPodOpensNoLogs(t *testing.T) {
 		return len(slices.DeleteFunc(paths(api.recorded(), ""), func(p string) bool { return !strings.HasSuffix(p, "/log") }))
 	}
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = nil })
 	pod := api.put(captured(t, "lost-node-running"))
 	_, terminal, err := followAll(t, profile, handleOf(pod), 0)
@@ -2154,7 +1860,7 @@ func TestFollowOfADeletingPodOpensNoLogs(t *testing.T) {
 		t.Fatalf("terminal %+v, %v with %d log requests; want exit code -1 and none", terminal, err, logRequests(api))
 	}
 	api = newFakeAPI(t)
-	profile, _ = api.profile(t)
+	profile = api.profile(t)
 	release := make(chan struct{})
 	defer close(release)
 	reads := 0
@@ -2181,10 +1887,10 @@ func TestFollowOfADeletingPodOpensNoLogs(t *testing.T) {
 func TestTerminalCarriesPlatformReason(t *testing.T) {
 	const message = `Back-off pulling image "registry.example.com/agent:1.0": unauthorized: token=registry-secret-in-message ` + "é"
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() {
 		api.kubelet = func(pod *corev1.Pod) {
-			setStatus(pod, corev1.PodPending, exited("inputs", 0), waiting("agent", "ImagePullBackOff", message), runningStatus("outputs"))
+			setStatus(pod, corev1.PodPending, waiting("agent", "ImagePullBackOff", message))
 		}
 	})
 	pod := api.agentPod(t, profile, "reason", nil)
@@ -2196,8 +1902,9 @@ func TestTerminalCarriesPlatformReason(t *testing.T) {
 
 func TestStaleHandleRefusesReplacedPod(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	pod := api.agentPod(t, profile, "replaced", nil)
+	writeOutputs(t, profile, pod.Name, map[string]string{"report.md": "report"})
 	stale := handleOf(pod)
 	stale.Data = bytes.Replace(stale.Data, []byte(pod.UID), []byte("uid-of-the-purged-pod"), 1)
 	for name, call := range map[string]func(context.Context) error{
@@ -2217,138 +1924,56 @@ func TestStaleHandleRefusesReplacedPod(t *testing.T) {
 			t.Fatalf("%s through a stale handle: %v; want the pod was replaced", name, err)
 		}
 	}
-	if calls := execer.recorded(); len(calls) != 0 {
-		t.Fatalf("execs %v through a stale handle", calls)
+	if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
+		t.Fatalf("deletes %v through a stale handle", deleted)
 	}
 }
 
-// stopsOn is a kubelet and a signal call: the agent ends on the first signal in kills.
-func stopsOn(api *fakeAPI, execer *fakeExec, kills ...syscall.Signal) {
-	var mu sync.Mutex
-	killed := false
-	execer.set(func() {
-		execer.signal = func(pid int, sig syscall.Signal) error {
-			mu.Lock()
-			defer mu.Unlock()
-			if pid == agentPID && slices.Contains(kills, sig) {
-				killed = true
-			}
-			return nil
-		}
-	})
-	api.set(func() {
-		api.kubelet = func(pod *corev1.Pod) {
-			mu.Lock()
-			defer mu.Unlock()
-			if killed {
-				setStatus(pod, corev1.PodRunning, exited("inputs", 0), exited("agent", 143), runningStatus("outputs"))
-				return
-			}
-			setStatus(pod, corev1.PodRunning, exited("inputs", 0), runningStatus("agent"), runningStatus("outputs"))
-		}
-	})
-}
-
-func TestStopSignalsThenWaits(t *testing.T) {
+func TestStopDeletesWithTheGraceAndKeepsOutputs(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	stopsOn(api, execer, syscall.SIGTERM)
+	profile := api.profile(t)
+	api.set(func() { api.linger = 3 })
 	pod := api.agentPod(t, profile, "stop", nil)
+	writeOutputs(t, profile, pod.Name, map[string]string{"report.md": "report"})
 	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil {
 		t.Fatal(err)
 	}
-	if calls := execer.recorded(); !slices.Equal(calls, []string{"outputs stop TERM"}) {
-		t.Fatalf("execs %v; want one SIGTERM", calls)
+	if api.pod(pod.Name) != nil {
+		t.Fatal("stop returned before the pod went")
 	}
-	if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
-		t.Fatalf("stop deleted %v", deleted)
-	}
-}
-
-func TestStopEscalatesAfterGrace(t *testing.T) {
-	fast(t)
-	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	stopsOn(api, execer, syscall.SIGKILL)
-	pod := api.agentPod(t, profile, "escalate", nil)
-	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil {
-		t.Fatal(err)
-	}
-	if calls := execer.recorded(); !slices.Equal(calls, []string{"outputs stop TERM", "outputs stop KILL"}) {
-		t.Fatalf("execs %v; want SIGTERM then SIGKILL", calls)
-	}
-	if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
-		t.Fatalf("stop deleted %v", deleted)
-	}
-}
-
-func TestStopReturnsNilAfterDelete(t *testing.T) {
-	fast(t)
-	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	var logs bytes.Buffer
-	profile.logger = hclog.New(&hclog.LoggerOptions{Output: &logs, JSONFormat: true})
-	stopsOn(api, execer)
-	pod := api.agentPod(t, profile, "survivor", nil)
-	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil {
-		t.Fatalf("stop = %v; want nil once the pod is deleted", err)
-	}
-	requests := api.recorded()
-	if deleted := paths(requests, http.MethodDelete); !slices.Equal(deleted, []string{"DELETE /api/v1/namespaces/agents/pods/" + pod.Name}) || !strings.Contains(string(requests[len(requests)-1].body), `"gracePeriodSeconds":0`) {
-		t.Fatalf("deletes %v; want the pod deleted with grace 0", deleted)
-	}
-	if !strings.Contains(logs.String(), "agent outlived SIGKILL; pod deleted") || strings.Count(logs.String(), "\n") != 1 {
-		t.Fatalf("logs %q; want one warning", logs.String())
-	}
-}
-
-func TestStopWaitsOutASignalLostInTransport(t *testing.T) {
-	fast(t)
-	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	stopsOn(api, execer, syscall.SIGTERM)
-	execer.set(func() {
-		execer.fail = func(container string, args []string) error {
-			if slices.Equal(args, []string{"stop", "TERM"}) {
-				_ = execer.send(agentPID, syscall.SIGTERM)
-				return errors.New("connection reset by peer")
-			}
-			return nil
+	var deletes []string
+	for _, r := range api.recorded() {
+		if r.method == http.MethodDelete {
+			deletes = append(deletes, r.path+" "+string(r.body))
 		}
-	})
-	pod := api.agentPod(t, profile, "reset", nil)
-	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil {
-		t.Fatal(err)
 	}
-	if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
-		t.Fatalf("stop deleted %v after a signal that reached the agent", deleted)
+	if len(deletes) != 1 || !strings.HasPrefix(deletes[0], "/api/v1/namespaces/agents/pods/"+pod.Name+" ") || !strings.Contains(deletes[0], `"gracePeriodSeconds":15`) {
+		t.Fatalf("deletes %v; want the pod deleted with grace 15", deletes)
+	}
+	collected, err := outputsOf(t, profile, handleOf(pod), limits)
+	if err != nil || len(collected) != 1 || string(collected[0].Data) != "report" {
+		t.Fatalf("collected %v, %v after stop; want the report", collected, err)
 	}
 }
 
-func TestStopDeletesWhenTheHelperRefuses(t *testing.T) {
+func TestStopReturnsWhenCutShortOfThePodGoing(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	stopsOn(api, execer)
-	execer.set(func() { execer.signal = func(int, syscall.Signal) error { return syscall.EPERM } })
-	pod := api.agentPod(t, profile, "refused", nil)
-	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil {
-		t.Fatal(err)
-	}
-	if calls := execer.recorded(); !slices.Equal(calls, []string{"outputs stop TERM"}) {
-		t.Fatalf("execs %v; want the refused SIGTERM only", calls)
-	}
-	if deleted := paths(api.recorded(), http.MethodDelete); len(deleted) != 1 {
-		t.Fatalf("deletes %v; want the pod deleted at once", deleted)
+	profile := api.profile(t)
+	api.set(func() { api.linger = 1 << 20 })
+	pod := api.agentPod(t, profile, "slow", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := profile.Stop(ctx, handleOf(pod)); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("stop = %v; want the deadline while the pod terminates", err)
 	}
 }
 
 func TestStopReturnsTheDeleteError(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	stopsOn(api, execer)
+	profile := api.profile(t)
 	pod := api.agentPod(t, profile, "undeletable", nil)
 	api.set(func() { api.intercept = failing(http.StatusInternalServerError, http.MethodDelete, "/pods/"+pod.Name) })
 	var failure *pluginsdk.Error
@@ -2373,9 +1998,9 @@ func outputsOf(t *testing.T, profile *Kubernetes, handle pluginsdk.Handle, limit
 
 var limits = pluginsdk.Limits{Files: 64, FileBytes: 1 << 20, TotalBytes: 4 << 20}
 
-func writeOutputs(t *testing.T, execer *fakeExec, pod string, files map[string]string) string {
+func writeOutputs(t *testing.T, profile *Kubernetes, pod string, files map[string]string) string {
 	t.Helper()
-	dir := filepath.Join(execer.root(pod), "wherry/outputs")
+	dir := filepath.Join(runDir(profile, pod), "outputs")
 	for name, data := range files {
 		path := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -2388,32 +2013,13 @@ func writeOutputs(t *testing.T, execer *fakeExec, pod string, files map[string]s
 	return dir
 }
 
-func TestStopKeepsOutputs(t *testing.T) {
-	fast(t)
+func TestStopOfAnEndedAgentDeletesNothing(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	stopsOn(api, execer, syscall.SIGTERM)
-	pod := api.agentPod(t, profile, "keeps", nil)
-	writeOutputs(t, execer, pod.Name, map[string]string{"report.md": "report"})
-	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil {
-		t.Fatal(err)
-	}
-	collected, err := outputsOf(t, profile, handleOf(pod), limits)
-	if err != nil || len(collected) != 1 || string(collected[0].Data) != "report" {
-		t.Fatalf("collected %v, %v after stop; want the report", collected, err)
-	}
-	if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
-		t.Fatalf("stop deleted %v", deleted)
-	}
-}
-
-func TestStopOfAnEndedAgentDoesNotSignal(t *testing.T) {
-	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = endsAfter(0, 0) })
 	pod := api.agentPod(t, profile, "ended", nil)
-	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil || len(execer.recorded()) != 0 {
-		t.Fatalf("stop = %v with execs %v; want nil and none", err, execer.recorded())
+	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil || paths(api.recorded(), http.MethodDelete) != nil {
+		t.Fatalf("stop = %v with deletes %v; want nil and none", err, paths(api.recorded(), http.MethodDelete))
 	}
 	absent := handleOf(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: poolPrefix + "run-gone", UID: "uid-gone"}})
 	if err := profile.Stop(context.Background(), absent); err != nil {
@@ -2423,42 +2029,38 @@ func TestStopOfAnEndedAgentDoesNotSignal(t *testing.T) {
 
 func TestStopOfANeverStartedPodLeavesIt(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = nil })
 	pod := api.put(captured(t, "image-pull-backoff"))
-	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil || len(execer.recorded()) != 0 {
-		t.Fatalf("stop = %v with execs %v; want nil and none", err, execer.recorded())
+	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil {
+		t.Fatalf("stop = %v; want nil", err)
 	}
 	if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
 		t.Fatalf("stop deleted %v; the core purges a pod that never started", deleted)
 	}
 }
 
-func TestStopSignalsAnUnsettledPod(t *testing.T) {
+func TestStopDeletesAnUnsettledPod(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	stopsOn(api, execer, syscall.SIGTERM)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = blipsThen(1, api.kubelet) })
 	pod := api.agentPod(t, profile, "blip", nil)
 	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil {
 		t.Fatal(err)
 	}
-	if calls := execer.recorded(); !slices.Equal(calls, []string{"outputs stop TERM"}) {
-		t.Fatalf("execs %v; want one SIGTERM", calls)
-	}
-	if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
-		t.Fatalf("stop deleted %v", deleted)
+	if deleted := paths(api.recorded(), http.MethodDelete); len(deleted) != 1 {
+		t.Fatalf("deletes %v; want the pod deleted", deleted)
 	}
 }
 
 func TestCollectWaitsForTheAgentToEnd(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = endsAfter(3, 0) })
 	pod := api.agentPod(t, profile, "waits", nil)
-	writeOutputs(t, execer, pod.Name, map[string]string{"report.md": "report"})
+	writeOutputs(t, profile, pod.Name, map[string]string{"report.md": "report"})
 	if collected, err := outputsOf(t, profile, handleOf(pod), limits); err != nil || len(collected) != 1 {
 		t.Fatalf("collected %v, %v", collected, err)
 	}
@@ -2467,66 +2069,43 @@ func TestCollectWaitsForTheAgentToEnd(t *testing.T) {
 func TestCollectRefusesARunningAgent(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	pod := api.agentPod(t, profile, "running", nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	if err := profile.Collect(ctx, handleOf(pod), limits, make(chan pluginsdk.Output, 1)); err == nil || err.Error() != "the agent is still running" {
 		t.Fatalf("collect = %v", err)
 	}
-	if len(execer.recorded()) != 0 {
-		t.Fatalf("execs %v into a running agent's pod", execer.recorded())
-	}
-}
-
-func TestCollectRefusesAnEndedHolder(t *testing.T) {
-	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
-	api.set(func() {
-		api.kubelet = func(pod *corev1.Pod) {
-			setStatus(pod, corev1.PodFailed, exited("inputs", 0), exited("agent", 0), exited("outputs", 137))
-		}
-	})
-	pod := api.agentPod(t, profile, "holder", nil)
-	if _, err := outputsOf(t, profile, handleOf(pod), limits); err == nil || err.Error() != "the outputs container has ended" {
-		t.Fatalf("collect = %v", err)
-	}
 }
 
 func TestCollectRefusesADeletingPod(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = nil })
 	pod := api.put(captured(t, "lost-node-running"))
 	if _, err := outputsOf(t, profile, handleOf(pod), limits); err == nil || err.Error() != "the pod is being deleted" {
 		t.Fatalf("collect = %v", err)
 	}
-	if len(execer.recorded()) != 0 {
-		t.Fatalf("execs %v into a deleting pod", execer.recorded())
-	}
 }
 
 func TestCollectCountsTheTreeBeforeReading(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = endsAfter(0, 0) })
 	pod := api.agentPod(t, profile, "count", nil)
-	writeOutputs(t, execer, pod.Name, map[string]string{"a": "a", "b": "b", "c/d": "d"})
+	writeOutputs(t, profile, pod.Name, map[string]string{"a": "a", "b": "b", "c/d": "d"})
 	collected, err := outputsOf(t, profile, handleOf(pod), pluginsdk.Limits{Files: 3, FileBytes: 10, TotalBytes: 10})
 	if err == nil || len(collected) != 0 {
 		t.Fatalf("collected %v, %v from a tree of four entries; want it refused", collected, err)
-	}
-	if calls := execer.recorded(); !slices.Equal(calls, []string{"outputs list 3"}) {
-		t.Fatalf("execs %v; want the listing alone", calls)
 	}
 }
 
 func TestCollectReadsOnlyRegularFiles(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = endsAfter(0, 0) })
 	pod := api.agentPod(t, profile, "regular", nil)
-	dir := writeOutputs(t, execer, pod.Name, map[string]string{"report.md": "report", "sub/notes.txt": "notes"})
+	dir := writeOutputs(t, profile, pod.Name, map[string]string{"report.md": "report", "sub/notes.txt": "notes"})
 	if err := os.Symlink("report.md", filepath.Join(dir, "link.md")); err != nil {
 		t.Fatal(err)
 	}
@@ -2545,17 +2124,14 @@ func TestCollectReadsOnlyRegularFiles(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("collected %v; want %v", got, want)
 	}
-	if calls := execer.recorded(); !slices.Equal(calls, []string{"outputs list 64", "outputs read report.md 6", "outputs read sub/notes.txt 5"}) {
-		t.Fatalf("execs %v; want reads of the regular files alone", calls)
-	}
 }
 
 func TestCollectLeavesFilesOverTheLimitsUnread(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = endsAfter(0, 0) })
 	pod := api.agentPod(t, profile, "limits", nil)
-	writeOutputs(t, execer, pod.Name, map[string]string{"a": "aaaa", "b": "bbbbbbbbbbbb", "c": "cccc", "d": "dddd"})
+	writeOutputs(t, profile, pod.Name, map[string]string{"a": "aaaa", "b": "bbbbbbbbbbbb", "c": "cccc", "d": "dddd"})
 	collected, err := outputsOf(t, profile, handleOf(pod), pluginsdk.Limits{Files: 10, FileBytes: 8, TotalBytes: 8})
 	if err != nil {
 		t.Fatal(err)
@@ -2569,34 +2145,73 @@ func TestCollectLeavesFilesOverTheLimitsUnread(t *testing.T) {
 	}
 }
 
-func TestCollectRefusesAReadOfAnotherLength(t *testing.T) {
+// An agent can plant links in its outputs; the plugin mounts every run's directory, so it follows none out of the run.
+func TestCollectFollowsNoLinkOutOfTheRun(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = endsAfter(0, 0) })
-	pod := api.agentPod(t, profile, "length", nil)
-	writeOutputs(t, execer, pod.Name, map[string]string{"report.md": "report"})
-	for _, body := range []string{"repor", "report!"} {
-		execer.set(func() {
-			execer.output = func(args []string, stdout io.Writer) bool {
-				if args[0] != "read" {
-					return false
-				}
-				_, _ = io.WriteString(stdout, body)
-				return true
-			}
-		})
-		if _, err := outputsOf(t, profile, handleOf(pod), limits); err == nil {
-			t.Fatalf("collect accepted a body %q for a listing of 6 bytes", body)
+	other := filepath.Join(runDir(profile, poolPrefix+"run-other"), "inputs")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "secret"), []byte("other-run-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pod := api.agentPod(t, profile, "links", nil)
+	dir := writeOutputs(t, profile, pod.Name, map[string]string{"report.md": "r"})
+	for link, target := range map[string]string{
+		"relative": "../../" + poolPrefix + "run-other/inputs/secret", "absolute": filepath.Join(other, "secret"), "dir": "../../" + poolPrefix + "run-other/inputs",
+	} {
+		if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+			t.Fatal(err)
 		}
+	}
+	collected, err := outputsOf(t, profile, handleOf(pod), pluginsdk.Limits{Files: 10, FileBytes: 1 << 20, TotalBytes: 1 << 20, Stream: []string{"relative", "dir/secret"}, StreamBytes: 1 << 20})
+	if err != nil || len(collected) != 4 {
+		t.Fatalf("collected %v, %v; want the report and three links", collected, err)
+	}
+	for _, output := range collected {
+		if output.Name != "report.md" && (output.Mode != fs.ModeSymlink || output.Data != nil || output.Body != nil) {
+			t.Fatalf("output %+v; want a link listed and never read", output)
+		}
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if _, err := read(root, "dir/secret", int64(len("other-run-secret"))); err == nil {
+		t.Fatal("read an output through a link out of the run")
+	}
+	// The outputs directory itself may be a link.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../"+poolPrefix+"run-other/inputs", dir); err != nil {
+		t.Fatal(err)
+	}
+	if collected, err := outputsOf(t, profile, handleOf(pod), limits); err == nil || len(collected) != 0 {
+		t.Fatalf("collected %v, %v through a linked outputs directory", collected, err)
+	}
+}
+
+func TestCollectReadsOutputsAfterThePodWent(t *testing.T) {
+	api := newFakeAPI(t)
+	profile := api.profile(t)
+	pod := api.agentPod(t, profile, "gone", nil)
+	writeOutputs(t, profile, pod.Name, map[string]string{"report.md": "report"})
+	api.set(func() { delete(api.pods, pod.Name) })
+	if collected, err := outputsOf(t, profile, handleOf(pod), limits); err != nil || len(collected) != 1 || string(collected[0].Data) != "report" {
+		t.Fatalf("collected %v, %v; want the report of the deleted pod", collected, err)
 	}
 }
 
 func TestCollectStreamsNamedOutputs(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = endsAfter(0, 0) })
 	pod := api.agentPod(t, profile, "stream", nil)
-	writeOutputs(t, execer, pod.Name, map[string]string{"build.tar": "tarball-bytes", "big.tar": "too-big-to-stream", "report.md": "r"})
+	writeOutputs(t, profile, pod.Name, map[string]string{"build.tar": "tarball-bytes", "big.tar": "too-big-to-stream", "report.md": "r"})
 	outputs := make(chan pluginsdk.Output, 8)
 	if err := profile.Collect(context.Background(), handleOf(pod), pluginsdk.Limits{Files: 10, FileBytes: 1, TotalBytes: 1, Stream: []string{"build.tar", "big.tar"}, StreamBytes: 13}, outputs); err != nil {
 		t.Fatal(err)
@@ -2626,10 +2241,10 @@ func TestCollectStreamsNamedOutputs(t *testing.T) {
 func TestCollectStreamsTheNestedOutcome(t *testing.T) {
 	const outcome = `{"state":"TASK_STATE_COMPLETED"}`
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = endsAfter(0, 0) })
 	pod := api.agentPod(t, profile, "outcome", nil)
-	writeOutputs(t, execer, pod.Name, map[string]string{".wherry/outcome.json": outcome, "report.md": "r"})
+	writeOutputs(t, profile, pod.Name, map[string]string{".wherry/outcome.json": outcome, "report.md": "r"})
 	collected, err := outputsOf(t, profile, handleOf(pod), pluginsdk.Limits{Files: 10, FileBytes: 1 << 20, TotalBytes: 1 << 20, Stream: []string{".wherry/outcome.json"}, StreamBytes: 1 << 10})
 	if err != nil || len(collected) != 2 || collected[0].Name != ".wherry/outcome.json" || collected[0].Data != nil || collected[0].Body == nil {
 		t.Fatalf("collected %+v, %v; want the outcome streamed and report.md", collected, err)
@@ -2643,7 +2258,7 @@ func TestCollectStreamsTheNestedOutcome(t *testing.T) {
 
 func TestCollectWithoutAnOutputsDirectory(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = endsAfter(0, 0) })
 	pod := api.agentPod(t, profile, "none", nil)
 	if collected, err := outputsOf(t, profile, handleOf(pod), limits); err != nil || len(collected) != 0 {
@@ -2651,9 +2266,9 @@ func TestCollectWithoutAnOutputsDirectory(t *testing.T) {
 	}
 }
 
-func TestReleaseDeletesSecretAndEndsTheHolder(t *testing.T) {
+func TestReleaseDeletesTheSecret(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = endsAfter(0, 0) })
 	run := testRun("release")
 	dispatch(t, profile, run)
@@ -2664,29 +2279,14 @@ func TestReleaseDeletesSecretAndEndsTheHolder(t *testing.T) {
 	if api.secret(name) != nil {
 		t.Fatal("the Secret remains")
 	}
-	execer.mu.Lock()
-	defer execer.mu.Unlock()
-	if !slices.Equal(execer.calls, []string{"outputs release"}) || !slices.Equal(execer.signals, []string{fmt.Sprintf("%d terminated", holderPID)}) {
-		t.Fatalf("execs %v, signals %v; want the holder sent SIGTERM", execer.calls, execer.signals)
-	}
-	if api.pod(name) == nil {
-		t.Fatal("release removed the pod; the sweep removes it")
-	}
-}
-
-func TestReleaseExecsNothingIntoADeletingPod(t *testing.T) {
-	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
-	api.set(func() { api.kubelet = nil })
-	api.put(captured(t, "lost-node-running"))
-	if err := profile.Release(context.Background(), "capture-lost-node-running"); err != nil || len(execer.recorded()) != 0 {
-		t.Fatalf("release = %v with execs %v; want nil and none into a deleting pod", err, execer.recorded())
+	if _, err := os.Stat(runDir(profile, name)); api.pod(name) == nil || err != nil {
+		t.Fatalf("release removed the pod or its run directory (%v); the sweep removes them", err)
 	}
 }
 
 func TestPurgeDeletesWithGraceZero(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	api.agentPod(t, profile, "purge", nil)
 	if err := profile.Purge(context.Background(), "run-purge"); err != nil {
 		t.Fatal(err)
@@ -2701,7 +2301,7 @@ func TestPurgeDeletesWithGraceZero(t *testing.T) {
 func TestPurgeWaitsForThePodToGo(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	run := testRun("linger")
 	dispatch(t, profile, run)
 	api.set(func() { api.linger = 3 })
@@ -2716,11 +2316,14 @@ func TestPurgeWaitsForThePodToGo(t *testing.T) {
 	if last := requests[len(requests)-1]; last != "DELETE /api/v1/namespaces/agents/secrets/"+name {
 		t.Fatalf("last request %s; want the Secret deleted after the pod went", last)
 	}
+	if _, err := os.Stat(runDir(profile, name)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("purge left the run directory: %v", err)
+	}
 }
 
 func TestPurgeOfAbsentPodSucceeds(t *testing.T) {
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	if err := profile.Purge(context.Background(), "run-absent"); err != nil {
 		t.Fatal(err)
 	}
@@ -2732,12 +2335,12 @@ func (api *fakeAPI) sweepPod(t *testing.T, profile *Kubernetes, name, owner stri
 	pod := api.agentPod(t, profile, name, func(pod *corev1.Pod) {
 		pod.Labels[labelProfile] = owner
 		if ago == 0 {
-			setStatus(pod, corev1.PodRunning, exited("inputs", 0), runningStatus("agent"), runningStatus("outputs"))
+			setStatus(pod, corev1.PodRunning, runningStatus("agent"))
 			return
 		}
 		agent := exited("agent", 0)
 		agent.State.Terminated.FinishedAt = metav1.NewTime(time.Now().Add(-ago))
-		setStatus(pod, corev1.PodRunning, exited("inputs", 0), agent, runningStatus("outputs"))
+		setStatus(pod, corev1.PodRunning, agent)
 	})
 	api.secretFor(pod.Name, owner, 0)
 	return pod.Name
@@ -2754,7 +2357,7 @@ func (api *fakeAPI) secretFor(name, owner string, ago time.Duration) {
 
 func sweep(t *testing.T, api *fakeAPI) *Kubernetes {
 	t.Helper()
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() { api.kubelet = nil })
 	return profile
 }
@@ -2808,7 +2411,7 @@ func TestSweepCountsOnlyThisProfilesPods(t *testing.T) {
 	container := sweep(t, api)
 	waiting := api.sweepPod(t, container, "waiting", testProfile, time.Minute)
 	expired := api.sweepPod(t, container, "expired", testProfile, 11*time.Minute)
-	host, _ := api.profile(t)
+	host := api.profile(t)
 	host.name = "host"
 	if err := host.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
@@ -2902,7 +2505,7 @@ func TestSweepIgnoresForeignNames(t *testing.T) {
 	profile := sweep(t, api)
 	pod := api.agentPod(t, profile, "foreign", func(pod *corev1.Pod) {
 		pod.Name = "user-pod"
-		setStatus(pod, corev1.PodRunning, exited("inputs", 0), exited("agent", 0), runningStatus("outputs"))
+		setStatus(pod, corev1.PodRunning, exited("agent", 0))
 		pod.Status.ContainerStatuses[0].State.Terminated.FinishedAt = metav1.NewTime(time.Now().Add(-time.Hour))
 	})
 	api.secretFor("user-secret", testProfile, time.Hour)
@@ -2934,6 +2537,51 @@ func TestSweepListsSecretsAsMetadata(t *testing.T) {
 	t.Fatal("the sweep listed no Secrets")
 }
 
+// runDirFor makes the run directory of name, last changed ago.
+func runDirFor(t *testing.T, profile *Kubernetes, name string, ago time.Duration) string {
+	t.Helper()
+	dir := runDir(profile, name)
+	if err := os.MkdirAll(filepath.Join(dir, "outputs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(-ago)
+	if err := os.Chtimes(dir, at, at); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestSweepRemovesTheDirectoriesOfGoneRuns(t *testing.T) {
+	api := newFakeAPI(t)
+	profile := sweep(t, api)
+	gone := runDirFor(t, profile, poolPrefix+"run-gone", 11*time.Minute)
+	running := runDirFor(t, profile, api.sweepPod(t, profile, "running", testProfile, 0), 11*time.Minute)
+	other := runDirFor(t, profile, api.sweepPod(t, profile, "other", "another", 11*time.Minute), 11*time.Minute)
+	api.secretFor(poolPrefix+"run-released", testProfile, time.Minute)
+	released := runDirFor(t, profile, poolPrefix+"run-released", 11*time.Minute)
+	recent := runDirFor(t, profile, poolPrefix+"run-recent", 9*time.Minute)
+	foreign := runDirFor(t, profile, jobName("review", "run-gone"), time.Hour)
+	if err := profile.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for dir, kept := range map[string]bool{gone: false, running: true, other: true, released: true, recent: true, foreign: true} {
+		if _, err := os.Stat(dir); (err == nil) != kept {
+			t.Fatalf("%s: kept %t; want %t", filepath.Base(dir), err == nil, kept)
+		}
+	}
+	if got := samples(t, profile)["wherry_plugin_sweep_deletions_total/directory"].Value; got != 1 {
+		t.Fatalf("counted %v directories; want 1", got)
+	}
+	// The sweep purges an expired pod with its directory.
+	expired := runDirFor(t, profile, api.sweepPod(t, profile, "expired", testProfile, 11*time.Minute), time.Minute)
+	if err := profile.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(expired); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the purged run's directory remains: %v", err)
+	}
+}
+
 func TestSweepReportsDeletionsAndPendingPods(t *testing.T) {
 	api := newFakeAPI(t)
 	profile := sweep(t, api)
@@ -2948,7 +2596,7 @@ func TestSweepReportsDeletionsAndPendingPods(t *testing.T) {
 		t.Fatalf("samples %+v; want one pending pod, one job and two variables deleted", got)
 	}
 	for name := range got {
-		if family, kind, _ := strings.Cut(name, "/"); family == "wherry_plugin_sweep_deletions_total" && kind != "job" && kind != "variable" {
+		if family, kind, _ := strings.Cut(name, "/"); family == "wherry_plugin_sweep_deletions_total" && kind != "job" && kind != "variable" && kind != "directory" {
 			t.Fatalf("deletion kind %q outside the core's", kind)
 		}
 	}
@@ -2957,12 +2605,35 @@ func TestSweepReportsDeletionsAndPendingPods(t *testing.T) {
 func TestReadyFromTheNamespace(t *testing.T) {
 	for phase, want := range map[corev1.NamespacePhase]bool{corev1.NamespaceActive: true, corev1.NamespaceTerminating: false, "": false} {
 		api := newFakeAPI(t)
-		profile, _ := api.profile(t)
+		profile := api.profile(t)
+		profile.floor = 0
 		api.set(func() { api.phase = phase })
 		ready, err := profile.Ready(context.Background())
 		if ready != want || (phase == "") != (err != nil) {
 			t.Fatalf("namespace %q: ready = %v, %v; want %v", phase, ready, err, want)
 		}
+	}
+}
+
+func TestReadyBelowTheFloor(t *testing.T) {
+	api := newFakeAPI(t)
+	profile := api.profile(t)
+	free, err := profile.free()
+	if err != nil || free <= 0 {
+		t.Fatalf("free %d, %v", free, err)
+	}
+	for floor, want := range map[int64]bool{0: true, free + 1<<30: false} {
+		profile.floor = floor
+		if ready, err := profile.Ready(context.Background()); err != nil || ready != want {
+			t.Fatalf("floor %d over %d free: ready = %v, %v; want %v", floor, free, ready, err, want)
+		}
+	}
+	if sample := samples(t, profile)["wherry_plugin_storage_free_bytes/"]; sample.Kind != pluginsdk.KindGauge || sample.Value < float64(free)/2 {
+		t.Fatalf("free bytes sample %+v; want about %d", sample, free)
+	}
+	profile.runsDir = filepath.Join(t.TempDir(), "absent")
+	if ready, err := profile.Ready(context.Background()); ready || err == nil {
+		t.Fatalf("ready = %v, %v without the runs claim; want an error", ready, err)
 	}
 }
 
@@ -2985,7 +2656,7 @@ func TestAPIErrorsAreClassifiedByStatus(t *testing.T) {
 		{http.StatusNotFound, metav1.StatusReasonNotFound, ""},
 	} {
 		api := newFakeAPI(t)
-		profile, _ := api.profile(t)
+		profile := api.profile(t)
 		api.set(func() {
 			api.intercept = func(response http.ResponseWriter, _ *http.Request) bool {
 				apiStatus(response, test.code, test.reason, "refused")
@@ -3010,7 +2681,7 @@ func TestAPIErrorsAreClassifiedByStatus(t *testing.T) {
 		}
 	}
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := profile.Ready(ctx); err == nil || len(slices.DeleteFunc(profile.metrics.Samples(), func(s pluginsdk.Sample) bool { return s.Family != "wherry_plugin_platform_errors_total" })) != 0 {
@@ -3031,7 +2702,7 @@ func TestUnreachableAPIIsUnavailable(t *testing.T) {
 func TestReturnedErrorCarriesOpAndClass(t *testing.T) {
 	const message = `namespaces "agents" is forbidden: User "system:serviceaccount:wherry:wherry-receiver" cannot get resource "namespaces"`
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	api.set(func() {
 		api.intercept = func(response http.ResponseWriter, _ *http.Request) bool {
 			apiStatus(response, http.StatusForbidden, metav1.StatusReasonForbidden, message)
@@ -3049,7 +2720,7 @@ func TestReturnedErrorCarriesOpAndClass(t *testing.T) {
 func TestHandledPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
 	const body = "body-never-logged"
 	api := newFakeAPI(t)
-	profile, _ := api.profile(t)
+	profile := api.profile(t)
 	var logs bytes.Buffer
 	profile.logger = hclog.New(&hclog.LoggerOptions{Output: &logs, JSONFormat: true})
 	api.set(func() {
@@ -3081,7 +2752,9 @@ func TestHandledPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
 func TestWarningsReachTheLogger(t *testing.T) {
 	api := newFakeAPI(t)
 	var logs bytes.Buffer
-	profile, err := New(testConfig(api.server.URL, api.caFile), testProfile, testPool, mustClient(t, api), hclog.New(&hclog.LoggerOptions{Output: &logs, JSONFormat: true}))
+	config := testConfig(api.server.URL, api.caFile)
+	config.RunsDir = t.TempDir()
+	profile, err := New(config, testProfile, testPool, mustClient(t, api), hclog.New(&hclog.LoggerOptions{Output: &logs, JSONFormat: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3108,13 +2781,13 @@ func mustClient(t *testing.T, api *fakeAPI) *rest.Config {
 	return client
 }
 
-// turn runs a whole turn with every kind of material through the fake, and returns every request, exec argument, pod
-// spec, error and log line it produced.
+// turn runs a whole turn with every kind of material through the fake, and returns every request, pod spec, error and
+// log line it produced.
 func turn(t *testing.T) (string, []string) {
 	t.Helper()
 	fast(t)
 	api := newFakeAPI(t)
-	profile, execer := api.profile(t)
+	profile := api.profile(t)
 	var logs bytes.Buffer
 	profile.logger = hclog.New(&hclog.LoggerOptions{Output: &logs, JSONFormat: true})
 	files := map[string][]byte{"data.csv": []byte("fetched-bytes-secret")}
@@ -3127,13 +2800,11 @@ func turn(t *testing.T) (string, []string) {
 		{Name: "deploy", File: "id_ed25519", Value: []byte("task-credential-secret")}, {Name: "ca", File: "ca.pem", Value: []byte("second-file-credential-secret")},
 	}
 	name := profile.jobName(run.ID)
-	startInit(t, api, execer, name, run.Fetches, nil)
 	var errs []error
 	handle := dispatch(t, profile, run)
-	stopsOn(api, execer, syscall.SIGTERM)
 	logsHandler, _ := logStream(func(int) []byte { return []byte(`{"type":"result","result":"done"}` + "\n") }, nil)
 	api.set(func() { api.logs = logsHandler })
-	writeOutputs(t, execer, name, map[string]string{"report.md": "output-bytes-secret"})
+	writeOutputs(t, profile, name, map[string]string{"report.md": "output-bytes-secret"})
 	errs = append(errs, profile.Stop(context.Background(), handle))
 	_, _, err := followAll(t, profile, handle, 0)
 	errs = append(errs, err)
@@ -3142,29 +2813,26 @@ func turn(t *testing.T) (string, []string) {
 		t.Fatalf("collected %v, %v", collected, err)
 	}
 	errs = append(errs, err, profile.Release(context.Background(), run.ID), profile.Purge(context.Background(), run.ID), profile.Sweep(context.Background()))
-	// A second turn whose fetches fail, by status and by connection, and a third whose put the helper refuses.
+	// Turns whose fetches fail, by status, by connection, by certificate and by digest.
 	failed := fetchRun("failed", newObjects(t, func(response http.ResponseWriter, _ *http.Request) {
 		http.Error(response, "SignatureDoesNotMatch", http.StatusForbidden)
 	}), files)
-	startInit(t, api, execer, profile.jobName(failed.ID), failed.Fetches, nil)
-	dispatch(t, profile, failed)
 	unreachable := fetchRun("unreachable", store, files)
 	unreachable.Fetches[0].URL = "https://unreachable.invalid/data.csv?X-Amz-Signature=signature-secret"
-	startInit(t, api, execer, profile.jobName(unreachable.ID), unreachable.Fetches, nil)
-	dispatch(t, profile, unreachable)
 	untrusted := httptest.NewTLSServer(http.NotFoundHandler())
 	t.Cleanup(untrusted.Close)
 	certificate := fetchRun("certificate", store, files)
 	certificate.Fetches[0].URL = untrusted.URL + "/data.csv?X-Amz-Signature=signature-secret"
-	startInit(t, api, execer, profile.jobName(certificate.ID), certificate.Fetches, nil)
-	dispatch(t, profile, certificate)
 	refused := fetchRun("refused", store, files)
 	refused.Fetches[0].SHA256 = strings.Repeat("0", 64)
-	startInit(t, api, execer, profile.jobName(refused.ID), refused.Fetches, nil)
-	dispatch(t, profile, refused)
-	if !strings.Contains(logs.String(), "fetch data.csv: 403") || !strings.Contains(logs.String(), "fetch data.csv: unreachable") ||
-		!strings.Contains(logs.String(), "fetch data.csv: certificate") || !strings.Contains(logs.String(), "does not match its digest") {
-		t.Fatalf("logs %q; want each failed fetch logged", logs.String())
+	var fetchErrs []string
+	for _, run := range []pluginsdk.Run{failed, unreachable, certificate, refused} {
+		_, _, err := profile.Dispatch(context.Background(), run)
+		errs = append(errs, err)
+		fetchErrs = append(fetchErrs, fmt.Sprint(err))
+	}
+	if want := []string{"fetch data.csv: 403", "fetch data.csv: unreachable", "fetch data.csv: certificate", "fetch data.csv: does not match its digest"}; !slices.Equal(fetchErrs, want) {
+		t.Fatalf("fetch errors %q; want %q", fetchErrs, want)
 	}
 	var seen []string
 	for _, r := range api.recorded() {
@@ -3175,9 +2843,6 @@ func turn(t *testing.T) (string, []string) {
 		if !strings.Contains(r.path, "/secrets") {
 			seen = append(seen, "body "+string(r.body))
 		}
-	}
-	for _, call := range execer.recorded() {
-		seen = append(seen, "exec "+call)
 	}
 	for _, err := range errs {
 		if err != nil {
@@ -3235,10 +2900,15 @@ func devConfig(t *testing.T) Config {
 	if address == "" {
 		t.Skip("WHERRY_KUBERNETES_DEV_ADDR not set")
 	}
+	// The suite writes the run directories as the receiver does, through the runs claim mounted at its runs_dir.
+	saved := receiverUID
+	receiverUID = int64(os.Getuid())
+	t.Cleanup(func() { receiverUID = saved })
 	return Config{
 		Address: address, CAFile: os.Getenv("WHERRY_KUBERNETES_DEV_CA_FILE"), Namespace: os.Getenv("WHERRY_KUBERNETES_DEV_NAMESPACE"),
-		HelperImage: os.Getenv("WHERRY_KUBERNETES_DEV_HELPER_IMAGE"),
-		Runtime:     Runtime{Image: "registry.access.redhat.com/ubi9/ubi-minimal", Command: []string{"/bin/sh", "-c"}, Resources: Resources{CPU: "100m", Memory: "256Mi"}},
+		RunsClaim: os.Getenv("WHERRY_KUBERNETES_DEV_RUNS_CLAIM"), RunsDir: os.Getenv("WHERRY_KUBERNETES_DEV_RUNS_DIR"),
+		Runtime: Runtime{Image: "registry.access.redhat.com/ubi9/ubi-minimal", Command: []string{"/bin/sh", "-c"}, Resources: Resources{CPU: "100m", Memory: "256Mi"},
+			User: os.Getenv("WHERRY_KUBERNETES_DEV_USER")},
 	}
 }
 
@@ -3330,35 +3000,15 @@ func TestInputsCredentialsAndOutputsOnKubernetes(t *testing.T) {
 }
 
 func TestCredentialFileOwnerAndModeOnKubernetes(t *testing.T) {
-	profile, ctx := devProfile(t, `set -e; dir="$WHERRY_CREDENTIALS_DIR";
-		{ stat -c '%a %u' "$dir/key"; stat -c '%a %u' "$dir"; id -u; } > "$WHERRY_OUTPUT_DIR/modes";
+	profile, ctx := devProfile(t, `set -e; key="$WHERRY_CREDENTIALS_DIR/key";
+		{ stat -c '%a %u' "$key"; cat "$key"; echo; ssh-keygen -y -f "$key" >/dev/null 2>&1 && echo accepted || echo refused; } > "$WHERRY_OUTPUT_DIR/modes";
 		echo '{"type":"result","result":"done"}'`, nil)
 	run := devRun(t, profile, "modes")
 	run.Credentials = []pluginsdk.Secret{{Name: "deploy", File: "key", Value: []byte("private-key")}}
 	handle, _, _ := devTurn(t, ctx, profile, run)
 	modes := strings.Fields(string(devOutputs(t, ctx, profile, handle, limits)["modes"].Data))
-	if len(modes) != 5 || modes[0] != "600" || modes[2] != "700" || modes[1] != modes[4] || modes[3] != modes[4] {
-		t.Fatalf("modes %v; want the file 600 and the directory 700, both the agent's", modes)
-	}
-}
-
-func TestInputAtTheSecretLimitOnKubernetes(t *testing.T) {
-	profile, ctx := devProfile(t, `echo '{"type":"result","result":"done"}'`, nil)
-	run := devRun(t, profile, "limit")
-	run.Credentials = nil
-	run.Inputs = []pluginsdk.File{{Name: "fill.bin", Data: bytes.Repeat([]byte{0xff}, maxSecret-len(run.Prompt))}}
-	devTurn(t, ctx, profile, run)
-	over := devRun(t, profile, "over")
-	over.Credentials = nil
-	over.Inputs = []pluginsdk.File{{Name: "fill.bin", Data: bytes.Repeat([]byte{0xff}, maxSecret-len(run.Prompt)+1)}}
-	var tooLarge *pluginsdk.InputTooLargeError
-	if outcome, _, err := profile.Dispatch(ctx, over); outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &tooLarge) {
-		t.Fatalf("dispatch one byte over = %v, %v", outcome, err)
-	}
-	data, _ := secretData(over)
-	name := profile.jobName(over.ID)
-	if _, err := profile.secrets().Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name}, Data: data}, metav1.CreateOptions{}); err == nil {
-		t.Fatal("the API server accepted a Secret one byte over 1 MiB")
+	if len(modes) < 3 || modes[0] != "440" || modes[1] != "0" || modes[2] != "private-key" {
+		t.Fatalf("modes %v; want the file root's at 0440 and readable by the agent", modes)
 	}
 }
 
@@ -3376,9 +3026,9 @@ func TestFetchOnKubernetes(t *testing.T) {
 	}
 	mismatch := devRun(t, profile, "mismatch")
 	mismatch.Fetches = []pluginsdk.Fetch{{Name: "data.csv", URL: store.URL + "/data.csv", Size: int64(len(files["data.csv"])), SHA256: strings.Repeat("0", 64)}}
-	_, _, terminal := devTurn(t, ctx, profile, mismatch)
-	if terminal.Started || terminal.Class != pluginsdk.ClassFetch {
-		t.Fatalf("terminal %+v; want never started with class fetch", terminal)
+	var failed *fetchError
+	if outcome, _, err := profile.Dispatch(ctx, mismatch); outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &failed) {
+		t.Fatalf("dispatch = %v, %v; want the fetch failed and nothing created", outcome, err)
 	}
 }
 
@@ -3493,8 +3143,7 @@ func outputsOfDev(ctx context.Context, profile *Kubernetes, handle pluginsdk.Han
 	return byName, err
 }
 
-// streamLarge streams a 1.5 GiB output, measuring the holder's memory peak meanwhile when measure is set.
-func streamLarge(t *testing.T, measure bool) {
+func TestLargeStreamedOutputOnKubernetes(t *testing.T) {
 	profile, ctx := devProfile(t, `head -c 1536m /dev/urandom > "$WHERRY_OUTPUT_DIR/big.bin"; echo '{"type":"result","result":"done"}'`, nil)
 	handle, _, _ := devTurn(t, ctx, profile, devRun(t, profile, "large"))
 	got := devOutputs(t, ctx, profile, handle, pluginsdk.Limits{Files: 4, FileBytes: 1, TotalBytes: 1, Stream: []string{"big.bin"}, StreamBytes: 2 << 30})
@@ -3509,27 +3158,7 @@ func streamLarge(t *testing.T, measure bool) {
 		t.Fatalf("streamed %d bytes, %v", n, err)
 	}
 	t.Logf("streamed %d bytes in %v", n, time.Since(began))
-	if !measure {
-		return
-	}
-	h, _ := decodeHandle(handle)
-	var peak bytes.Buffer
-	if err := profile.exec.exec(ctx, h.Pod, "outputs", []string{"cat", "/sys/fs/cgroup/memory.peak"}, nil, &peak); err != nil {
-		t.Fatal(err)
-	}
-	bytesPeak, err := strconv.ParseInt(strings.TrimSpace(peak.String()), 10, 64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("holder memory peak %d bytes", bytesPeak)
-	if bytesPeak > 32<<20 {
-		t.Fatalf("holder memory peak %d bytes; want at most half its 64Mi limit", bytesPeak)
-	}
 }
-
-func TestLargeStreamedOutputOnKubernetes(t *testing.T) { streamLarge(t, false) }
-
-func TestHolderMemoryOnKubernetes(t *testing.T) { streamLarge(t, true) }
 
 func TestFollowPastLogRotationOnKubernetes(t *testing.T) {
 	profile, ctx := devProfile(t, `yes "$(printf '%01023d' 0)" | head -n 61440; echo '{"type":"result","result":"done"}'`, nil)
@@ -3587,7 +3216,7 @@ func TestPodAdmittedUnderRestricted(t *testing.T) {
 	if fmt.Sprint(admitted.Spec.SecurityContext.SeccompProfile) != fmt.Sprint(built.Spec.SecurityContext.SeccompProfile) {
 		t.Fatalf("seccomp %v; built %v", admitted.Spec.SecurityContext.SeccompProfile, built.Spec.SecurityContext.SeccompProfile)
 	}
-	for _, c := range slices.Concat(built.Spec.InitContainers, built.Spec.Containers) {
+	for _, c := range built.Spec.Containers {
 		got := container(admitted, c.Name).SecurityContext
 		if fmt.Sprint(got.Capabilities.Drop) != fmt.Sprint(c.SecurityContext.Capabilities.Drop) || *got.AllowPrivilegeEscalation != *c.SecurityContext.AllowPrivilegeEscalation {
 			t.Fatalf("container %s admitted with %+v; built %+v", c.Name, got, c.SecurityContext)

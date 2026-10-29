@@ -1,6 +1,6 @@
 #!/bin/sh
-# Copies the prompt to the output echo.txt and reports, in its outcome file, its UID and, for each input and credential
-# file, its mode, owner and SHA-256. The prompt is E2E_PROMPT, by default /wherry/prompt.txt. A prompt holding
+# Copies the prompt to the output echo.txt and reports, in its outcome file, its UID, for each input and credential
+# file, its mode, owner and SHA-256, and whether ssh-keygen accepts a credential id_ed25519. The prompt is E2E_PROMPT, by default /wherry/prompt.txt. A prompt holding
 # "e2e: sleep" sleeps until stopped, and one holding "e2e: slow" replies after 90 seconds.
 set -eu
 prompt=${E2E_PROMPT:-/wherry/prompt.txt}
@@ -15,6 +15,10 @@ cp "$prompt" "$WHERRY_OUTPUT_DIR/echo.txt"
 		if [ -d "$f" ]; then echo "dir $(stat -c '%a %u' "$f")"; continue; fi
 		echo "file $(basename "$f") $(stat -c '%a %u' "$f") $(sha256sum <"$f" | cut -d' ' -f1)"
 	done
+	key=$WHERRY_CREDENTIALS_DIR/id_ed25519
+	if [ -e "$key" ]; then
+		if ssh-keygen -y -f "$key" >/dev/null; then echo "ssh-keygen accepted id_ed25519"; else echo "ssh-keygen refused id_ed25519"; fi
+	fi
 } >/tmp/reply
 # The lines hold no quote or backslash, so joining them with \n makes the JSON string.
 text=$(awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }' /tmp/reply)

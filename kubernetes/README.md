@@ -3,7 +3,8 @@
 The wherry plugin for Kubernetes. A wherry receiver runs it from its
 plugin directory for its `kubernetes` plugin, and one plugin process hosts
 every plugin profile of that plugin. The plugin runs each of the receiver's
-runs as one pod and one Secret in a namespace.
+runs as one pod and one Secret in a namespace, with one directory on a
+ReadWriteMany claim that the receiver's pod and every agent pod mount.
 
 Kubernetes 1.31 or later is the platform. The plugin, the receiver image
 and the receiver's manifests also run unchanged on OpenShift 4.18 or later;
@@ -18,21 +19,18 @@ The plugin builds against the tagged plugin protocol module,
 make build
 ```
 
-This writes `wherry-plugin-kubernetes` and `wherry-k8s-helper` at the
-repository root. `wherry-k8s-helper` is the helper agent pods run; it uses
-the Go standard library alone. `make check` runs the CI gates, and the
-release build, `kubernetes/.goreleaser.yaml`, writes release archives for
-linux and darwin, amd64 and arm64, and `checksums.txt` into `dist`
-(see the [repository README](../README.md)).
-The linux archives hold both binaries and the darwin archives the plugin
-alone, for a receiver on macOS that reaches a remote cluster.
+This writes `wherry-plugin-kubernetes` at the repository root. `make check`
+runs the CI gates, and the release build, `kubernetes/.goreleaser.yaml`,
+writes release archives for linux and darwin, amd64 and arm64, and
+`checksums.txt` into `dist` (see the [repository README](../README.md)).
+The darwin archives serve a receiver on macOS that reaches a remote cluster.
 `make image VERSION=<version> WHERRY_VERSION=<wherry version>` builds the
 receiver image ([Image](#image)).
 
 ## Install
 
-In a cluster, run the receiver from the receiver image, which holds wherry,
-the plugin and the helper; see
+In a cluster, run the receiver from the receiver image, which holds wherry
+and the plugin; see
 [Run the receiver in the cluster](#run-the-receiver-in-the-cluster).
 
 On a receiver outside the cluster:
@@ -51,8 +49,9 @@ On a receiver outside the cluster:
    wherry receiver run --config-file /etc/wherry/config.yaml
    ```
 
-Agent pods still run the helper from `helper_image`, which must be the
-receiver image at the receiver's tag.
+A receiver outside the cluster mounts the file system behind the runs claim,
+such as the claim's NFS export, at `runs_dir`, and runs as the agents' UID
+([Agent pods](#agent-pods)).
 
 The receiver checks the plugin directory and binary before it runs them;
 see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
@@ -106,57 +105,41 @@ The token needs the [RBAC](#rbac) grants in the plugin profile's namespace.
 ## RBAC
 
 Agent pods run in the receiver's own namespace. The receiver's service
-account holds the cluster role `admin` in that namespace alone, through the
+account holds the Role `wherry-receiver` in that namespace alone, through the
 RoleBinding in [`examples/kubernetes/receiver.yaml`](../examples/kubernetes/receiver.yaml), and nothing
-outside it.
+outside it. The plugin's calls, all in that namespace, need:
 
-The plugin's calls, all in that namespace, need:
+| Resource | Verbs | Use |
+| --- | --- | --- |
+| `pods` | create, get, list, watch, delete | create a run's pod, read it for lookups and polls, list it for the sweep, and delete it for a stop, a dispatch or lookup cut short, and a purge |
+| `pods/log` | get | stream the agent's standard output |
+| `secrets` | create, get, update, delete, list | write a run's material, delete it when the run ends, and list its metadata for the sweep |
+| `namespaces` | get | readiness |
 
-- `pods` create, get, list, delete: create a run's pod, read it for
-  lookups and polls, list it for the sweep, and delete it for a stop's last
-  resort, a dispatch or lookup cut short, a pod whose containers run as
-  different users, and a purge.
-- `pods/log` get: stream the agent's standard output.
-- `pods/exec` create and get: signal the agent, list and read its outputs,
-  end the outputs holder, and deliver S3 inputs. A WebSocket exec is an
-  upgraded GET that Kubernetes 1.31 also authorises as `create`, and the
-  SPDY fallback is a POST, so both verbs are needed.
-- `secrets` create, get, update, list, delete: write a run's material,
-  delete it when the run ends, and list its metadata for the sweep.
-- `namespaces` get on the namespace: readiness.
-
-`admin` grants these and more. In the namespace, the receiver, or anyone
-holding its token, can:
+A Role grants `get` on its own namespace's Namespace object, since the API
+server authorises a read of a namespace within that namespace; the Role
+reaches no other namespace. The Role grants no `pods/exec`, so the
+receiver, or anyone holding its token, runs no command in any pod. In the
+namespace it can:
 
 - read and write every Secret: the bundle Secret, which holds the
   receiver's Kafka password, and every run's prompt and material;
-- run commands in every pod, the receiver's own and each agent's, read an
-  agent's environment (the model credential) and its credentials
-  directory, and use that pod's egress;
-- create, change and delete pods, Deployments, Services,
-  PersistentVolumeClaims, ConfigMaps, ServiceAccounts and most other
-  namespaced objects, the receiver's own Deployment and state volume among
-  them;
-- impersonate the namespace's service accounts;
-- create Roles and RoleBindings in the namespace for permissions it holds.
+- create and delete pods, which mount any Secret or claim of the namespace.
+  A pod it creates can mount the runs claim, which holds every run's inputs
+  and outputs, and the state claim, which holds the receiver's signing key.
 
-It cannot write the namespace itself, its ResourceQuotas or its
-LimitRanges, and it cannot reach other namespaces, nodes or other
-cluster-scoped objects. Pods it creates are admitted by the namespace's Pod
-Security level, so with the namespace at `restricted` none runs privileged
-or as root.
-
-The API does not restrict the command an exec runs, and the outputs holder
-never mounts the credentials, but a process in it can read them through
-`/proc/<agent pid>/root` while the agent runs, since both share a UID and a
-process namespace. The holder's mounts keep no process in it from the
-credentials.
+It cannot write Deployments, Services, PersistentVolumeClaims, ConfigMaps,
+ServiceAccounts, Roles or RoleBindings, and it cannot reach other
+namespaces, nodes or other cluster-scoped objects. Pods it creates are
+admitted by the namespace's Pod Security level, so with the namespace at
+`restricted` none runs privileged or as root.
 
 Do not:
 
-- bind `admin` with a ClusterRoleBinding, or in any other namespace;
+- bind the Role's rules with a ClusterRoleBinding, or in any other
+  namespace;
 - run anything but the receiver and its agent pods in the namespace, since
-  `admin` there reaches every Secret and pod;
+  the Role there reaches every Secret, and a pod reaches every claim;
 - lower the namespace's Pod Security level below `restricted`;
 - grant RBAC to the namespace's `default` service account. Agent pods run
   as it with no token mounted, and no agent may hold any API right.
@@ -179,7 +162,9 @@ the `config` before the plugin sees it. The plugin reads the merged
 | `namespace` | required | namespace for agent pods and their Secrets; a DNS-1123 label |
 | `node_selector` | none | node labels agent pods require |
 | `tolerations` | none | taints agent pods tolerate |
-| `helper_image` | required | image, with no whitespace, holding `wherry-k8s-helper` at `/usr/local/libexec/wherry/`; the receiver image at the receiver's tag |
+| `runs_claim` | required | the ReadWriteMany PersistentVolumeClaim in `namespace` that agent pods mount; a claim name |
+| `runs_dir` | required | the absolute path where the receiver mounts the same claim, such as `/var/lib/wherry/runs` |
+| `runs_floor` | `1Gi` | a quantity; the plugin profile is not ready while the claim has less free space |
 | `runtime` | required | the agent container's definition |
 
 `node_selector` keys and values are
@@ -199,29 +184,34 @@ error.
 | `args` | the container's arguments |
 | `env` | environment variables for the agent; names match `[A-Za-z_][A-Za-z0-9_]*` |
 | `resources` | `cpu` (default `500m`), `memory` (default `2Gi`) and `ephemeral_storage` (default unset), Kubernetes quantities, each set as both request and limit |
-| `work_limit` | a quantity, the size limit of the agent's `/wherry` volume; unset, no limit |
-| `user` | `UID` or `UID:GID`, a string; unset, the platform assigns one |
-| `group` | the primary group of every container of the pod, a GID |
-| `supplementary_groups` | a list of GIDs every container of the pod also holds |
+| `user` | `UID` or `UID:GID`, a string; the UID is the receiver's; unset, the platform assigns one |
+| `group` | the agent's primary group and the pod's fsGroup, a GID |
+| `supplementary_groups` | a list of GIDs the agent also holds |
 
 `user` takes positive integers below 2^31 with no leading zeros; root (0)
 is refused. Quote it in YAML, such as `user: "1001"`. Kubernetes assigns no
-UID, so set it. The resource defaults are starting points; set them for the
-agent.
+UID, so set it. The UID must be the receiver's own, the UID the plugin runs
+as, since the agent reads the inputs the plugin writes and the plugin reads
+the outputs the agent writes, in a directory only that UID can enter; the
+plugin refuses another with `runtime user must be the receiver's UID`. The
+resource defaults are starting points; set them for the agent.
 
 `group` and `supplementary_groups` take GIDs below 2^31 with no leading
 zeros, quoted in YAML; Kubernetes resolves no group names, so a name is
 refused, and so is root (0). `group` is refused beside a `user` that names
-a GID. They set the pod's `securityContext.runAsGroup` and
-`securityContext.supplementalGroups`.
+a GID. They set the pod's `securityContext.runAsGroup`, `fsGroup` and
+`securityContext.supplementalGroups`. The agent reads the prompt and its
+credential files through the group, so set a GID on Kubernetes.
 
 The plugin sets `HOME` and the `WHERRY_*` variables over `env`, so a
 variable of these names in `env` is overwritten. Environment targets are
 injected from the run's Secret.
 
-A plugin profile is ready when the API answers with the namespace, and the
-namespace is active. This proves the address, the token and the namespace.
-Readiness checks nothing else:
+A plugin profile is ready when the API answers with the namespace, the
+namespace is active, and the file system at `runs_dir` has `runs_floor`
+free. This proves the address, the token, the namespace and the receiver's
+mount of the runs claim. While the claim is short of space the receiver
+withdraws its offer and takes no new work. Readiness checks nothing else:
 
 - Nodes. Nodes are cluster-scoped, and the plugin does not read the
   cluster's topology. A pod no node can take, such as one whose
@@ -231,8 +221,8 @@ Readiness checks nothing else:
 - Quota. A ResourceQuota in the namespace that is full refuses pod
   creation with 403. Each refusal counts a `dispatch` start failure, and
   the task spends its delivery budget.
-- Images. An agent or helper image that cannot be pulled shows only at
-  dispatch, as a pod that never started with class `image`.
+- Images. An agent image that cannot be pulled shows only at dispatch, as a
+  pod that never started with class `image`.
 
 In a [receiver configuration directory](https://benemon.github.io/wherry/configuration#receiver-configuration-directory),
 `plugins/kubernetes/plugin.yaml` holds the plugin's settings, here for a
@@ -244,7 +234,8 @@ labels:
   platform: kubernetes
 config:
   namespace: wherry
-  helper_image: registry.example.com/wherry-receiver:<version>
+  runs_claim: wherry-runs
+  runs_dir: /var/lib/wherry/runs
 ```
 
 and each file in `plugins/kubernetes/profiles` holds one plugin profile,
@@ -268,8 +259,8 @@ config:
 
 This receiver configuration file holds one plugin and two plugin profiles.
 The plugin's `config` holds the connection settings, the namespace, the
-helper image and an agent environment default, which each plugin profile
-inherits; `shared` overrides the default. With `address` set, the plugin
+runs claim, the agents' user and an agent environment default, which each
+plugin profile inherits; `shared` overrides the default. With `address` set, the plugin
 names the platform credential `kubernetes-token`, which the receiver's
 local configuration maps to a source on the receiver
 ([Credentials](#credentials)).
@@ -293,11 +284,18 @@ plugins:
       # A name in the credentials of the receiver's local configuration; its
       # value is the API token.
       credential: kubernetes-token
-      # Holds the agent pods and their Secrets; the token holds admin here alone.
+      # Holds the agent pods, their Secrets and the runs claim; the token holds
+      # the plugin's Role here alone.
       namespace: agents
-      # The receiver image at the receiver's tag.
-      helper_image: registry.example.com/wherry-receiver:1.0.0
+      # The ReadWriteMany claim agent pods mount, which the receiver mounts at
+      # runs_dir.
+      runs_claim: wherry-runs
+      runs_dir: /var/lib/wherry/runs
+      # Not ready below 8Gi free on the claim.
+      runs_floor: 8Gi
       runtime:
+        # The agent runs as the receiver's UID; quoted, since it is a string.
+        user: "1001"
         # A profile's env merges into this map by variable name.
         env:
           AGENT_LOG_LEVEL: info
@@ -317,10 +315,7 @@ plugins:
               effect: NoSchedule
           runtime:
             image: registry.example.com/agent:1.0
-            # Every container of the pod runs as this UID; quoted, since it is a
-            # string.
-            user: "1001"
-            # The pod's runAsGroup and supplementalGroups.
+            # The pod's runAsGroup, fsGroup and supplementalGroups.
             group: "1001"
             supplementary_groups: ["2001"]
             command: [/bin/sh, -c]
@@ -333,8 +328,6 @@ plugins:
               cpu: "2"
               memory: 4Gi
               ephemeral_storage: 8Gi
-            # Below ephemeral_storage, so the volume limit applies first.
-            work_limit: 6Gi
       # An agent on any node that tolerates the taint, with the image's
       # entrypoint.
       - name: shared
@@ -348,7 +341,7 @@ plugins:
               effect: NoSchedule
           runtime:
             image: registry.example.com/reviewer:1.0
-            user: "1002"
+            group: "1001"
             args: [--prompt-file, /wherry/prompt.txt]
             env:
               AGENT_LOG_LEVEL: warn
@@ -359,8 +352,9 @@ plugins:
 
 ## Agent pods
 
-The plugin creates one Secret and one pod per run, both named
-`agent-<pool>-<run>` in the plugin profile's namespace. `<pool>` is the
+The plugin creates one Secret, one pod and one run directory per run, all
+named `agent-<pool>-<run>`, the Secret and the pod in the plugin profile's
+namespace and the directory in `runs/` on the runs claim. `<pool>` is the
 first 12 hexadecimal digits of the SHA-256 of the pool name, as the Nomad
 plugin names its jobs. Both carry the labels `wherry.io/pool`,
 `wherry.io/profile`, `wherry.io/agent` and `wherry.io/run`, and the pod carries the annotation `wherry.io/attempt`
@@ -368,37 +362,27 @@ with the attempt that created it. The receiver reads the labels to decide
 whether to adopt the pod.
 
 The pod is a bare pod with `restartPolicy: Never`, so a run executes exactly
-once and nothing replaces its pod. It has three containers:
+once and nothing replaces its pod. Its one container, `agent`, runs the
+plugin profile's `runtime`, and the pod ends when the agent does. It mounts
+two volumes:
 
-- `inputs`, an init container running `wherry-k8s-helper`, copies the
-  run's material from its Secret into the pod's volumes, and takes the S3
-  inputs the plugin streams in.
-- `agent` runs the plugin profile's `runtime`.
-- `outputs` runs `wherry-k8s-helper` as a holder that stays up after the
-  agent ends. The plugin execs the helper in it to signal the agent, and
-  to list and read the agent's outputs, since Kubernetes has no call that
-  stops one container and a deleted pod's volumes are gone.
+- `runs`, the runs claim, at `/wherry`, through
+  `subPathExpr: runs/$(WHERRY_RUN_DIR)`, with `WHERRY_RUN_DIR` the run's
+  name in the agent's environment, so the agent sees its own run directory
+  alone;
+- `material`, the run's Secret, whose `items` map the key `prompt` to
+  `prompt` and each `credentials.<file>` key to `files/<file>`, with
+  `defaultMode: 0440`. The agent mounts `prompt` by `subPath` at
+  `/wherry/prompt.txt` and `files` at `/run/wherry/credentials/files`, both
+  read-only.
 
 The pod sets `automountServiceAccountToken: false`,
-`enableServiceLinks: false`, `shareProcessNamespace: true`,
-`terminationGracePeriodSeconds: 15`, `runAsNonRoot`, the `RuntimeDefault`
-seccomp profile, and, in every container, no privilege escalation and no
-capabilities, which meets the Pod Security `restricted` level. The helper
-containers have read-only root filesystems and
-request 10m CPU and 16Mi memory, limited to 200m and 64Mi. The agent's
-requests equal its limits. The plugin sets no `ephemeral-storage` on the
-helper containers; where a ResourceQuota covers `ephemeral-storage`, give
-the namespace a LimitRange default. The pod runs as the namespace's
-`default` service account, which carries the pull secrets for the agent
-and helper images.
-
-Every container must run as one UID, since the helper signals the agent's
-processes and owns its credential files; `runtime.user` gives every
-container its UID. If the admitted pod's containers
-run as different users, or any has none, the plugin deletes the pod and its
-Secret and reports nothing created with
-`agent pod containers run as different users; set runtime.user`, so the
-task is redelivered until it spends its delivery budget, as under Quota.
+`enableServiceLinks: false`, `terminationGracePeriodSeconds: 15`,
+`runAsNonRoot`, the `RuntimeDefault` seccomp profile, `fsGroup` to the
+runtime's GID, and, in the container, no privilege escalation and no
+capabilities, which meets the Pod Security `restricted` level. The agent's
+requests equal its limits. The pod runs as the namespace's `default`
+service account, which carries the pull secrets for the agent image.
 
 A pod that cannot start is reported as never started, with the platform's
 message as the reason:
@@ -408,8 +392,6 @@ message as the reason:
 | `image` | an image pull in back-off, `ErrImageNeverPull` or `InvalidImageName` |
 | `config` | `CreateContainerConfigError` or `CreateContainerError` |
 | `start` | the agent container ended without starting, such as a CRI-O `StartError` |
-| `fetch` | an S3 input was not fetched |
-| `setup` | the `inputs` container failed otherwise, including a helper of another protocol version |
 | `pod` | the pod failed before the agent started (eviction, a lost node), or is being deleted |
 
 A first `ErrImagePull` and an unscheduled pod are waited on.
@@ -424,18 +406,23 @@ replaces a runtime `env` variable of the same name.
 
 The agent sees:
 
-- the prompt in `/wherry/prompt.txt`;
+- the prompt in `/wherry/prompt.txt`, mode 0440, owned by root and the
+  pod's fsGroup;
 - each environment target in the environment variable named by the target,
   through a `secretKeyRef`, so its value never appears in the pod spec;
-- each input file in `/wherry/inputs`, mode 0600, in a 0700 directory;
+- each input file in `/wherry/inputs`, mode 0600, in a 0700 directory,
+  both owned by the agent's UID, written by the plugin before it creates
+  the pod;
 - each S3 input in `/wherry/inputs`, as described in [S3 inputs](#s3-inputs);
-- each file target as a file in `/run/wherry/credentials/files`, copied
-  from the Secret by the init container, mode
-  0600, in a 0700 directory, both owned by the agent's UID, so `ssh`
-  accepts a private key. File targets are on a memory-backed volume,
-  which the agent mounts read-only and which is a different filesystem from
-  its outputs, so the agent cannot hard-link a credential into them;
-- its outputs directory, which it creates, at `/wherry/outputs`;
+- each file target as a file in `/run/wherry/credentials/files`, mode 0440,
+  owned by root and the pod's fsGroup, so the agent reads it through its
+  group and writes none. `ssh` refuses a private key that others can read
+  only when the agent's user owns it, so it accepts a root-owned key at
+  0440. The Secret volume is memory-backed and a different filesystem from
+  the agent's outputs, so the agent cannot hard-link a credential into
+  them;
+- its run directory at `/wherry`, mode 0700 and owned by its UID, and its
+  outputs directory, which it creates, at `/wherry/outputs`;
 - `HOME` set to `/wherry`;
 - `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR` and `WHERRY_CREDENTIALS_DIR` set
   to `/wherry/inputs`, `/wherry/outputs` and
@@ -446,14 +433,23 @@ The agent sees:
   in [Agent environment](#agent-environment);
 - the runtime's `command`, `args`, `env` and `resources`.
 
-`/wherry` has no size limit unless `work_limit` sets one. An agent that
-writes outputs of several GiB on a node short of disk can trigger the
-kubelet's disk-pressure eviction, which kills the pod and loses the
-outputs. Where nodes are small, set `work_limit` to the pool's output limit
-plus headroom. `/wherry` is a disk-backed `emptyDir`, so it also counts
-against `resources.ephemeral_storage` when that is set: `work_limit` bounds
-the agent's working files, `ephemeral_storage` the container's whole disk use,
-and an `ephemeral_storage` below `work_limit` evicts first.
+### Runs claim
+
+Every run of the receiver keeps its inputs, its working files and its
+outputs on the runs claim, a ReadWriteMany PersistentVolumeClaim in the
+namespace that the receiver's pod mounts at `runs_dir` and every agent pod
+mounts at `/wherry`. The claim's storage class must provision
+`ReadWriteMany` volumes, such as CephFS, NFS, EFS or Azure Files; on
+OpenShift, ODF CephFS. The plugin keeps each run's directory in `runs/`
+below `runs_dir`, created by the receiver's UID at 0700.
+
+The claim's capacity is shared by every run of the receiver, so size it at
+the receiver's `capacity` times the inputs and the pool's output limit per
+run (`output_limit` times the files), plus headroom. The pool's output
+limits are checked only at collection, so a runaway agent fills the claim
+for every run on that receiver. Below `runs_floor` free the plugin profile
+is not ready, and the receiver takes no new work until space returns;
+`wherry_plugin_storage_free_bytes` reports the free space.
 
 The plugin reads the agent's standard output from the logs API, which
 interleaves standard error with it. A line the agent writes to standard
@@ -473,32 +469,31 @@ still below the current file's length is not detected: the follow discards
 that many bytes of the current file, so the transcript loses lines without
 an error.
 
-The plugin stops an agent by sending `SIGTERM` to every process of the
-pod but the holder, through the holder, and waiting up to 15 seconds for
-the agent container to end; then `SIGKILL` and 15 seconds more. A signal
-whose exec fails in transport may still have been delivered, so the plugin
-waits for it as for a delivered one. If the agent still runs, or the holder
-refuses to signal it, the plugin deletes the pod at once, logs `agent outlived SIGKILL; pod deleted`, and the run ends
-with `outputs not collected`. The agent can see and signal the holder too;
-an agent that kills the holder loses its outputs, and collection fails with
-`the outputs container has ended`.
+The plugin stops an agent by deleting its pod with `gracePeriodSeconds`
+15: the kubelet sends the agent `SIGTERM`, waits 15 seconds, and sends
+`SIGKILL`. The plugin waits until the pod is gone. The outputs stay on the
+runs claim.
 
-The plugin collects outputs from `/wherry/outputs` through the holder once
-the agent container has ended. The holder lists the whole tree with
-`lstat`, never descending a link, and the plugin refuses the tree, reading
-nothing, when it holds more entries than the receiver's limit. The holder
-reads only regular files the listing shows within the limits, opened
-within the outputs tree and refused when they are anything but a regular
-file of the listed size; links, FIFOs and devices are listed with their
-type and never read. An output the receiver streams, an S3 output or the
-agent's [outcome file](https://benemon.github.io/wherry/configuration#agent-contract), it streams as the receiver reads it. The agent creates the outputs directory;
-without one there are no outputs.
+The plugin collects outputs from the run's `outputs` directory on the runs
+claim, through its own mount at `runs_dir`, once the agent container has
+ended or the pod has gone. The plugin mounts every run's directory, and an
+agent can create links in its outputs, so the plugin opens the outputs
+directory as an `os.Root`, which refuses every path that leaves it, links
+included, and refuses an outputs directory that is itself a link. It lists
+the whole tree with `lstat`, never descending a link, and refuses the tree,
+reading nothing, when it holds more entries than the receiver's limit. It
+reads only regular files the listing shows within the limits, refused when
+they are anything but a regular file of the listed size; links, FIFOs and
+devices are listed with their type and never read. An output the receiver
+streams, an S3 output or the agent's [outcome file](https://benemon.github.io/wherry/configuration#agent-contract), it streams as the receiver reads it. The agent creates the outputs directory;
+without one there are no outputs. The agent's own mount reaches no other
+run, since it is the run's directory alone and a link resolves inside the
+agent's mount namespace.
 
-When a run ends, the plugin deletes its Secret and ends the holder, so the
-pod goes terminal and frees its node's requests. The pod and its log stay
-until the [sweep](#sweep). Purging a run deletes its pod with grace 0,
-which the API server removes at once, waits until the pod is gone, then
-deletes its Secret.
+When a run ends, the plugin deletes its Secret. The pod, its log and the
+run directory stay until the [sweep](#sweep). Purging a run deletes its pod
+with grace 0, which the API server removes at once, waits until the pod is
+gone, then deletes its Secret and its run directory.
 
 A pod with a `deletionTimestamp`, such as one on a lost node, is ended:
 the plugin opens no log for it, reports exit code -1 when the agent has no
@@ -510,30 +505,30 @@ exit code and its termination reason, such as 137 and `OOMKilled`.
 ### Secrets
 
 A run's Secret holds its prompt (`prompt`), each environment target
-(`env.<variable>`), each file target (`credentials.<file>`) and each input
-file (`inputs.<name>`), as raw bytes, so binary files arrive intact. The
-init container mounts it to stage inputs and file targets. The agent
-container reads environment targets through Secret key references.
+(`env.<variable>`) and each file target (`credentials.<file>`), as raw
+bytes, so binary files arrive intact. The agent container mounts the prompt
+and file targets from it and reads environment targets through Secret key
+references.
 
 The API server limits a Secret's values together to 1 MiB, and a key to
-253 characters. Dispatch adds up the prompt, target values and then the
-inputs, and refuses a run over either limit,
-creating nothing:
+253 characters. Dispatch refuses a run over either limit, creating nothing:
 
-- An input that takes the total past 1 MiB, or whose name is over 246
-  characters, fails the run naming the input.
-- A file target name over 241 characters fails the run the same
-  way; the receiver calls it an input.
-- A prompt and target values over 1 MiB without any input fail the run with
+- A file target name over 241 characters fails the run naming the target;
+  the receiver calls it an input.
+- A prompt and target values over 1 MiB fail the run with
   `the prompt and credentials exceed the 1 MiB Secret limit`.
 
-The plugin declares an inline limit of 512 KiB, half the Secret, which
-leaves the prompt and target values the rest, so a host sends larger inputs
-through the pool's bucket. Under the default pool terms, inputs fit.
+Input files go to the run directory, outside the Secret. The plugin
+declares an inline limit of 512 KiB, so a host sends larger inputs through
+the pool's bucket.
 
-The plugin writes the Secret only when the run's pod does not exist yet,
-over any Secret an earlier attempt left, and never rewrites it under a
-running pod.
+The plugin writes the run directory, then the Secret, then the pod, only
+when the run's pod does not exist yet, over any Secret an earlier attempt
+left, and never rewrites either under a running pod. A run directory that
+holds the inputs directory alone, with each of the run's inputs verified
+and no other file, is kept; any other is removed and written again. A
+receiver that restarts between the inputs and the pod finds the directory
+complete, or rewrites it.
 
 ### Sweep
 
@@ -552,6 +547,9 @@ condition change.
 - A Secret is deleted when its pod is the plugin profile's and has ended,
   when its pod is any plugin profile's and has ended 10 minutes ago, or
   when it has no pod and is more than 10 minutes old.
+- A run directory of the pool in `runs/` is removed when neither its pod
+  nor its Secret remains and it has not changed for 10 minutes. A purge
+  removes the directory with its pod.
 
 An adopter can read an ended pod's log for 10 minutes. A pod stranded on a
 lost node is purged 10 minutes after its deletion began.
@@ -564,34 +562,20 @@ them twice.
 
 ### S3 inputs
 
-The plugin fetches each S3 input on the receiver and streams it into the
-pod; the presigned URL never leaves the receiver. It appears in no Secret,
-pod spec, exec argument, event, log line or error, and agent pods need no
-route to the storage endpoint.
+The plugin fetches each S3 input on the receiver and writes it into the run
+directory before it creates the pod; the presigned URL never leaves the
+receiver. It appears in no Secret, pod spec, event, log line or error, and
+agent pods need no route to the storage endpoint.
 
-1. The `inputs` init container takes each input's name, size and SHA-256 as
-   arguments, creates `/wherry/inputs`, copies the Secret's material, and
-   waits.
-2. Once the container is running, the plugin fetches each input with a
-   client that follows no redirect and reads at most one byte past the
-   input's size, and pipes it into an exec of the helper's `put`. The
-   helper writes the input to a temporary file, checks its size and
-   SHA-256, and moves it into place. A put of an input already in place
-   reads nothing.
-3. An exec that fails in transport is retried with a fresh fetch, up to
-   three attempts. The plugin stops delivering if the container has ended.
-4. After the last put, the plugin tells the helper it is done, and the
-   container exits once no put is in progress.
-5. A fetch that fails, a put the helper refuses, or three failed attempts
-   end the container with `input <name>: not fetched`, and the plugin
-   reports the pod never started with class `fetch`, which the receiver
-   ends `TASK_STATE_FAILED`. The plugin logs `input not fetched` with the
-   status code or failure class, never the URL.
-6. A container that waits 10 minutes with no put in progress ends the same
-   way, so a receiver that dies during delivery leaves no pod waiting.
-
-Every byte travels through the API server to the kubelet, which is slower
-than a download from the pod, and the placement metric includes the time.
+The plugin fetches each input with a client that follows no redirect and
+reads at most one byte past the input's size, writes it to
+`inputs/<name>`, mode 0600, and checks its size and SHA-256. A fetch that
+fails or does not verify fails the dispatch before any pod exists, with
+`fetch <name>: <reason>`, where the reason is a status code, `timeout`,
+`certificate`, `unreachable`, `invalid URL`, `shorter than its size`,
+`longer than its size` or `does not match its digest`. The receiver counts
+it a `dispatch` start failure. A large S3 input crosses the receiver's
+network and the runs claim's.
 
 ### Agent environment
 
@@ -615,8 +599,13 @@ plugin profile it reports these families, which the receiver serves on its
 | --- | --- | --- | --- |
 | `wherry_plugin_platform_errors_total` | counter | `class` | failed API calls |
 | `wherry_plugin_cleanup_pending` | gauge | none | the plugin profile's ended pods the latest sweep left |
-| `wherry_plugin_sweep_deletions_total` | counter | `kind` | the plugin profile's pods a sweep purged (`job`) and Secrets it deleted (`variable`) |
+| `wherry_plugin_sweep_deletions_total` | counter | `kind` | the plugin profile's pods a sweep purged (`job`), Secrets it deleted (`variable`) and run directories it removed (`directory`) |
 | `wherry_plugin_placement_seconds` | histogram | none | time from a Dispatch that creates the pod to the plugin seeing its agent container running |
+| `wherry_plugin_storage_free_bytes` | gauge | none | the free bytes of the runs claim at `runs_dir` |
+
+`wherry_plugin_storage_free_bytes` and the `directory` kind need a receiver
+that declares them; an older receiver drops their samples and counts each
+in `wherry_metrics_dropped_total`.
 
 An API call's class comes from its status: 401 and 403 are `denied`, 409
 `conflict`, 408, 504 and the `Timeout` and `ServerTimeout` reasons
@@ -627,15 +616,14 @@ call the receiver cancels count nothing.
 
 A failed call the plugin returns reaches the receiver with its operation,
 class and the API's text, and the receiver logs it redacted. A failed call
-the plugin handles itself, such as a poll, a refused signal or a failed
-end of the holder, logs one warning, `kubernetes call failed`, naming the
+the plugin handles itself, such as a poll, logs one warning, `kubernetes call failed`, naming the
 plugin profile under the key `profile`, the operation and the class; the line holds no URL, token or
 response body. API warnings, such as PodSecurity notices, are logged as
 `kubernetes warning`.
 
 The plugin's client allows 50 requests a second with bursts of 100. Each
-run polls its pod every second or two, besides its log stream, execs and
-the sweep; the API server's priority and fairness protects the server.
+run polls its pod every second or two, besides its log stream and the
+sweep; the API server's priority and fairness protects the server.
 
 ## Agent network reach
 
@@ -644,7 +632,8 @@ The operator guide's
 says what an agent job's egress policy denies and allows.
 
 Agent pods carry no API token and no Service variables, and need no
-ingress: the plugin reaches them through the API server's exec and logs.
+ingress: the plugin reads their logs through the API server and their
+outputs on the runs claim.
 They need no route to the storage endpoint. Until an egress policy is set,
 agent pods have the cluster's default egress.
 
@@ -663,8 +652,9 @@ podSelector:
 The receiver runs as a one-replica Deployment with its own service account,
 and its agent pods run beside it in the same namespace.
 [`examples/kubernetes/receiver.yaml`](../examples/kubernetes/receiver.yaml) holds its manifests: the
-ServiceAccount, the RoleBinding of `admin` ([RBAC](#rbac)), the state
-PersistentVolumeClaim, the Deployment and the metrics Service. The Secret
+ServiceAccount, the Role and its RoleBinding ([RBAC](#rbac)), the state
+PersistentVolumeClaim, the runs claim `wherry-runs`, the Deployment and the
+metrics Service. The Secret
 `wherry-receiver-bundle` holds the bundle, and the ConfigMap
 `wherry-receiver-config` holds the receiver's local configuration,
 [`examples/kubernetes/config.yaml`](../examples/kubernetes/config.yaml).
@@ -683,7 +673,7 @@ make image VERSION=<version> WHERRY_VERSION=<wherry version>
 ```
 
 `make image` runs Podman; `CONTAINER=docker` runs Docker instead. The
-build compiles the plugin and the helper from the checkout, downloads the
+build compiles the plugin from the checkout, downloads the
 wherry release archive for the target architecture with its
 `checksums.txt` and `checksums.txt.sigstore.json`, and verifies the
 checksums' signature, then the archive's SHA-256 against them:
@@ -696,14 +686,15 @@ cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
 
 The image is based on `registry.access.redhat.com/ubi9/ubi-minimal`, whose
 CA bundle the receiver's S3 uploads and the plugin's S3 fetches trust. It
-holds `/usr/local/bin/wherry`,
-`/usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes` and
-`/usr/local/libexec/wherry/wherry-k8s-helper`, each mode 0755 and owned by
-root, so the receiver's checks pass under any UID. It runs as UID 1001 and
-group 0, with the entrypoint `wherry`; its writable paths are volumes whose
-mount points, `/var/lib/wherry` and `/tmp`, group 0 can write. It holds no
-Nomad plugin. The same image is the `helper_image`. For a storage endpoint
-under a private CA, add the CA with `update-ca-trust` in a derived image.
+holds `/usr/local/bin/wherry` and
+`/usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes`, each mode
+0755 and owned by root, so the receiver's checks pass under any UID. It
+runs as UID 1001 and group 0, with the entrypoint `wherry`; its writable
+paths are volumes whose mount points, `/var/lib/wherry` and `/tmp`, group 0
+can write. It holds no Nomad plugin. Agent pods run the agent's image
+alone, so an upgrade of the plugin is a change of the receiver image. For a
+storage endpoint under a private CA, add the CA with `update-ca-trust` in a
+derived image.
 
 No image is published, since an image couples a wherry release and a
 plugins release. Push the image you build to a registry the cluster pulls
@@ -720,8 +711,9 @@ from.
 
 2. Add the receiver with `wherry admin receiver add`, as the operator guide
    says, with a `kubernetes` plugin whose `config` sets the receiver's
-   `namespace` and the receiver image as `helper_image`
-   ([Settings](#settings)), and the receiver's plugin profiles. The
+   `namespace`, `runs_claim: wherry-runs` and
+   `runs_dir: /var/lib/wherry/runs` ([Settings](#settings)), and the
+   receiver's plugin profiles. The
    in-cluster receiver's configuration names no platform credential; the
    service account supplies the token.
 
@@ -768,6 +760,11 @@ the ConfigMap mounted read-only at `/etc/wherry/config`.
   receiver. Losing the PVC loses the receiver's identity; provision it
   again under a new name, as the operator guide says for a lost state
   directory.
+- The runs claim `wherry-runs` is `ReadWriteMany` and mounted at
+  `/var/lib/wherry/runs`. Its storage class's default applies; set one that
+  provisions `ReadWriteMany` volumes ([Runs claim](#runs-claim)). The
+  volume's root must be writable by the receiver's UID, as for the state
+  volume.
 - The bundle Secret is mounted at 0440, owned by group 0, the receiver's
   group.
 - The receiver has no health endpoint, so the pod has no probes.
@@ -835,10 +832,11 @@ ships `kubectl` beside `oc`. What differs:
   account's, so `anyuid` or `privileged` would admit agent pods running as
   root.
 - restricted-v2 gives every container of a pod the namespace's first UID,
-  with group 0. Leave `runtime.user` unset; a `user` outside the
-  namespace's UID range is refused at admission.
-- restricted-v2 also sets the pod's fsGroup, which the bundle file and the
-  state volume take. `fsGroupChangePolicy: OnRootMismatch` keeps the
+  with group 0, so the receiver and its agents share a UID. Leave
+  `runtime.user` and `runtime.group` unset; a `user` or a `group` outside
+  the namespace's ranges is refused at admission.
+- restricted-v2 also sets the pod's fsGroup, which the bundle file, the
+  state volume and an agent's prompt and credential files take. `fsGroupChangePolicy: OnRootMismatch` keeps the
   kubelet from adding group access to the receiver's signing key on every
   mount, which would stop the receiver. If the namespace's fsGroup ever
   changes, the receiver stops with `chmod 600 it`; fix the modes.
@@ -870,7 +868,7 @@ ships `kubectl` beside `oc`. What differs:
 | --- | --- | --- |
 | Agent UID | nothing assigns one; set `runtime.user` | restricted-v2 gives every container the namespace's first UID; leave `runtime.user` unset |
 | Receiver UID | the image's, 1001, with group 0 | the namespace's, with group 0 |
-| fsGroup | unset; agent Secret files stay root-owned at mode 0444, which the init container reads; the receiver's bundle is group 0 | restricted-v2 sets it; Secret files take its group |
+| fsGroup | `runtime.group`; agent Secret files are root-owned at mode 0440 in that group; the receiver's bundle is group 0 | restricted-v2 sets it; Secret files take its group |
 | Admission | Pod Security Admission; label the namespace `pod-security.kubernetes.io/enforce: restricted`, which the pods meet | SCCs of the creator and the pod's service account; a refusal is 403 at create |
 | Image user | the image's own user | an arbitrary UID with GID 0; agent images keep their writable paths group-0 writable |
 | Node selection | `node_selector` alone | a project's `openshift.io/node-selector` merges with `node_selector`; a conflict is 403 at create |
@@ -887,18 +885,21 @@ ships `kubectl` beside `oc`. What differs:
 make test
 ```
 
-The unit tests run the plugin against a fake API server and the helper
-in-process against a temporary directory. The tests that need a cluster
-run when `WHERRY_KUBERNETES_DEV_ADDR` names an API server, and skip
-otherwise. They read:
+The unit tests run the plugin against a fake API server, with a temporary
+directory as the runs claim. The tests that need a cluster run when
+`WHERRY_KUBERNETES_DEV_ADDR` names an API server, and skip otherwise. They
+write the run directories as the receiver does, so they run on a machine
+that mounts the runs claim's file system, as the UID agent pods run as.
+They read:
 
 | Variable | Content |
 | --- | --- |
-| `WHERRY_KUBERNETES_DEV_TOKEN_FILE` | a token of a service account bound to `admin` in the namespace alone ([RBAC](#rbac)) |
+| `WHERRY_KUBERNETES_DEV_TOKEN_FILE` | a token of a service account bound to the plugin's Role in the namespace alone ([RBAC](#rbac)) |
 | `WHERRY_KUBERNETES_DEV_CA_FILE` | the API server's CA bundle |
 | `WHERRY_KUBERNETES_DEV_NAMESPACE` | the namespace for agent pods |
-| `WHERRY_KUBERNETES_DEV_HELPER_IMAGE` | the receiver image to run as `helper_image` |
-| `WHERRY_KUBERNETES_DEV_USER` | optional; the conformance tests' `runtime.user`, for a cluster that assigns no UID |
+| `WHERRY_KUBERNETES_DEV_RUNS_CLAIM` | the runs claim in the namespace |
+| `WHERRY_KUBERNETES_DEV_RUNS_DIR` | where the machine mounts the runs claim's file system |
+| `WHERRY_KUBERNETES_DEV_USER` | optional; `runtime.user`, the machine's UID, for a cluster that assigns no UID |
 
 They include the protocol's conformance suite,
 `github.com/benemon/wherry/pluginsdk/pluginsdktest`, in process and against
@@ -906,8 +907,8 @@ the built plugin, and `TestRoleSuffices`, which runs the suite and checks
 each pod it dispatches. They set `runtime.user` from
 `WHERRY_KUBERNETES_DEV_USER` and leave it unset without it, so they run on
 OpenShift without it and on other clusters with it, such as
-`WHERRY_KUBERNETES_DEV_USER=1001`. The other tests that need a cluster set
-no `runtime.user` and run on OpenShift.
+`WHERRY_KUBERNETES_DEV_USER=1001`. The other tests that need a cluster do
+the same.
 
 `TestRoleSuffices` checks each pod by where it runs:
 
@@ -944,16 +945,19 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    configuration, `config.yaml`, with a generated dummy credential and runs
    `wherry init`.
 4. `04-deploy.sh` builds the receiver image with `make image` and the fake
-   agent's image, loads both into kind, and deploys the receiver as
-   [Deploy](#deploy) says, into a namespace enforcing Pod Security
-   `restricted`.
+   agent's image, loads both into kind, creates the runs claim's volume,
+   [`runs.yaml`](test/e2e/runs.yaml), a hostPath directory on the single
+   node marked `ReadWriteMany` and owned by UID 1001, and deploys the
+   receiver as [Deploy](#deploy) says, into a namespace enforcing Pod
+   Security `restricted`.
 5. `05-runs.sh` submits and watches, as the host: a run it cancels, a plain
-   run, a credentialed run, a run with an input file and a run whose image
-   is missing. It checks each state, the result and output, the
-   credential's mode 0600 in a 0700 directory, the input's SHA-256, the
-   start failure's reason in the receiver's log, the dummy credential's
-   absence from the log, pods and events, and the sweep's removal of the
-   cancelled run's Secret and pod.
+   run, a credentialed run with an input file and an SSH private key, a run
+   with an input file and a run whose image is missing. It checks each
+   state, the result and output, the credentials' mode 0440 and root
+   owner, `ssh-keygen -y` accepting the key as the agent, the input's mode
+   0600 and SHA-256, the start failure's reason in the receiver's log, the
+   credentials' absence from the log, pods and events, and the sweep's
+   removal of the cancelled run's Secret and pod.
 
 `collect.sh` writes the receiver's log and the cluster's state, but no
 Secret, to `artifacts` in the state directory, `$E2E_WORK`, by default

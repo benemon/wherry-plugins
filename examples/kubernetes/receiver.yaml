@@ -1,14 +1,25 @@
 # The in-cluster receiver. apply.sh applies this file unchanged but for the namespace and the image, on Kubernetes and
 # OpenShift alike, beside the Secret wherry-receiver-bundle and the ConfigMap wherry-receiver-config, which holds the
-# receiver's local configuration config.yaml. Agent pods run in the same namespace.
+# receiver's local configuration config.yaml. Agent pods run in the same namespace and mount the runs claim with the
+# receiver.
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: wherry-receiver}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: wherry-receiver}
+rules:
+  - {apiGroups: [""], resources: [pods], verbs: [create, get, list, watch, delete]}
+  - {apiGroups: [""], resources: [pods/log], verbs: [get]}
+  - {apiGroups: [""], resources: [secrets], verbs: [create, get, update, delete, list]}
+  # A Role grants get on its own namespace alone.
+  - {apiGroups: [""], resources: [namespaces], verbs: [get]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata: {name: wherry-receiver}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: wherry-receiver}
 subjects:
   - {kind: ServiceAccount, name: wherry-receiver, namespace: wherry}
 ---
@@ -18,6 +29,14 @@ metadata: {name: wherry-receiver-state}
 spec:
   accessModes: [ReadWriteOnce]
   resources: {requests: {storage: 1Gi}}
+---
+# Every run's inputs and outputs; size it for the receiver's capacity and the pool's output limits.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: wherry-runs}
+spec:
+  accessModes: [ReadWriteMany]
+  resources: {requests: {storage: 10Gi}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -48,11 +67,13 @@ spec:
             - {name: config, mountPath: /etc/wherry/config, readOnly: true}
             - {name: bundle, mountPath: /etc/wherry/bundle, readOnly: true}
             - {name: state, mountPath: /var/lib/wherry}
+            - {name: runs, mountPath: /var/lib/wherry/runs}
             - {name: tmp, mountPath: /tmp}
       volumes:
         - {name: config, configMap: {name: wherry-receiver-config}}
         - {name: bundle, secret: {secretName: wherry-receiver-bundle, defaultMode: 0440}}
         - {name: state, persistentVolumeClaim: {claimName: wherry-receiver-state}}
+        - {name: runs, persistentVolumeClaim: {claimName: wherry-runs}}
         - {name: tmp, emptyDir: {medium: Memory, sizeLimit: 16Mi}}
 ---
 apiVersion: v1
