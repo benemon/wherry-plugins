@@ -717,8 +717,10 @@ make test
 ```
 
 Tests that need a Nomad agent run when `WHERRY_NOMAD_DEV_ADDR` names a dev
-agent with `raw_exec` enabled, such as `http://127.0.0.1:4646`, and skip
-otherwise. They include the protocol's conformance suite,
+agent with `raw_exec` enabled, such as `http://127.0.0.1:4646` or a task
+API socket, and skip otherwise. They send `NOMAD_TOKEN`, as the plugin
+does, which an agent with ACLs or the task API needs. They include the
+protocol's conformance suite,
 `github.com/benemon/wherry/pluginsdk/pluginsdktest`.
 
 ### End to end on Nomad
@@ -728,8 +730,11 @@ otherwise. They include the protocol's conformance suite,
 on a Nomad dev agent, as the `nomad` lane of the `e2e` workflow does for
 every change to `nomad/`, `examples/nomad/`, the fake agent or the
 workflow. Each step is a script; with systemd, root through sudo, Docker,
-Nomad, the repository's `nomad/v*` tags on a Linux machine, and the wherry
-release the workflow pins:
+Nomad, the
+[CNI reference plugins](https://github.com/containernetworking/plugins/releases)
+in `/opt/cni/bin` at the version the workflow pins, the repository's
+`nomad/v*` tags on a Linux machine, and the wherry release the workflow
+pins:
 
 ```sh
 export WHERRY_VERSION=$(sed -n 's/^  WHERRY_VERSION: //p' .github/workflows/e2e.yml)
@@ -737,8 +742,11 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
 ```
 
 1. `01-nomad.sh` replaces the systemd unit `wherry-nomad` with a Nomad dev
-   agent and the docker driver, and starts a single-broker Kafka with TLS
-   and SCRAM through `test/kafka/up.sh` of `WHERRY_VERSION`.
+   agent and the docker driver, waits for it to fingerprint the CNI
+   plugins, and starts a single-broker Kafka with TLS and SCRAM through
+   `test/kafka/up.sh` of `WHERRY_VERSION`, with `ADVERTISED_IP` the
+   machine's address on its default route, so the receiver reaches the
+   broker from its bridge network.
 2. `02-wherry.sh` fetches the wherry CLI of `WHERRY_VERSION` through the
    receiver image's verifying fetch stage, and builds the receiver image
    from the checkout and from the latest `nomad/v*` tag before `HEAD`, both
@@ -758,8 +766,10 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
    and checks its exit code, reply and output.
 6. `06-upgrade.sh` rolls the job to the previous release's image, submits a
    slow run, and rolls the job to the checkout's image once the run's agent
-   task runs. The new receiver adopts the agent job and completes the run.
-   Both images hold `WHERRY_VERSION`, so the step upgrades the plugin.
+   task runs. The new receiver adopts the agent job and completes the run,
+   and its metrics, on the client port the allocation maps the `metrics`
+   port to, count the adoption. Both images hold `WHERRY_VERSION`, so the
+   step upgrades the plugin.
 7. `07-rollback.sh` rolls the job back to the previous release's image and
    completes a run on it.
 

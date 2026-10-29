@@ -21,6 +21,9 @@ env:
   # A Nomad CE release; NOMAD_SHA256 is its linux_amd64 zip's line in the release's SHA256SUMS.
   NOMAD_VERSION: 2.0.7
   NOMAD_SHA256: 4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1
+  # The CNI reference plugins Nomad's bridge networking runs; CNI_PLUGINS_SHA256 is the linux-amd64 archive's .sha256.
+  CNI_PLUGINS_VERSION: v1.9.1
+  CNI_PLUGINS_SHA256: b98f74a0f8522f0a83867178729c1aa70f2158f90c45a2ca8fa791db1c76b303
 
 jobs:
   kind:
@@ -93,6 +96,16 @@ jobs:
           echo "$NOMAD_SHA256  $zip" | sha256sum -c -
           unzip -o "$zip" nomad
           sudo install -m 0755 nomad /usr/local/bin/nomad
+      - name: Install the CNI reference plugins
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          archive=cni-plugins-linux-amd64-$CNI_PLUGINS_VERSION.tgz
+          curl -fsSL --output-dir "$RUNNER_TEMP" -O \
+            "https://github.com/containernetworking/plugins/releases/download/$CNI_PLUGINS_VERSION/$archive"
+          cd "$RUNNER_TEMP"
+          echo "$CNI_PLUGINS_SHA256  $archive" | sha256sum -c -
+          sudo install -d -m 0755 /opt/cni/bin
+          sudo tar -xzf "$archive" -C /opt/cni/bin
       - name: Start the Nomad agent and Kafka
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/01-nomad.sh

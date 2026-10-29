@@ -66,6 +66,17 @@ roll() {
 	wait_for 300 ready
 }
 
+# metrics_address prints the client address and port of the running receiver allocation's metrics port, which the
+# bridge network maps to the receiver's 9464.
+metrics_address() {
+	local alloc
+	alloc=$(api job/wherry-receiver/allocations | jq -r \
+		'map(select(.DesiredStatus == "run" and .ClientStatus == "running")) | sort_by(.CreateIndex) | last | .ID // empty')
+	[ -n "$alloc" ] || fail "the receiver job has no running allocation"
+	api "allocation/$alloc" |
+		jq -r '.AllocatedResources.Shared.Ports[] | select(.Label == "metrics") | "\(.HostIP):\(.Value)"'
+}
+
 submit() {
 	local run
 	run=$(host submit --selector e2e=fake --output echo.txt:required --prompt "$1" | sed -n 's/^run_id=\([^ ]*\) .*/\1/p')
