@@ -2,7 +2,6 @@
 /wherry-plugin-nomad
 /wherry-plugin-kubernetes
 /wherry-plugin-systemd
-/wherry-k8s-helper
 go.work
 go.work.sum
 /nomad/nomad

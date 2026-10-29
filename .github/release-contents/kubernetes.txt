@@ -9,10 +9,8 @@ wherry-plugin-kubernetes_VERSION_darwin_arm64.tar.gz
 wherry-plugin-kubernetes_VERSION_linux_amd64.tar.gz
   wherry-plugin-kubernetes_VERSION_linux_amd64/LICENSE
   wherry-plugin-kubernetes_VERSION_linux_amd64/README.md
-  wherry-plugin-kubernetes_VERSION_linux_amd64/wherry-k8s-helper
   wherry-plugin-kubernetes_VERSION_linux_amd64/wherry-plugin-kubernetes
 wherry-plugin-kubernetes_VERSION_linux_arm64.tar.gz
   wherry-plugin-kubernetes_VERSION_linux_arm64/LICENSE
   wherry-plugin-kubernetes_VERSION_linux_arm64/README.md
-  wherry-plugin-kubernetes_VERSION_linux_arm64/wherry-k8s-helper
   wherry-plugin-kubernetes_VERSION_linux_arm64/wherry-plugin-kubernetes

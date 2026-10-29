@@ -21,27 +21,11 @@ builds:
       - -X main.version={{ .Env.VERSION }}
     goos: [linux, darwin]
     goarch: [amd64, arm64]
-  # Agent pods run the helper, so only the Linux archives hold it. It takes no version, and an empty entry keeps
-  # goreleaser's default ldflags off.
-  - id: wherry-k8s-helper
-    dir: kubernetes
-    main: ./cmd/wherry-k8s-helper
-    binary: wherry-k8s-helper
-    env:
-      - CGO_ENABLED=0
-    flags:
-      - -trimpath
-    ldflags:
-      - ""
-    goos: [linux]
-    goarch: [amd64, arm64]
 
 archives:
   - id: wherry-plugin-kubernetes
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    # The linux archives hold the plugin and the helper, the darwin archives the plugin alone.
-    allow_different_binary_count: true
     wrap_in_directory: true
     files:
       - LICENSE
