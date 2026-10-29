@@ -38,8 +38,10 @@ plugin on its host.
    wherry receiver run --config-file /etc/wherry/config.yaml
    ```
 
-The receiver checks the plugin directory and binary before it runs them;
-see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
+The receiver runs the plugin only from a binary whose SHA-256 is the pin
+its record holds for the type, which `receiver add` and `receiver update`
+take as `--plugin-sha256 nomad=HEX` from the binary's line in the release's
+`checksums.txt`; see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
 The plugin is not run by hand.
 
 ## Credentials
@@ -635,8 +637,8 @@ archives with [`artifact`](https://developer.hashicorp.com/nomad/docs/job-specif
 blocks, and runs `wherry receiver run` from them under the `exec` driver.
 An artifact cannot verify a cosign signature, so verify each release's
 `checksums.txt` as [Install](#install) describes and pin each archive's
-SHA-256 from it in `options.checksum`. The plugin directory the archive
-unpacks into must meet the receiver's ownership and mode checks. The
+SHA-256 from it in `options.checksum`, and the plugin binary's SHA-256 from
+it on the receiver's record with `receiver update --plugin-sha256`. The
 version is part of each artifact's source, so an upgrade or rollback is a
 change to the job.
 
@@ -650,9 +652,7 @@ binary `/usr/local/libexec/wherry/<version>/wherry` and the plugin
 directory `/usr/local/libexec/wherry/<version>/plugins`. The job's variable
 `version` names the directory. `/usr` is in the `exec` driver's
 [default chroot](https://developer.hashicorp.com/nomad/docs/deploy/task-driver/exec#chroot),
-so the client needs no `chroot_env`. The receiver's ownership and mode
-checks on the plugin directory see the owner and mode installed on the
-client.
+so the client needs no `chroot_env`.
 
 The job's bundle, state directory, `kill_timeout`, network and workload
 identity are those of
