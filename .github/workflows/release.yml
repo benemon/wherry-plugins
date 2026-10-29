@@ -144,7 +144,13 @@ jobs:
           cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
             --certificate-identity-regexp "^https://github\.com/benemon/wherry-plugins/\.github/workflows/release\.yml@refs/tags/$PLUGIN/v" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
-          sha256sum --strict -c checksums.txt
+          grep -E '\.(tar\.gz|json)$' checksums.txt | sha256sum --strict -c -
+          # A binary's line is its pin; the binary is published inside its archive, so it is checked there.
+          grep -Ev '\.(tar\.gz|json)$' checksums.txt | while read -r sum name; do
+            got=$(tar -xzOf "$name.tar.gz" "$name/wherry-plugin-$PLUGIN" | sha256sum | cut -d' ' -f1)
+            [ "$got" = "$sum" ] || { echo "$name: the archive's binary has SHA-256 $got, checksums.txt lists $sum"; exit 1; }
+            echo "$name: OK"
+          done
       - name: Verify each archive's provenance
         working-directory: ${{ runner.temp }}/assets
         env:
