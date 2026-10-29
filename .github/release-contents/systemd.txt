@@ -1,0 +1,8 @@
+wherry-plugin-systemd_VERSION_linux_amd64.tar.gz
+  wherry-plugin-systemd_VERSION_linux_amd64/LICENSE
+  wherry-plugin-systemd_VERSION_linux_amd64/README.md
+  wherry-plugin-systemd_VERSION_linux_amd64/wherry-plugin-systemd
+wherry-plugin-systemd_VERSION_linux_arm64.tar.gz
+  wherry-plugin-systemd_VERSION_linux_arm64/LICENSE
+  wherry-plugin-systemd_VERSION_linux_arm64/README.md
+  wherry-plugin-systemd_VERSION_linux_arm64/wherry-plugin-systemd

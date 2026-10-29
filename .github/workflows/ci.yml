@@ -63,10 +63,61 @@ jobs:
       - name: Run the plugin's gates
         if: steps.changes.outputs.changed == 'true'
         run: make check PLUGINS="$PLUGIN"
-      # The release's own build, so a target that stops compiling fails here before a tag.
-      - name: Cross-compile the plugin's release archives
+
+  # The plugin's release build as a snapshot, unsigned and unpublished, so a platform that stops compiling or an
+  # archive that changes fails here before a tag: it checks <plugin>/.goreleaser.yaml, cross-compiles, and compares
+  # the archives and the files they hold with .github/release-contents/<plugin>.txt.
+  release-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [nomad, kubernetes, systemd]
+    env:
+      PLUGIN: ${{ matrix.plugin }}
+      # A placeholder; release.yml takes it from the tag.
+      VERSION: v0.0.0-ci
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find changes to the plugin or the release build
+        id: changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: >-
+          .github/changed.sh "$BASE"
+          "^($PLUGIN/|\.github/release-|\.github/workflows/(ci|release)\.yml\$|\.github/changed\.sh\$)"
+      - name: Set up Go
         if: steps.changes.outputs.changed == 'true'
-        run: make dist PLUGIN="$PLUGIN"
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: ${{ matrix.plugin }}/go.mod
+          check-latest: true
+          cache: true
+          cache-dependency-path: ${{ matrix.plugin }}/go.sum
+      - name: Install goreleaser, syft and cosign
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          .github/release-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Check the goreleaser configuration
+        if: steps.changes.outputs.changed == 'true'
+        run: goreleaser check --config "$PLUGIN/.goreleaser.yaml"
+      - name: Build a snapshot release
+        if: steps.changes.outputs.changed == 'true'
+        run: goreleaser release --snapshot --clean --skip=sign --config "$PLUGIN/.goreleaser.yaml"
+      - name: Compare the archives with the last release's
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          .github/release-contents.sh dist | tee "$RUNNER_TEMP/release-contents.txt"
+          diff -u ".github/release-contents/$PLUGIN.txt" "$RUNNER_TEMP/release-contents.txt"
+          cd dist && sha256sum -c checksums.txt
+          for archive in wherry-plugin-"$PLUGIN"_*.tar.gz; do
+            test -s "$archive.sbom.json" || { echo "no SBOM for $archive"; exit 1; }
+          done
 
   # The systemd plugin's real-host suite, as root on the runner's systemd.
   systemd-host:

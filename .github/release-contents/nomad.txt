@@ -1,0 +1,16 @@
+wherry-plugin-nomad_VERSION_darwin_amd64.tar.gz
+  wherry-plugin-nomad_VERSION_darwin_amd64/LICENSE
+  wherry-plugin-nomad_VERSION_darwin_amd64/README.md
+  wherry-plugin-nomad_VERSION_darwin_amd64/wherry-plugin-nomad
+wherry-plugin-nomad_VERSION_darwin_arm64.tar.gz
+  wherry-plugin-nomad_VERSION_darwin_arm64/LICENSE
+  wherry-plugin-nomad_VERSION_darwin_arm64/README.md
+  wherry-plugin-nomad_VERSION_darwin_arm64/wherry-plugin-nomad
+wherry-plugin-nomad_VERSION_linux_amd64.tar.gz
+  wherry-plugin-nomad_VERSION_linux_amd64/LICENSE
+  wherry-plugin-nomad_VERSION_linux_amd64/README.md
+  wherry-plugin-nomad_VERSION_linux_amd64/wherry-plugin-nomad
+wherry-plugin-nomad_VERSION_linux_arm64.tar.gz
+  wherry-plugin-nomad_VERSION_linux_arm64/LICENSE
+  wherry-plugin-nomad_VERSION_linux_arm64/README.md
+  wherry-plugin-nomad_VERSION_linux_arm64/wherry-plugin-nomad
