@@ -578,8 +578,10 @@ reads at most one byte past the input's size, writes it to
 fails or does not verify fails the dispatch before any pod exists, with
 `fetch <name>: <reason>`, where the reason is a status code, `timeout`,
 `certificate`, `unreachable`, `invalid URL`, `shorter than its size`,
-`longer than its size` or `does not match its digest`. The receiver counts
-it a `dispatch` start failure. A large S3 input crosses the receiver's
+`longer than its size` or `does not match its digest`, of class `fetch`.
+The receiver ends the run at once, `TASK_STATE_FAILED` with `an S3 input
+was not fetched, or did not match its size and SHA-256`, and does not
+dispatch it again. A large S3 input crosses the receiver's
 network and the runs claim's.
 
 ### Agent environment
