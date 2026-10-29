@@ -1,5 +1,5 @@
-# The wherry receiver image for Kubernetes and OpenShift: wherry from its verified release, the Kubernetes plugin, and
-# the helper agent pods run. Build it with make image from a checkout of a kubernetes/v* tag.
+# The wherry receiver image for Kubernetes and OpenShift: wherry from its verified release and the Kubernetes plugin.
+# Build it with make image from a checkout of a kubernetes/v* tag.
 # The bases are pinned by digest, since cosign verifies wherry's release; dependabot moves the pins.
 FROM --platform=$BUILDPLATFORM ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d AS cosign
 
@@ -8,8 +8,7 @@ ARG TARGETARCH
 ARG VERSION=dev
 WORKDIR /src
 COPY kubernetes/ .
-RUN export CGO_ENABLED=0 GOARCH=$TARGETARCH && go build -trimpath -ldflags "-X main.version=${VERSION}" -o /out/wherry-plugin-kubernetes . && \
-    go build -trimpath -o /out/wherry-k8s-helper ./cmd/wherry-k8s-helper
+RUN export CGO_ENABLED=0 GOARCH=$TARGETARCH && go build -trimpath -ldflags "-X main.version=${VERSION}" -o /out/wherry-plugin-kubernetes .
 
 # WHERRY_OS and WHERRY_ARCH fetch another platform's archive for the wherry target, such as darwin for a workstation.
 FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS fetch
@@ -33,12 +32,12 @@ RUN test -n "$WHERRY_VERSION" && \
 FROM scratch AS wherry
 COPY --from=fetch /fetch/wherry /wherry
 
-# The receiver runs as UID 1001, or the UID OpenShift assigns, with group 0. Its writable paths are volumes: state on
-# /var/lib/wherry, and HOME and TMPDIR on /tmp, whose mount points group 0 can write.
+# The receiver runs as UID 1001, or the UID OpenShift assigns, with group 0; agent pods run as the same UID. Its
+# writable paths are volumes: state on /var/lib/wherry, the runs claim on /var/lib/wherry/runs, and HOME and TMPDIR on
+# /tmp, whose mount points group 0 can write.
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8@sha256:2d4c4551af6831dcd26bbf86108c4385de5183ec8fe6b5868f6f9640fe47f4ed
 COPY --from=fetch --chown=0:0 --chmod=0755 /fetch/wherry /usr/local/bin/wherry
 COPY --from=build --chown=0:0 --chmod=0755 /out/wherry-plugin-kubernetes /usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes
-COPY --from=build --chown=0:0 --chmod=0755 /out/wherry-k8s-helper /usr/local/libexec/wherry/wherry-k8s-helper
 RUN install -d -o 0 -g 0 -m 0775 /var/lib/wherry
 USER 1001:0
 ENTRYPOINT ["/usr/local/bin/wherry"]

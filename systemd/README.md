@@ -374,7 +374,8 @@ systemd 255 mounts it first on Linux 6.3 and later, each file is root
 read access, and search on the directory; `stat` shows them as 0440 and
 0550, since the group bits of a file with an ACL are its mask, and the
 owning group's entry grants nothing. Either way only root and the agent's
-UID read the targets. `ssh` accepts the key in both.
+UID read the targets, and the unit's credential store is the boundary that
+enforces it. `ssh` accepts the key in both.
 A run without targets sees `/run/wherry/credentials` empty.
 
 For each environment target, a shell wrapper reads

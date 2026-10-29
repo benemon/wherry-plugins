@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Provisions as the operator guide does, with wherry admin from the runner: the pool e2e, the tenant e2e, the host
-# runner and the receiver kind-1. Then writes the host's client configuration, with a generated dummy credential,
-# and registers the host key.
+# runner and the receiver kind-1. Then writes the host's client configuration, with a generated dummy credential and
+# SSH private key, and registers the host key.
 . "$(dirname "$0")/common.sh"
 umask 077
 kubectl get secret -n kafka wherry-kafka-cluster-ca-cert -o jsonpath='{.data.ca\.crt}' | base64 -d >"$work/ca.crt"
@@ -24,11 +24,13 @@ done
 mkdir -p "$work/host"
 head -c 24 /dev/urandom | base64 >"$work/host/dummy"
 mask "$(cat "$work/host/dummy")"
+ssh-keygen -q -t ed25519 -N '' -C wherry-e2e -f "$work/host/deploy-key"
 cat >"$host_config" <<YAML
 bundle: "$work/host.bundle"
 host_key: "$work/host/host.key"
 state_dir: "$work/host/state"
 credentials:
   dummy: {file: "$work/host/dummy"}
+  deploy: {file: "$work/host/deploy-key"}
 YAML
 wherry init --config-file "$host_config"

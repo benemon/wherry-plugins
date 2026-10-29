@@ -21,7 +21,6 @@
   },
   "spec": {
     "restartPolicy": "Never",
-    "shareProcessNamespace": true,
     "automountServiceAccountToken": false,
     "enableServiceLinks": false,
     "terminationGracePeriodSeconds": 15,
@@ -37,28 +36,6 @@
         "level": "s0:c26,c25"
       }
     },
-    "initContainers": [
-      {
-        "name": "inputs",
-        "image": "image-registry.openshift-image-registry.svc:5000/wherry-images/wherry-receiver:0.1.0",
-        "command": [
-          "/usr/local/libexec/wherry/wherry-k8s-helper",
-          "v1",
-          "inputs"
-        ],
-        "terminationMessagePolicy": "FallbackToLogsOnError",
-        "securityContext": {
-          "runAsUser": 1000690000,
-          "allowPrivilegeEscalation": false,
-          "capabilities": {
-            "drop": [
-              "ALL"
-            ]
-          },
-          "readOnlyRootFilesystem": true
-        }
-      }
-    ],
     "containers": [
       {
         "name": "agent",
@@ -71,25 +48,6 @@
               "ALL"
             ]
           }
-        }
-      },
-      {
-        "name": "outputs",
-        "image": "image-registry.openshift-image-registry.svc:5000/wherry-images/wherry-receiver:0.1.0",
-        "command": [
-          "/usr/local/libexec/wherry/wherry-k8s-helper",
-          "v1",
-          "hold"
-        ],
-        "securityContext": {
-          "runAsUser": 1000690000,
-          "allowPrivilegeEscalation": false,
-          "capabilities": {
-            "drop": [
-              "ALL"
-            ]
-          },
-          "readOnlyRootFilesystem": true
         }
       }
     ]
@@ -126,26 +84,6 @@
         "lastTransitionTime": "2026-10-20T10:00:00Z"
       }
     ],
-    "initContainerStatuses": [
-      {
-        "name": "inputs",
-        "state": {
-          "terminated": {
-            "exitCode": 0,
-            "reason": "Completed",
-            "startedAt": "2026-10-20T10:00:07Z",
-            "finishedAt": "2026-10-20T10:00:08Z",
-            "containerID": "cri-o://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
-          }
-        },
-        "lastState": {},
-        "ready": false,
-        "restartCount": 0,
-        "image": "image-registry.openshift-image-registry.svc:5000/wherry-images/wherry-receiver:0.1.0",
-        "imageID": "image-registry.openshift-image-registry.svc:5000/wherry-images/wherry-receiver:0.1.0@sha256:abababababababababababababababababababababababababababababababab",
-        "containerID": "cri-o://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
-      }
-    ],
     "containerStatuses": [
       {
         "name": "agent",
@@ -160,21 +98,6 @@
         "restartCount": 0,
         "image": "image-registry.openshift-image-registry.svc:5000/wherry-images/agent:1.0",
         "imageID": ""
-      },
-      {
-        "name": "outputs",
-        "state": {
-          "running": {
-            "startedAt": "2026-10-20T10:00:09Z"
-          }
-        },
-        "lastState": {},
-        "ready": true,
-        "restartCount": 0,
-        "image": "image-registry.openshift-image-registry.svc:5000/wherry-images/wherry-receiver:0.1.0",
-        "imageID": "image-registry.openshift-image-registry.svc:5000/wherry-images/wherry-receiver:0.1.0@sha256:abababababababababababababababababababababababababababababababab",
-        "started": true,
-        "containerID": "cri-o://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
       }
     ]
   }

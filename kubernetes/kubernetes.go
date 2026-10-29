@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -11,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"net"
 	"net/http"
@@ -20,36 +20,30 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
-	"github.com/benemon/wherry-plugins/kubernetes/helper"
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/hashicorp/go-hclog"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/client-go/kubernetes/scheme"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
-	utilexec "k8s.io/client-go/util/exec"
 	"k8s.io/client-go/util/flowcontrol"
 )
 
 const (
-	jobPrefix  = "agent-"
-	helperPath = "/usr/local/libexec/wherry/wherry-k8s-helper"
+	jobPrefix = "agent-"
 	// maxSecret is the API server's limit on a Secret's values together.
 	maxSecret = 1 << 20
 	// maxKey is the API server's limit on a Secret key.
 	maxKey       = 253
 	graceSeconds = 15
-	putAttempts  = 3
 	cleanupWait  = 10 * time.Second
 
 	labelPool         = "wherry.io/pool"
@@ -71,11 +65,12 @@ var (
 	// serviceAccountDir holds the token and CA the kubelet projects into the receiver's pod.
 	serviceAccountDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 	sweepGrace        = 10 * time.Minute
-	stopGrace         = graceSeconds * time.Second
 	waitPoll          = 2 * time.Second
 	followPoll        = time.Second
 	collectPoll       = 500 * time.Millisecond
 	errReplaced       = errors.New("the pod was replaced")
+	// receiverUID is the receiver's UID, which the agent shares so that each reads the run directory the other writes.
+	receiverUID = int64(os.Getuid())
 )
 
 // Config is the plugin's config with the plugin profile's merged onto it and its credential key removed.
@@ -85,7 +80,9 @@ type Config struct {
 	Namespace    string            `json:"namespace"`
 	NodeSelector map[string]string `json:"node_selector,omitzero"`
 	Tolerations  []Toleration      `json:"tolerations,omitzero"`
-	HelperImage  string            `json:"helper_image"`
+	RunsClaim    string            `json:"runs_claim"`
+	RunsDir      string            `json:"runs_dir"`
+	RunsFloor    string            `json:"runs_floor"`
 	Runtime      Runtime           `json:"runtime"`
 }
 
@@ -104,7 +101,6 @@ type Runtime struct {
 	Args                []string          `json:"args"`
 	Env                 map[string]string `json:"env"`
 	Resources           Resources         `json:"resources"`
-	WorkLimit           string            `json:"work_limit"`
 	User                string            `json:"user"`
 	Group               string            `json:"group"`
 	SupplementaryGroups []string          `json:"supplementary_groups"`
@@ -117,49 +113,36 @@ type Resources struct {
 	EphemeralStorage string `json:"ephemeral_storage"`
 }
 
-// inlineLimit is the inline input bytes the plugin declares: the run's Secret holds them beside the prompt and
-// credentials within maxSecret, so half of it leaves the rest room. secretData keeps its check for the whole.
+// inlineLimit is the inline input bytes the plugin declares.
 const inlineLimit = maxSecret / 2
 
 // InlineLimit reports inlineLimit.
 func (profile *Kubernetes) InlineLimit() int64 { return inlineLimit }
 
-// Kubernetes is one plugin profile: it runs each run as one pod and one Secret in a namespace.
+// Kubernetes is one plugin profile: it runs each run as one pod, one Secret and one directory on the runs claim.
 type Kubernetes struct {
 	name, pool, namespace string
-	helperImage           string
-	runtime               Runtime
-	nodeSelector          map[string]string
-	tolerations           []corev1.Toleration
-	resources             corev1.ResourceList
-	workLimit             *resource.Quantity
-	uid, gid              *int64
-	groups                []int64
-	core                  corev1client.CoreV1Interface
-	meta                  metadata.Interface
-	exec                  execer
-	fetcher               *http.Client
-	metrics               *PlatformMetrics
-	logger                hclog.Logger
+	runsClaim             string
+	// runsDir is the claim's mount on the receiver; runs holds a directory per run below it.
+	runsDir, runs string
+	floor         int64
+	runtime       Runtime
+	nodeSelector  map[string]string
+	tolerations   []corev1.Toleration
+	resources     corev1.ResourceList
+	uid, gid      *int64
+	groups        []int64
+	core          corev1client.CoreV1Interface
+	meta          metadata.Interface
+	fetcher       *http.Client
+	metrics       *PlatformMetrics
+	logger        hclog.Logger
 }
 
-// execer runs a command in a container of a pod; a command that exits non-zero returns an *exitError.
-type execer interface {
-	exec(ctx context.Context, pod, container string, command []string, stdin io.Reader, stdout io.Writer) error
+// fetchFailed is a fetch that failed, in words that never quote the URL. Its class ends the run before any pod exists.
+func fetchFailed(name, reason string) error {
+	return &pluginsdk.Error{Op: "fetch " + name, Class: pluginsdk.ClassFetch, Err: errors.New(reason)}
 }
-
-// exitError is a helper invocation's non-zero exit, with its message.
-type exitError struct {
-	code    int
-	message string
-}
-
-func (e *exitError) Error() string { return fmt.Sprintf("helper exited %d: %s", e.code, e.message) }
-
-// fetchError is a fetch that failed before its put, in words that never quote the URL.
-type fetchError struct{ name, reason string }
-
-func (e *fetchError) Error() string { return "fetch " + e.name + ": " + e.reason }
 
 // newClient builds the API configuration for config's address and CA with token, or the in-cluster one.
 func newClient(config Config, token string) (*rest.Config, error) {
@@ -222,8 +205,10 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 	switch {
 	case len(validation.IsDNS1123Label(config.Namespace)) > 0:
 		return nil, errors.New("namespace must be a DNS-1123 label")
-	case !image(config.HelperImage):
-		return nil, errors.New("helper_image must be an image")
+	case len(validation.IsDNS1123Subdomain(config.RunsClaim)) > 0:
+		return nil, errors.New("runs_claim must be a claim name")
+	case !filepath.IsAbs(config.RunsDir):
+		return nil, errors.New("runs_dir must be an absolute path")
 	case !image(config.Runtime.Image):
 		return nil, errors.New("runtime image must be an image")
 	}
@@ -267,7 +252,7 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 			resources[r.name] = *value
 		}
 	}
-	workLimit, err := quantity("runtime work_limit", config.Runtime.WorkLimit, "")
+	floor, err := quantity("runs_floor", config.RunsFloor, "1Gi")
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +265,9 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 		id, err := strconv.ParseInt(match[1], 10, 32)
 		if err != nil {
 			return nil, errors.New("runtime user IDs must be below 2^31")
+		}
+		if id != receiverUID {
+			return nil, errors.New("runtime user must be the receiver's UID")
 		}
 		uid = &id
 		if match[2] != "" {
@@ -323,11 +311,11 @@ func New(config Config, name, pool string, client *rest.Config, logger hclog.Log
 		return nil, err
 	}
 	return &Kubernetes{
-		name: name, pool: pool, namespace: config.Namespace, helperImage: config.HelperImage,
-		runtime: config.Runtime, nodeSelector: config.NodeSelector, tolerations: tolerations, resources: resources, workLimit: workLimit,
+		name: name, pool: pool, namespace: config.Namespace,
+		runsClaim: config.RunsClaim, runsDir: config.RunsDir, runs: filepath.Join(config.RunsDir, "runs"), floor: floor.Value(),
+		runtime: config.Runtime, nodeSelector: config.NodeSelector, tolerations: tolerations, resources: resources,
 		uid: uid, gid: gid, groups: groups,
 		core: core, meta: meta,
-		exec: remote{config: client, client: core.RESTClient(), namespace: config.Namespace},
 		fetcher: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},
@@ -344,45 +332,6 @@ type warnings struct {
 
 func (w warnings) HandleWarningHeader(_ int, _ string, text string) {
 	w.logger.Warn("kubernetes warning", "profile", w.profile, "warning", text)
-}
-
-// remote execs through the API server, over WebSocket or else SPDY.
-type remote struct {
-	config    *rest.Config
-	client    rest.Interface
-	namespace string
-}
-
-func (r remote) exec(ctx context.Context, pod, container string, command []string, stdin io.Reader, stdout io.Writer) error {
-	request := r.client.Post().Namespace(r.namespace).Resource("pods").Name(pod).SubResource("exec").VersionedParams(&corev1.PodExecOptions{
-		Container: container, Command: command, Stdin: stdin != nil, Stdout: true, Stderr: true,
-	}, scheme.ParameterCodec)
-	websocket, err := remotecommand.NewWebSocketExecutor(r.config, http.MethodGet, request.URL().String())
-	if err != nil {
-		return err
-	}
-	spdy, err := remotecommand.NewSPDYExecutor(r.config, http.MethodPost, request.URL())
-	if err != nil {
-		return err
-	}
-	executor, err := remotecommand.NewFallbackExecutor(websocket, spdy, func(err error) bool {
-		return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
-	})
-	if err != nil {
-		return err
-	}
-	var stderr bytes.Buffer
-	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdin: stdin, Stdout: stdout, Stderr: &stderr})
-	var exit utilexec.ExitError
-	if errors.As(err, &exit) {
-		return &exitError{code: exit.ExitStatus(), message: stderr.String()}
-	}
-	return err
-}
-
-// command is a helper invocation of protocol helper.Protocol.
-func command(args ...string) []string {
-	return append([]string{helperPath, helper.Protocol}, args...)
 }
 
 // jobName is the name of a run's pod and Secret.
@@ -408,16 +357,29 @@ func (profile *Kubernetes) Directories() pluginsdk.Directories {
 	return pluginsdk.Directories{Input: inputPath, Output: outputPath, Credentials: credentialsPath}
 }
 
-// Ready reports whether the namespace exists and is active.
+// Ready reports whether the namespace exists and is active and the runs claim has runs_floor free.
 func (profile *Kubernetes) Ready(ctx context.Context) (bool, error) {
 	namespace, err := profile.core.Namespaces().Get(ctx, profile.namespace, metav1.GetOptions{})
 	if err != nil {
 		return false, profile.failed("read namespace "+profile.namespace, err)
 	}
-	return namespace.Status.Phase == corev1.NamespaceActive, nil
+	free, err := profile.free()
+	if err != nil {
+		return false, err
+	}
+	return namespace.Status.Phase == corev1.NamespaceActive && free >= profile.floor, nil
 }
 
-// secretKey is the run's Secret key holding a credential; the helper copies credentials.* keys alone into files.
+// free reports the bytes the receiver can write to the runs claim.
+func (profile *Kubernetes) free() (int64, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(profile.runsDir, &stat); err != nil {
+		return 0, fmt.Errorf("read the free space of runs_dir: %w", err)
+	}
+	return int64(stat.Bavail) * int64(stat.Bsize), nil
+}
+
+// secretKey is the run's Secret key holding a credential; the pod maps credentials.* keys alone into files.
 func secretKey(secret pluginsdk.Secret) string {
 	if secret.Env != "" {
 		return "env." + secret.Env
@@ -440,13 +402,6 @@ func secretData(run pluginsdk.Run) (map[string][]byte, error) {
 	if size > maxSecret {
 		return nil, errors.New("the prompt and credentials exceed the 1 MiB Secret limit")
 	}
-	for _, input := range run.Inputs {
-		key := "inputs." + input.Name
-		if size += len(input.Data); len(key) > maxKey || size > maxSecret {
-			return nil, &pluginsdk.InputTooLargeError{Name: input.Name}
-		}
-		data[key] = input.Data
-	}
 	return data, nil
 }
 
@@ -456,17 +411,14 @@ func (profile *Kubernetes) labels(run pluginsdk.Run) map[string]string {
 	}
 }
 
-func locked() *corev1.SecurityContext {
-	return &corev1.SecurityContext{AllowPrivilegeEscalation: new(false), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}, ReadOnlyRootFilesystem: new(true)}
-}
-
-// buildPod builds the run's pod, whose init container copies its material from the Secret name.
+// buildPod builds the run's pod, which mounts its directory on the runs claim and its material from the Secret name.
 func (profile *Kubernetes) buildPod(run pluginsdk.Run, name string) *corev1.Pod {
 	env := pluginsdk.AgentEnv(profile.runtime.Env)
 	env["HOME"] = workPath
 	env["WHERRY_INPUT_DIR"] = inputPath
 	env["WHERRY_OUTPUT_DIR"] = outputPath
 	env["WHERRY_CREDENTIALS_DIR"] = credentialsPath
+	env["WHERRY_RUN_DIR"] = name
 	if run.Model != "" {
 		env["WHERRY_MODEL"] = run.Model
 	}
@@ -477,27 +429,17 @@ func (profile *Kubernetes) buildPod(run pluginsdk.Run, name string) *corev1.Pod 
 	for _, variable := range slices.Sorted(maps.Keys(env)) {
 		vars = append(vars, corev1.EnvVar{Name: variable, Value: env[variable]})
 	}
+	items := []corev1.KeyToPath{{Key: "prompt", Path: "prompt"}}
 	for _, secret := range run.Credentials {
 		if secret.Env != "" {
 			vars = append(vars, corev1.EnvVar{Name: secret.Env, ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: secretKey(secret)},
 			}})
+			continue
 		}
+		items = append(items, corev1.KeyToPath{Key: secretKey(secret), Path: "files/" + secret.File})
 	}
-	var args []string
-	for _, fetch := range run.Fetches {
-		args = append(args, fetch.Name, strconv.FormatInt(fetch.Size, 10), fetch.SHA256)
-	}
-	if args != nil {
-		args = append([]string{"--await"}, args...)
-	}
-	helperResources := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("16Mi")},
-		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m"), corev1.ResourceMemory: resource.MustParse("64Mi")},
-	}
-	agentSecurity := locked()
-	agentSecurity.ReadOnlyRootFilesystem = nil
-	memoryLimit := resource.MustParse("1Mi")
+	security := &corev1.SecurityContext{AllowPrivilegeEscalation: new(false), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: profile.namespace, Labels: profile.labels(run),
@@ -505,7 +447,6 @@ func (profile *Kubernetes) buildPod(run pluginsdk.Run, name string) *corev1.Pod 
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy:                 corev1.RestartPolicyNever,
-			ShareProcessNamespace:         new(true),
 			AutomountServiceAccountToken:  new(false),
 			EnableServiceLinks:            new(false),
 			TerminationGracePeriodSeconds: new(int64(graceSeconds)),
@@ -513,39 +454,21 @@ func (profile *Kubernetes) buildPod(run pluginsdk.Run, name string) *corev1.Pod 
 			Tolerations:                   profile.tolerations,
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot: new(true), SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-				RunAsUser: profile.uid, RunAsGroup: profile.gid, SupplementalGroups: profile.groups,
+				RunAsUser: profile.uid, RunAsGroup: profile.gid, SupplementalGroups: profile.groups, FSGroup: profile.gid,
 			},
-			InitContainers: []corev1.Container{{
-				Name: "inputs", Image: profile.helperImage, Command: command("inputs"), Args: args,
-				Resources: helperResources, SecurityContext: locked(),
-				// The helper writes a failure's message to stderr, which becomes the termination message.
-				TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "material", MountPath: "/run/wherry/material", ReadOnly: true},
-					{Name: "work", MountPath: workPath},
-					{Name: "credentials", MountPath: "/run/wherry/credentials"},
-				},
-			}},
 			Containers: []corev1.Container{{
 				Name: "agent", Image: profile.runtime.Image, Command: profile.runtime.Command, Args: profile.runtime.Args, Env: vars,
-				Resources: corev1.ResourceRequirements{Requests: profile.resources, Limits: profile.resources}, SecurityContext: agentSecurity,
+				Resources: corev1.ResourceRequirements{Requests: profile.resources, Limits: profile.resources}, SecurityContext: security,
 				VolumeMounts: []corev1.VolumeMount{
-					{Name: "work", MountPath: workPath},
-					{Name: "credentials", MountPath: "/run/wherry/credentials", ReadOnly: true},
-				},
-			}, {
-				Name: "outputs", Image: profile.helperImage, Command: command("hold"),
-				Resources: helperResources, SecurityContext: locked(),
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "work", MountPath: workPath, ReadOnly: true},
-					{Name: "hold", MountPath: "/run/wherry/hold"},
+					{Name: "runs", MountPath: workPath, SubPathExpr: "runs/$(WHERRY_RUN_DIR)"},
+					{Name: "material", MountPath: workPath + "/prompt.txt", SubPath: "prompt", ReadOnly: true},
+					{Name: "material", MountPath: credentialsPath, SubPath: "files", ReadOnly: true},
 				},
 			}},
 			Volumes: []corev1.Volume{
-				{Name: "material", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: name, DefaultMode: new(int32(0o444))}}},
-				{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: profile.workLimit}}},
-				{Name: "credentials", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &memoryLimit}}},
-				{Name: "hold", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &memoryLimit}}},
+				{Name: "runs", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: profile.runsClaim}}},
+				// A Secret volume is memory-backed, so the agent cannot hard-link a credential into its outputs.
+				{Name: "material", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: name, Items: items, DefaultMode: new(int32(0o440))}}},
 			},
 		},
 	}
@@ -562,22 +485,17 @@ func (profile *Kubernetes) Dispatch(ctx context.Context, run pluginsdk.Run) (plu
 	created := false
 	switch existing, err := profile.pods().Get(ctx, name, metav1.GetOptions{}); {
 	case apierrors.IsNotFound(err):
+		if err := profile.writeInputs(ctx, name, run); err != nil {
+			return profile.notStarted(ctx, name, err)
+		}
 		if err := profile.upsertSecret(ctx, name, profile.labels(run), data); err != nil {
 			return profile.notStarted(ctx, name, err)
 		}
-		pod, err := profile.pods().Create(ctx, profile.buildPod(run, name), metav1.CreateOptions{})
+		_, err := profile.pods().Create(ctx, profile.buildPod(run, name), metav1.CreateOptions{})
 		switch {
 		case apierrors.IsAlreadyExists(err):
 		case err != nil:
 			return profile.notStarted(ctx, name, profile.failed("create pod "+name, err))
-		case !sameUser(pod):
-			refused := errors.New("agent pod containers run as different users; set runtime.user")
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
-			defer cancel()
-			if err := errors.Join(profile.deletePod(cleanupCtx, name), profile.deleteSecret(cleanupCtx, name)); err != nil {
-				return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, errors.Join(refused, err)
-			}
-			return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, refused
 		default:
 			created = true
 		}
@@ -585,9 +503,6 @@ func (profile *Kubernetes) Dispatch(ctx context.Context, run pluginsdk.Run) (plu
 		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, profile.failed("read pod "+name, err)
 	case !profile.agentPod(existing):
 		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, errors.New("existing pod is not an agent pod")
-	}
-	if err := profile.deliver(ctx, name, run.Fetches); err != nil {
-		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, err
 	}
 	handle, state, err := profile.wait(ctx, name)
 	if err != nil {
@@ -633,124 +548,154 @@ func (profile *Kubernetes) notStarted(ctx context.Context, name string, cause er
 	return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, cause
 }
 
-// sameUser reports whether every container of the admitted pod runs as one UID.
-func sameUser(pod *corev1.Pod) bool {
-	var uid *int64
-	for _, container := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
-		var user *int64
-		if pod.Spec.SecurityContext != nil {
-			user = pod.Spec.SecurityContext.RunAsUser
-		}
-		if container.SecurityContext != nil && container.SecurityContext.RunAsUser != nil {
-			user = container.SecurityContext.RunAsUser
-		}
-		if user == nil || uid != nil && *uid != *user {
-			return false
-		}
-		uid = user
-	}
-	return true
-}
-
-// deliver streams the run's fetches into the waiting init container; an error means the pod's fate is unknown.
-func (profile *Kubernetes) deliver(ctx context.Context, name string, fetches []pluginsdk.Fetch) error {
-	if len(fetches) == 0 {
+// writeInputs writes the run's inputs into its directory on the runs claim, keeping a directory an earlier dispatch
+// completed; the pod is created after, so its agent never sees a partial input.
+func (profile *Kubernetes) writeInputs(ctx context.Context, name string, run pluginsdk.Run) error {
+	dir := filepath.Join(profile.runs, name)
+	if written(dir, run) {
 		return nil
 	}
-	for {
-		pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			profile.handled("read pod "+name, err)
-		} else if inputs := status(pod.Status.InitContainerStatuses, "inputs"); initEnded(pod) {
-			return nil
-		} else if inputs != nil && inputs.State.Running != nil {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(waitPoll):
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove the run directory: %w", err)
+	}
+	if err := os.MkdirAll(profile.runs, 0o700); err != nil {
+		return fmt.Errorf("create the runs directory: %w", err)
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return fmt.Errorf("create the run directory: %w", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := root.Mkdir("inputs", 0o700); err != nil {
+		return fmt.Errorf("create the inputs directory: %w", err)
+	}
+	for _, input := range run.Inputs {
+		if err := root.WriteFile("inputs/"+input.Name, input.Data, 0o600); err != nil {
+			return fmt.Errorf("write input %s: %w", input.Name, err)
 		}
 	}
-	for _, fetch := range fetches {
-		ended, err := profile.retried(ctx, name, "exec inputs put", func() error { return profile.put(ctx, name, fetch) })
-		switch {
-		case ended || ctx.Err() != nil:
-			return nil
-		case err != nil:
-			var exit *exitError
-			var fetchErr *fetchError
-			if errors.As(err, &exit) || errors.As(err, &fetchErr) {
-				profile.logger.Warn("input not fetched", "profile", profile.name, "pod", name, "reason", err.Error())
-			}
-			if err := profile.exec.exec(ctx, name, "inputs", command("inputs", "fail", fetch.Name), nil, io.Discard); err != nil {
-				return profile.failed("exec inputs fail", err)
-			}
-			return nil
+	for _, fetch := range run.Fetches {
+		if err := profile.fetch(ctx, root, fetch); err != nil {
+			return err
 		}
-	}
-	ended, err := profile.retried(ctx, name, "exec inputs done", func() error {
-		return profile.exec.exec(ctx, name, "inputs", command("inputs", "done"), nil, io.Discard)
-	})
-	if err != nil && !ended && ctx.Err() == nil {
-		return profile.failed("exec inputs done", err)
 	}
 	return nil
 }
 
-// retried calls call up to putAttempts times while it fails in transport or finds the init container not yet waiting,
-// and reports whether the init container ended in between.
-func (profile *Kubernetes) retried(ctx context.Context, name, op string, call func() error) (bool, error) {
-	for attempt := 1; ; attempt++ {
-		err := call()
-		var exit *exitError
-		var fetchErr *fetchError
-		if err == nil || errors.As(err, &exit) && exit.code != helper.ExitNotWaiting || errors.As(err, &fetchErr) || ctx.Err() != nil {
-			return false, err
-		}
-		profile.handled(op, err)
-		if attempt == putAttempts {
-			return false, err
-		}
-		if pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{}); err != nil {
-			profile.handled("read pod "+name, err)
-		} else if initEnded(pod) {
-			return true, nil
+// written reports whether dir holds the inputs directory alone, with each of the run's inputs verified and no other.
+func written(dir string, run pluginsdk.Run) bool {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+	want := map[string]pluginsdk.Fetch{}
+	for _, input := range run.Inputs {
+		want[input.Name] = pluginsdk.Fetch{Size: int64(len(input.Data)), SHA256: digest(input.Data)}
+	}
+	for _, fetch := range run.Fetches {
+		want[fetch.Name] = fetch
+	}
+	if names, err := names(root, "."); err != nil || !slices.Equal(names, []string{"inputs"}) {
+		return false
+	}
+	if names, err := names(root, "inputs"); err != nil || !slices.Equal(names, slices.Sorted(maps.Keys(want))) {
+		return false
+	}
+	for name, input := range want {
+		if !verified(root, "inputs/"+name, input) {
+			return false
 		}
 	}
+	return true
 }
 
-// initEnded reports whether the init container has exited or the pod is settled before it.
-func initEnded(pod *corev1.Pod) bool {
-	inputs := status(pod.Status.InitContainerStatuses, "inputs")
-	_, _, settled := judge(pod)
-	return settled || inputs != nil && inputs.State.Terminated != nil
+func names(root *os.Root, dir string) ([]string, error) {
+	file, err := root.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	names, err := file.Readdirnames(-1)
+	slices.Sort(names)
+	return names, err
 }
 
-// put fetches one input, refusing a redirect and reading at most one byte past its size, into the helper's put.
-func (profile *Kubernetes) put(ctx context.Context, name string, fetch pluginsdk.Fetch) error {
+func digest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// verified reports whether name is a regular file of the fetch's size and digest.
+func verified(root *os.Root, name string, fetch pluginsdk.Fetch) bool {
+	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != fetch.Size {
+		return false
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return false
+	}
+	return hex.EncodeToString(hash.Sum(nil)) == fetch.SHA256
+}
+
+// fetch writes one S3 input into the inputs directory, refusing a redirect and reading at most one byte past its size.
+func (profile *Kubernetes) fetch(ctx context.Context, root *os.Root, fetch pluginsdk.Fetch) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fetch.URL, nil)
 	if err != nil {
-		return &fetchError{fetch.Name, "invalid URL"}
+		return fetchFailed(fetch.Name, "invalid URL")
 	}
 	response, err := profile.fetcher.Do(request)
 	if err != nil {
-		var network net.Error
-		var certificate *tls.CertificateVerificationError
-		reason := "unreachable"
-		switch {
-		case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &network) && network.Timeout():
-			reason = "timeout"
-		case errors.As(err, &certificate):
-			reason = "certificate"
-		}
-		return &fetchError{fetch.Name, reason}
+		return fetchFailed(fetch.Name, unreached(err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return &fetchError{fetch.Name, strconv.Itoa(response.StatusCode)}
+		return fetchFailed(fetch.Name, strconv.Itoa(response.StatusCode))
 	}
-	return profile.exec.exec(ctx, name, "inputs", command("inputs", "put", fetch.Name), io.LimitReader(response.Body, fetch.Size+1), io.Discard)
+	name := "inputs/" + fetch.Name
+	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("write input %s: %w", fetch.Name, err)
+	}
+	defer file.Close()
+	hash := sha256.New()
+	n, err := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, fetch.Size+1))
+	var write *fs.PathError
+	switch {
+	case errors.As(err, &write):
+		return fmt.Errorf("write input %s: %w", fetch.Name, err)
+	case err != nil:
+		return fetchFailed(fetch.Name, unreached(err))
+	case n < fetch.Size:
+		return fetchFailed(fetch.Name, "shorter than its size")
+	case n > fetch.Size:
+		return fetchFailed(fetch.Name, "longer than its size")
+	case hex.EncodeToString(hash.Sum(nil)) != fetch.SHA256:
+		return fetchFailed(fetch.Name, "does not match its digest")
+	}
+	return file.Close()
+}
+
+// unreached is the reason a request failed in transport.
+func unreached(err error) string {
+	var network net.Error
+	var certificate *tls.CertificateVerificationError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &network) && network.Timeout():
+		return "timeout"
+	case errors.As(err, &certificate):
+		return "certificate"
+	}
+	return "unreachable"
 }
 
 // handle is the version 1 encoding of pluginsdk.Handle.Data.
@@ -879,18 +824,10 @@ func neverStarted(pod *corev1.Pod, agent *corev1.ContainerStateTerminated) (stri
 	if agent != nil {
 		return "start", cmp.Or(agent.Message, agent.Reason)
 	}
-	// An eviction or a lost node also ends the init container, which is not at fault.
 	if pod.Status.Phase == corev1.PodFailed && pod.Status.Reason != "" {
 		return "pod", strings.Join(slices.DeleteFunc([]string{pod.Status.Reason, pod.Status.Message}, func(s string) bool { return s == "" }), ": ")
 	}
-	if inputs := status(pod.Status.InitContainerStatuses, "inputs"); inputs != nil && inputs.State.Terminated != nil && inputs.State.Terminated.ExitCode != 0 {
-		ended := inputs.State.Terminated
-		if ended.ExitCode == helper.ExitFetch {
-			return pluginsdk.ClassFetch, ended.Message
-		}
-		return "setup", cmp.Or(ended.Message, ended.Reason)
-	}
-	for _, container := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
+	for _, container := range pod.Status.ContainerStatuses {
 		if waiting := container.State.Waiting; waiting != nil {
 			switch waiting.Reason {
 			case "ImagePullBackOff", "ErrImageNeverPull", "InvalidImageName":
@@ -930,12 +867,7 @@ func (profile *Kubernetes) Lookup(ctx context.Context, runID string) (pluginsdk.
 
 // agentPod reports whether pod is this pool's agent pod.
 func (profile *Kubernetes) agentPod(pod *corev1.Pod) bool {
-	return pod.Labels[labelPool] == profile.pool && hasContainer(pod.Spec.InitContainers, "inputs") &&
-		hasContainer(pod.Spec.Containers, "agent") && hasContainer(pod.Spec.Containers, "outputs")
-}
-
-func hasContainer(containers []corev1.Container, name string) bool {
-	return slices.ContainsFunc(containers, func(container corev1.Container) bool { return container.Name == name })
+	return pod.Labels[labelPool] == profile.pool && slices.ContainsFunc(pod.Spec.Containers, func(container corev1.Container) bool { return container.Name == "agent" })
 }
 
 // Follow streams the agent's stdout lines from a byte offset until it ends, then returns its terminal.
@@ -1066,7 +998,8 @@ func running(pod *corev1.Pod) bool {
 	return (!settled || state == pluginsdk.JobRunning) && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed
 }
 
-// Stop signals the agent through the holder, SIGTERM then SIGKILL, and deletes the pod only if the agent outlives both.
+// Stop deletes the pod with the grace, so its kubelet sends the agent SIGTERM and then SIGKILL, and waits for it to go.
+// The outputs stay on the runs claim.
 func (profile *Kubernetes) Stop(ctx context.Context, encoded pluginsdk.Handle) error {
 	h, err := decodeHandle(encoded)
 	if err != nil {
@@ -1081,58 +1014,43 @@ func (profile *Kubernetes) Stop(ctx context.Context, encoded pluginsdk.Handle) e
 	case !running(pod):
 		return nil
 	}
-	for _, signal := range []string{"TERM", "KILL"} {
-		if err := profile.exec.exec(ctx, h.Pod, "outputs", command("stop", signal), nil, io.Discard); err != nil {
-			profile.handled("exec outputs stop "+signal, err)
-			// A transport failure does not show the signal undelivered; only the helper's refusal does.
-			var exit *exitError
-			if errors.As(err, &exit) {
-				break
-			}
-		}
-		if stopped, err := profile.stopped(ctx, h); err != nil || stopped {
-			return err
-		}
+	if err := profile.pods().Delete(ctx, h.Pod, metav1.DeleteOptions{GracePeriodSeconds: new(int64(graceSeconds))}); err != nil && !apierrors.IsNotFound(err) {
+		return profile.failed("delete pod "+h.Pod, err)
 	}
-	if err := profile.deletePod(ctx, h.Pod); err != nil {
-		return err
-	}
-	profile.logger.Warn("agent outlived SIGKILL; pod deleted", "profile", profile.name, "pod", h.Pod)
-	return nil
+	return profile.gone(ctx, h.Pod)
 }
 
-// stopped polls the pod for up to the stop grace and reports whether the agent has ended.
-func (profile *Kubernetes) stopped(ctx context.Context, h handle) (bool, error) {
-	poll := time.NewTicker(time.Second)
-	defer poll.Stop()
-	for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); {
+// gone waits for the pod to go, since a terminating pod's agent may still run, and its pod still holds its name.
+func (profile *Kubernetes) gone(ctx context.Context, name string) error {
+	for {
+		_, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return profile.failed("read pod "+name, err)
+		}
 		select {
 		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-poll.C:
-		}
-		pod, err := profile.pods().Get(ctx, h.Pod, metav1.GetOptions{})
-		switch {
-		case apierrors.IsNotFound(err):
-			return true, nil
-		case err != nil:
-			profile.handled("read pod "+h.Pod, err)
-		case !running(pod):
-			return true, nil
+			return ctx.Err()
+		case <-time.After(collectPoll):
 		}
 	}
-	return false, nil
 }
 
-// Collect lists the outputs tree through the holder once the agent has ended, and reads what Select chooses.
+// Collect lists the outputs tree on the runs claim once the agent has ended or its pod has gone, and reads what Select
+// chooses.
 func (profile *Kubernetes) Collect(ctx context.Context, encoded pluginsdk.Handle, limits pluginsdk.Limits, outputs chan<- pluginsdk.Output) error {
 	h, err := decodeHandle(encoded)
 	if err != nil {
 		return err
 	}
-	var pod *corev1.Pod
 	for {
-		if pod, err = profile.current(ctx, h); err != nil {
+		pod, err := profile.current(ctx, h)
+		if apierrors.IsNotFound(err) {
+			break
+		}
+		if err != nil {
 			if ctx.Err() != nil {
 				return errors.New("the agent is still running")
 			}
@@ -1150,20 +1068,17 @@ func (profile *Kubernetes) Collect(ctx context.Context, encoded pluginsdk.Handle
 		case <-time.After(collectPoll):
 		}
 	}
-	if holder := status(pod.Status.ContainerStatuses, "outputs"); holder == nil || holder.State.Running == nil {
-		return errors.New("the outputs container has ended")
+	root, err := profile.outputs(h.Pod)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
-	var listing bytes.Buffer
-	if err := profile.exec.exec(ctx, h.Pod, "outputs", command("list", strconv.Itoa(limits.Files)), nil, &listing); err != nil {
-		return profile.failed("exec outputs list", err)
+	if err != nil {
+		return errors.New("the outputs directory is not readable")
 	}
-	var entries []pluginsdk.Output
-	for line := range bytes.Lines(listing.Bytes()) {
-		var entry helper.Entry
-		if err := json.Unmarshal(line, &entry); err != nil {
-			return errors.New("the outputs listing is not readable")
-		}
-		entries = append(entries, pluginsdk.Output{Name: entry.Name, Size: entry.Size, Mode: entry.Mode})
+	defer root.Close()
+	entries, err := list(root, limits.Files)
+	if err != nil {
+		return err
 	}
 	selected, err := Select(entries, limits)
 	if err != nil {
@@ -1173,9 +1088,16 @@ func (profile *Kubernetes) Collect(ctx context.Context, encoded pluginsdk.Handle
 		output := chosen.Output
 		switch {
 		case chosen.Stream:
-			output.Body = profile.open(ctx, h.Pod, output.Name, output.Size)
+			file, err := open(root, output.Name, output.Size)
+			if err != nil {
+				return err
+			}
+			output.Body = struct {
+				io.Reader
+				io.Closer
+			}{io.LimitReader(file, output.Size), file}
 		case chosen.Read:
-			if output.Data, err = profile.read(ctx, h.Pod, output.Name, output.Size); err != nil {
+			if output.Data, err = read(root, output.Name, output.Size); err != nil {
 				return err
 			}
 		}
@@ -1191,36 +1113,76 @@ func (profile *Kubernetes) Collect(ctx context.Context, encoded pluginsdk.Handle
 	return nil
 }
 
-// body is a streamed output; closing it cancels its exec.
-type body struct {
-	*io.PipeReader
-	cancel context.CancelFunc
+// outputs opens the run's outputs tree as a root, which refuses every path that leaves it, links included; an agent
+// writes the tree, and the runs claim holds every other run's directory.
+func (profile *Kubernetes) outputs(pod string) (*os.Root, error) {
+	run, err := os.OpenRoot(filepath.Join(profile.runs, pod))
+	if err != nil {
+		return nil, err
+	}
+	defer run.Close()
+	// A root follows a link in its own path.
+	info, err := run.Lstat("outputs")
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, errors.New("the outputs path is not a directory")
+	}
+	return run.OpenRoot("outputs")
 }
 
-func (b body) Close() error {
-	b.cancel()
-	return b.PipeReader.Close()
-}
-
-// open streams a listed regular file of size bytes through the holder.
-func (profile *Kubernetes) open(ctx context.Context, pod, name string, size int64) io.ReadCloser {
-	ctx, cancel := context.WithCancel(ctx)
-	reader, writer := io.Pipe()
-	go func() {
-		err := profile.exec.exec(ctx, pod, "outputs", command("read", name, strconv.FormatInt(size, 10)), nil, writer)
-		if err != nil && ctx.Err() == nil {
-			err = profile.failed("exec outputs read", err)
+// list lists the outputs tree, lstat'd and never through a link, stopping after limit+1 entries.
+func list(root *os.Root, limit int) ([]pluginsdk.Output, error) {
+	var entries []pluginsdk.Output
+	for pending := []string{"."}; len(pending) > 0; {
+		dir := pending[0]
+		pending = pending[1:]
+		names, err := names(root, dir)
+		if err != nil {
+			return nil, errors.New("an outputs directory is not readable")
 		}
-		writer.CloseWithError(err)
-	}()
-	return body{PipeReader: reader, cancel: cancel}
+		for _, base := range names {
+			name := filepath.Join(dir, base)
+			info, err := root.Lstat(name)
+			if err != nil {
+				return nil, errors.New("an output is not readable")
+			}
+			if entries = append(entries, pluginsdk.Output{Name: filepath.ToSlash(name), Size: info.Size(), Mode: info.Mode().Type()}); len(entries) > limit {
+				return entries, nil
+			}
+			if info.IsDir() {
+				pending = append(pending, name)
+			}
+		}
+	}
+	return entries, nil
+}
+
+// open opens a listed regular file of size bytes.
+func open(root *os.Root, name string, size int64) (*os.File, error) {
+	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, fmt.Errorf("output %s is not readable", name)
+	}
+	info, err := file.Stat()
+	// The root follows a link in the name's last element whatever the flags, so the name must lstat as the file opened.
+	named, namedErr := root.Lstat(name)
+	if err != nil || namedErr != nil || !info.Mode().IsRegular() || !os.SameFile(info, named) || info.Size() != size {
+		file.Close()
+		return nil, fmt.Errorf("output %s is not a regular file of its listed size", name)
+	}
+	return file, nil
 }
 
 // read reads a listed regular file and refuses a body of another length than its listing.
-func (profile *Kubernetes) read(ctx context.Context, pod, name string, size int64) ([]byte, error) {
-	body := profile.open(ctx, pod, name, size)
-	defer body.Close()
-	data, err := io.ReadAll(io.LimitReader(body, size+1))
+func read(root *os.Root, name string, size int64) ([]byte, error) {
+	file, err := open(root, name, size)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, size+1))
 	if err != nil {
 		return nil, err
 	}
@@ -1230,57 +1192,34 @@ func (profile *Kubernetes) read(ctx context.Context, pod, name string, size int6
 	return data, nil
 }
 
-// Release deletes the run's Secret and ends the outputs holder, so the pod frees its node's requests.
+// Release deletes the run's Secret.
 func (profile *Kubernetes) Release(ctx context.Context, runID string) error {
-	name := profile.jobName(runID)
-	secretErr := profile.deleteSecret(ctx, name)
-	var podErr error
-	switch pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{}); {
-	case apierrors.IsNotFound(err):
-	case err != nil:
-		podErr = profile.failed("read pod "+name, err)
-	default:
-		if holder := status(pod.Status.ContainerStatuses, "outputs"); holder != nil && holder.State.Running != nil && pod.DeletionTimestamp == nil {
-			if err := profile.exec.exec(ctx, name, "outputs", command("release"), nil, io.Discard); err != nil {
-				profile.handled("exec outputs release", err)
-			}
-		}
-	}
-	// A single error is returned as it is, so it reaches the receiver with its op and class.
-	switch {
-	case secretErr == nil:
-		return podErr
-	case podErr == nil:
-		return secretErr
-	}
-	return errors.Join(secretErr, podErr)
+	return profile.deleteSecret(ctx, profile.jobName(runID))
 }
 
-// Purge deletes the run's pod at once, waits for it to go, then deletes its Secret.
+// Purge deletes the run's pod at once, waits for it to go, then deletes its Secret and its directory.
 func (profile *Kubernetes) Purge(ctx context.Context, runID string) error {
 	return profile.purge(ctx, profile.jobName(runID))
 }
 
-// purge waits for the pod to go, since a terminating pod still holds its name.
 func (profile *Kubernetes) purge(ctx context.Context, name string) error {
 	if err := profile.deletePod(ctx, name); err != nil {
 		return err
 	}
-	for {
-		_, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			break
-		}
-		if err != nil {
-			return profile.failed("read pod "+name, err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(collectPoll):
-		}
+	if err := profile.gone(ctx, name); err != nil {
+		return err
 	}
-	return profile.deleteSecret(ctx, name)
+	if err := profile.deleteSecret(ctx, name); err != nil {
+		return err
+	}
+	return profile.removeRun(name)
+}
+
+func (profile *Kubernetes) removeRun(name string) error {
+	if err := os.RemoveAll(filepath.Join(profile.runs, name)); err != nil {
+		return fmt.Errorf("remove the run directory: %w", err)
+	}
+	return nil
 }
 
 // deletePod deletes a pod with grace 0, which removes it without waiting for its kubelet.
@@ -1324,7 +1263,8 @@ func endOf(pod *corev1.Pod) (bool, time.Time) {
 	return true, at
 }
 
-// Sweep purges this profile's pods ended for the grace period and deletes the Secrets no live run needs.
+// Sweep purges this profile's pods ended for the grace period, deletes the Secrets no live run needs, and removes the run
+// directories of the pool's runs with neither.
 func (profile *Kubernetes) Sweep(ctx context.Context) error {
 	selector := metav1.ListOptions{LabelSelector: labelPool + "=" + profile.pool}
 	pods, err := profile.pods().List(ctx, selector)
@@ -1332,7 +1272,7 @@ func (profile *Kubernetes) Sweep(ctx context.Context) error {
 		return profile.failed("list pods", err)
 	}
 	var errs []error
-	pending, purged, deleted := 0, 0, 0
+	pending, purged, deleted, removed := 0, 0, 0, 0
 	// present names the pool's pods; releasable those whose Secret may go.
 	present, releasable := map[string]bool{}, map[string]bool{}
 	for i := range pods.Items {
@@ -1375,20 +1315,39 @@ func (profile *Kubernetes) Sweep(ctx context.Context) error {
 			case present[secret.Name] && !releasable[secret.Name]:
 				continue
 			case !present[secret.Name] && time.Since(secret.CreationTimestamp.Time) < sweepGrace:
+				present[secret.Name] = true
 				continue
 			}
 			if err := profile.deleteSecret(ctx, secret.Name); err != nil {
 				errs = append(errs, err)
+				present[secret.Name] = true
 				continue
 			}
 			if secret.Labels[labelProfile] == profile.name {
 				deleted++
 			}
 		}
+		// present now names the pool's runs with a pod or a Secret left.
+		runs, err := os.ReadDir(profile.runs)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("list the runs directory: %w", err))
+		}
+		for _, run := range runs {
+			info, err := run.Info()
+			if err != nil || !strings.HasPrefix(run.Name(), jobName(profile.pool, "")) || present[run.Name()] || time.Since(info.ModTime()) < sweepGrace {
+				continue
+			}
+			if err := profile.removeRun(run.Name()); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			removed++
+		}
 	}
 	profile.metrics.Pending(pending)
 	profile.metrics.Deleted("job", purged)
 	profile.metrics.Deleted("variable", deleted)
+	profile.metrics.Deleted("directory", removed)
 	return errors.Join(errs...)
 }
 
@@ -1432,7 +1391,12 @@ func (profile *Kubernetes) handled(op string, err error) {
 	}
 }
 
-// Metrics reports the profile's API errors, sweep deletions, cleanup-pending pods and placement latency.
+// Metrics reports the profile's API errors, sweep deletions, cleanup-pending pods, placement latency and the runs
+// claim's free bytes.
 func (profile *Kubernetes) Metrics(context.Context) ([]pluginsdk.Sample, error) {
-	return profile.metrics.Samples(), nil
+	samples := profile.metrics.Samples()
+	if free, err := profile.free(); err == nil {
+		samples = append(samples, pluginsdk.Sample{Family: "wherry_plugin_storage_free_bytes", Kind: pluginsdk.KindGauge, Value: float64(free)})
+	}
+	return samples, nil
 }

@@ -1,0 +1,12 @@
+# The runs claim's volume: a hostPath directory on the single kind node, marked ReadWriteMany, bound to the claim
+# wherry-runs that examples/kubernetes/receiver.yaml makes in the namespace wherry.
+apiVersion: v1
+kind: PersistentVolume
+metadata: {name: wherry-runs}
+spec:
+  accessModes: [ReadWriteMany]
+  capacity: {storage: 10Gi}
+  storageClassName: standard
+  persistentVolumeReclaimPolicy: Retain
+  claimRef: {namespace: wherry, name: wherry-runs}
+  hostPath: {path: /var/lib/wherry-runs, type: Directory}

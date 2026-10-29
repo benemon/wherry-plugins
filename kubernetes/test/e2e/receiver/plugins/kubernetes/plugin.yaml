@@ -1,6 +1,8 @@
 config:
   namespace: wherry
-  helper_image: wherry-receiver:e2e
+  runs_claim: wherry-runs
+  runs_dir: /var/lib/wherry/runs
   runtime:
     user: "1001"
+    group: "1001"
     resources: {cpu: 100m, memory: 64Mi}

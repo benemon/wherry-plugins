@@ -12,11 +12,18 @@ plugins:
       # A name in the credentials of the receiver's local configuration; its
       # value is the API token.
       credential: kubernetes-token
-      # Holds the agent pods and their Secrets; the token holds admin here alone.
+      # Holds the agent pods, their Secrets and the runs claim; the token holds
+      # the plugin's Role here alone.
       namespace: agents
-      # The receiver image at the receiver's tag.
-      helper_image: registry.example.com/wherry-receiver:1.0.0
+      # The ReadWriteMany claim agent pods mount, which the receiver mounts at
+      # runs_dir.
+      runs_claim: wherry-runs
+      runs_dir: /var/lib/wherry/runs
+      # Not ready below 8Gi free on the claim.
+      runs_floor: 8Gi
       runtime:
+        # The agent runs as the receiver's UID; quoted, since it is a string.
+        user: "1001"
         # A profile's env merges into this map by variable name.
         env:
           AGENT_LOG_LEVEL: info
@@ -36,10 +43,7 @@ plugins:
               effect: NoSchedule
           runtime:
             image: registry.example.com/agent:1.0
-            # Every container of the pod runs as this UID; quoted, since it is a
-            # string.
-            user: "1001"
-            # The pod's runAsGroup and supplementalGroups.
+            # The pod's runAsGroup, fsGroup and supplementalGroups.
             group: "1001"
             supplementary_groups: ["2001"]
             command: [/bin/sh, -c]
@@ -52,8 +56,6 @@ plugins:
               cpu: "2"
               memory: 4Gi
               ephemeral_storage: 8Gi
-            # Below ephemeral_storage, so the volume limit applies first.
-            work_limit: 6Gi
       # An agent on any node that tolerates the taint, with the image's
       # entrypoint.
       - name: shared
@@ -67,7 +69,7 @@ plugins:
               effect: NoSchedule
           runtime:
             image: registry.example.com/reviewer:1.0
-            user: "1002"
+            group: "1001"
             args: [--prompt-file, /wherry/prompt.txt]
             env:
               AGENT_LOG_LEVEL: warn

@@ -19,7 +19,8 @@ including the [unit file](systemd/wherry-receiver.service).
 ## Kubernetes
 
 This example builds a receiver image and applies a Deployment, service
-account, state claim, metrics Service, and a ConfigMap holding the
+account, Role, state claim, ReadWriteMany runs claim, metrics Service, and a
+ConfigMap holding the
 receiver's [local configuration](kubernetes/config.yaml). See the
 [Kubernetes plugin's full image and deploy instructions](../kubernetes/README.md#run-the-receiver-in-the-cluster),
 along with the [Containerfile](kubernetes/Containerfile),
