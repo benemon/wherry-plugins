@@ -33,13 +33,14 @@ every plugin, `make check` runs the CI gates, and
 `<directory>/.goreleaser.yaml`. `make image` builds the Kubernetes receiver
 image example in [`examples/`](examples/).
 
-A `<plugin>/v*` tag releases that plugin: `.github/workflows/release.yml`
-checks that the tagged commit's `ci` run on `main` passed, runs goreleaser
-as a snapshot versioned from the tag less its prefix, which writes the
-archives, `checksums.txt`, an SBOM per archive
-(`<archive>.sbom.json`) and the cosign signature over the checksums, then
-attests the archives' provenance and publishes them against the tag. The
-same build, unsigned, writes them into `dist` locally:
+A `<plugin>/v*` tag releases that plugin through
+`.github/workflows/release.yml`. The workflow checks that the tagged
+commit's `ci` run on `main` passed and runs goreleaser as a snapshot
+versioned from the tag less its prefix. The snapshot writes the archives,
+`checksums.txt`, an SBOM per archive (`<archive>.sbom.json`) and the
+cosign signature over the checksums. The workflow then attests the
+archives' provenance and publishes them against the tag. The same build,
+unsigned, writes them into `dist` locally:
 
 ```sh
 VERSION=<version> goreleaser release --snapshot --clean --skip=sign --config <directory>/.goreleaser.yaml

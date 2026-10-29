@@ -646,17 +646,20 @@ runs `wherry receiver run` under the
 from binaries installed on the client under a directory per version: the
 binary `/usr/local/libexec/wherry/<version>/wherry` and the plugin
 directory `/usr/local/libexec/wherry/<version>/plugins`. The job's variable
-`version` names the directory. `/usr` is in the `exec` driver's default
-chroot, so the client needs no `chroot_env`. Nomad builds the chroot when
-the task starts and keeps each file's owner and mode, so the receiver's
-ownership and mode checks on the plugin directory see the client's.
+`version` names the directory. `/usr` is in the `exec` driver's
+[default chroot](https://developer.hashicorp.com/nomad/docs/deploy/task-driver/exec#chroot),
+so the client needs no `chroot_env`. The receiver's ownership and mode
+checks on the plugin directory see the owner and mode installed on the
+client.
 
 The job's bundle, state directory, `kill_timeout`, network and workload
 identity are those of
 [the docker shape](#the-receiver-container-under-the-docker-driver). The
 task runs as a dedicated `wherry` user, since the bundle holds the
-receiver's credentials, and the job's `uid` and `gid` variables give the
-rendered bundle's owner: Nomad sets a template's owner by numeric ID only.
+receiver's credentials. The job's `uid` and `gid` variables set the
+rendered bundle's owner through the template's
+[`uid`](https://developer.hashicorp.com/nomad/docs/job-specification/template#uid)
+and `gid`.
 
 Prerequisites: a `wherry` system user and group on every client that can
 run the job, the wherry binary and `wherry-plugin-nomad`, verified as
@@ -730,8 +733,9 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
 4. `04-deploy.sh` builds the receiver image from the checkout and from the
    latest `nomad/v*` tag before `HEAD`, and the fake agent's image. It puts
    the receiver's bundle in its Nomad variable, validates the example job
-   and the host paths example job, and runs the example job with the
-   checkout's image.
+   and the host paths example job, runs the example job with the
+   checkout's image, and checks that its receiver logs the plugin's
+   version.
 5. `05-run.sh` submits a run as the host and checks its state, reply and
    output.
 6. `06-upgrade.sh` rolls the job to the previous release's image, submits a
