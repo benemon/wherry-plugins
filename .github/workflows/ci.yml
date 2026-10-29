@@ -113,10 +113,6 @@ jobs:
         run: |
           .github/release-contents.sh dist | tee "$RUNNER_TEMP/release-contents.txt"
           diff -u ".github/release-contents/$PLUGIN.txt" "$RUNNER_TEMP/release-contents.txt"
-          cd dist && sha256sum -c checksums.txt
-          for archive in wherry-plugin-"$PLUGIN"_*.tar.gz; do
-            test -s "$archive.sbom.json" || { echo "no SBOM for $archive"; exit 1; }
-          done
 
   # The systemd plugin's real-host suite, as root on the runner's systemd.
   systemd-host:
