@@ -503,7 +503,7 @@ A failed call the plugin returns reaches the receiver with its operation,
 class and text, and the receiver logs it redacted. A log stream the API
 cannot decode fails as `log stream not decodable`, since the API's own error
 quotes the agent's output. A failed call the plugin handles itself, such as
-a poll of the allocation, logs one warning, `nomad call
+a read of the allocation it waits on, logs one warning, `nomad call
 failed`, naming the plugin profile as `profile`, the operation and the class; the line holds no
 URL, token or response body.
 
