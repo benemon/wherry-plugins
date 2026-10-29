@@ -599,10 +599,21 @@ the owner needs a Nomad client running as root. Its local configuration
 keeps `state_dir` on the allocation's data directory, which the job's
 [`ephemeral_disk`](https://developer.hashicorp.com/nomad/docs/job-specification/ephemeral_disk),
 sticky with `migrate`, carries to the next allocation. The task's
-`kill_timeout` is 30 seconds. The task shares the client's network, so the
-plugin reaches the client's API on `127.0.0.1:4646` unless the receiver
-configuration sets `address` or the task's environment sets `NOMAD_ADDR`.
-`identity { env = true }` gives it `NOMAD_TOKEN`.
+`kill_timeout` is 30 seconds.
+
+The receiver reaches Nomad through the
+[task API](https://developer.hashicorp.com/nomad/api-docs/task-api) and
+Kafka through the network. The task's environment sets `NOMAD_ADDR` to
+`unix:///secrets/api.sock`, the task API socket in the task's secrets
+directory, which the plugin dials when the receiver configuration leaves
+`address` unset. `identity { env = true }` gives it `NOMAD_TOKEN`, the
+workload identity's token, which the task API takes. The group's
+[`network`](https://developer.hashicorp.com/nomad/docs/job-specification/network)
+block runs the task in a bridge network, which needs the
+[CNI reference plugins](https://developer.hashicorp.com/nomad/docs/networking/cni)
+on the client, and maps the receiver's metrics on 9464 to the dynamic port
+`metrics`. The task reaches the Kafka brokers through the bridge, so the
+brokers must advertise an address other than loopback.
 
 Prerequisites: the image pushed where the clients pull from, the
 receiver's bundle `receiver.bundle`, and, with ACLs enabled, the
@@ -654,9 +665,12 @@ directory `/usr/local/libexec/wherry/<version>/plugins`. The job's variable
 [default chroot](https://developer.hashicorp.com/nomad/docs/deploy/task-driver/exec#chroot),
 so the client needs no `chroot_env`.
 
-The job's bundle, state directory, `kill_timeout`, network and workload
-identity are those of
+The job's bundle, state directory, `kill_timeout` and workload identity
+are those of
 [the docker shape](#the-receiver-container-under-the-docker-driver). The
+task shares the client's network, so the plugin reaches the client's API
+on `127.0.0.1:4646` unless the receiver configuration sets `address` or the
+task's environment sets `NOMAD_ADDR`. The
 task runs as a dedicated `wherry` user, since the bundle holds the
 receiver's credentials. The job's `uid` and `gid` variables set the
 rendered bundle's owner through the template's
@@ -703,8 +717,10 @@ make test
 ```
 
 Tests that need a Nomad agent run when `WHERRY_NOMAD_DEV_ADDR` names a dev
-agent with `raw_exec` enabled, such as `http://127.0.0.1:4646`, and skip
-otherwise. They include the protocol's conformance suite,
+agent with `raw_exec` enabled, such as `http://127.0.0.1:4646` or a task
+API socket, and skip otherwise. They send `NOMAD_TOKEN`, as the plugin
+does, which an agent with ACLs or the task API needs. They include the
+protocol's conformance suite,
 `github.com/benemon/wherry/pluginsdk/pluginsdktest`.
 
 ### End to end on Nomad
@@ -714,8 +730,11 @@ otherwise. They include the protocol's conformance suite,
 on a Nomad dev agent, as the `nomad` lane of the `e2e` workflow does for
 every change to `nomad/`, `examples/nomad/`, the fake agent or the
 workflow. Each step is a script; with systemd, root through sudo, Docker,
-Nomad, the repository's `nomad/v*` tags on a Linux machine, and the wherry
-release the workflow pins:
+Nomad, the
+[CNI reference plugins](https://github.com/containernetworking/plugins/releases)
+in `/opt/cni/bin` at the version the workflow pins, the repository's
+`nomad/v*` tags on a Linux machine, and the wherry release the workflow
+pins:
 
 ```sh
 export WHERRY_VERSION=$(sed -n 's/^  WHERRY_VERSION: //p' .github/workflows/e2e.yml)
@@ -723,8 +742,11 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
 ```
 
 1. `01-nomad.sh` replaces the systemd unit `wherry-nomad` with a Nomad dev
-   agent and the docker driver, and starts a single-broker Kafka with TLS
-   and SCRAM through `test/kafka/up.sh` of `WHERRY_VERSION`.
+   agent and the docker driver, waits for it to fingerprint the CNI
+   plugins, and starts a single-broker Kafka with TLS and SCRAM through
+   `test/kafka/up.sh` of `WHERRY_VERSION`, with `ADVERTISED_IP` the
+   machine's address on its default route, so the receiver reaches the
+   broker from its bridge network.
 2. `02-wherry.sh` fetches the wherry CLI of `WHERRY_VERSION` through the
    receiver image's verifying fetch stage, and builds the receiver image
    from the checkout and from the latest `nomad/v*` tag before `HEAD`, both
@@ -744,8 +766,10 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
    and checks its exit code, reply and output.
 6. `06-upgrade.sh` rolls the job to the previous release's image, submits a
    slow run, and rolls the job to the checkout's image once the run's agent
-   task runs. The new receiver adopts the agent job and completes the run.
-   Both images hold `WHERRY_VERSION`, so the step upgrades the plugin.
+   task runs. The new receiver adopts the agent job and completes the run,
+   and its metrics, on the client port the allocation maps the `metrics`
+   port to, count the adoption. Both images hold `WHERRY_VERSION`, so the
+   step upgrades the plugin.
 7. `07-rollback.sh` rolls the job back to the previous release's image and
    completes a run on it.
 

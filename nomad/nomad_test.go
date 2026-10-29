@@ -56,8 +56,12 @@ func testConfig(address string) Config {
 // testProfile is the plugin profile build names, as testRun's runs do.
 const testProfile = "container"
 
-// build is newProfile's path to one plugin profile named testProfile, from a Config rather than settings.
+// build is newProfile's path to one plugin profile named testProfile, from a Config rather than settings. Without a
+// token it takes NOMAD_TOKEN, as newProfile does, so the dev tests authenticate to the task API.
 func build(config Config, pool, token string) (*Nomad, error) {
+	if token == "" {
+		token = os.Getenv("NOMAD_TOKEN")
+	}
 	client, err := newClient(config, token)
 	if err != nil {
 		return nil, err
