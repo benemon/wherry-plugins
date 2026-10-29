@@ -40,12 +40,11 @@ const (
 	// killTimeout is how long the Nomad client waits after the agent task's kill_signal before it sends SIGKILL; a
 	// client's max_kill_timeout, 30 s by default, caps it.
 	killTimeout = 15 * time.Second
-	followPoll  = time.Second
+	// retryWait separates a failed read of an allocation, or a broken log stream, from the next attempt.
+	retryWait = time.Second
 	// maxBrokenStreams bounds how often a running task's followed log stream is opened again after it breaks.
 	maxBrokenStreams = 5
-	// collectPoll separates the reads of an allocation that Collect waits on, since a Stop cut short returns before it ends.
-	collectPoll = 500 * time.Millisecond
-	cleanupWait = 10 * time.Second
+	cleanupWait      = 10 * time.Second
 )
 
 // inputsSuffix turns a run variable path into its group's variable path, which holds a run's inputs: Nomad's
@@ -612,9 +611,16 @@ func (profile *Nomad) Follow(ctx context.Context, encoded pluginsdk.Handle, offs
 	stream := profile.follow(ctx, alloc, offset)
 	defer func() { stream.stop() }()
 	// A followed stream can stay open with no frames after the task ends, can close before the task ends,
-	// and can lag a task that ended before it opened; completion is polled instead.
-	poll := time.NewTicker(followPoll)
-	defer poll.Stop()
+	// and can lag a task that ended before it opened; completion is read from the allocation instead, off the loop since
+	// a blocking read cannot sit in its select. The first read does not block, since the task may have ended already.
+	waitCtx, stopWait := context.WithCancel(ctx)
+	defer stopWait()
+	done := make(chan *api.Allocation, 1)
+	go func() {
+		if final, err := profile.terminated(waitCtx, handle.Alloc, 0); err == nil {
+			done <- final
+		}
+	}()
 	// A long-lived stream can be cut mid-frame by a proxy or load balancer; it is opened again from the last line
 	// boundary while the task runs, and a finished task's log is read whole instead.
 	broken := 0
@@ -627,7 +633,9 @@ func (profile *Nomad) Follow(ctx context.Context, encoded pluginsdk.Handle, offs
 			if ctx.Err() != nil {
 				return pluginsdk.Terminal{}, ctx.Err()
 			}
-			if final := profile.finished(ctx, handle.Alloc); final != nil {
+			final, _, err := profile.finished(ctx, handle.Alloc, 0)
+			profile.handled("read allocation", err)
+			if final != nil {
 				if err := profile.drain(ctx, final, &reader); err != nil {
 					return pluginsdk.Terminal{}, err
 				}
@@ -640,17 +648,15 @@ func (profile *Nomad) Follow(ctx context.Context, encoded pluginsdk.Handle, offs
 			select {
 			case <-ctx.Done():
 				return pluginsdk.Terminal{}, ctx.Err()
-			case <-time.After(followPoll):
+			case <-time.After(retryWait):
 			}
 			stream = profile.follow(ctx, alloc, reader.position)
-		case <-poll.C:
-			if final := profile.finished(ctx, handle.Alloc); final != nil {
-				stream.stop()
-				if err := profile.drain(ctx, final, &reader); err != nil {
-					return pluginsdk.Terminal{}, err
-				}
-				return terminalOf(final), nil
+		case final := <-done:
+			stream.stop()
+			if err := profile.drain(ctx, final, &reader); err != nil {
+				return pluginsdk.Terminal{}, err
 			}
+			return terminalOf(final), nil
 		case frame, ok := <-stream.frames:
 			if !ok {
 				stream.frames = nil
@@ -802,14 +808,39 @@ func (reader *lineReader) emit(ctx context.Context, data []byte, advance int64) 
 	}
 }
 
-// finished returns the allocation once it is terminal, else nil.
-func (profile *Nomad) finished(ctx context.Context, allocID string) *api.Allocation {
-	alloc, _, err := profile.client.Allocations().Info(allocID, (&api.QueryOptions{}).WithContext(ctx))
-	if err != nil || !alloc.ClientTerminalStatus() {
-		profile.handled("read allocation", err)
-		return nil
+// finished reads the allocation once its modify index passes index, or the server's wait ends, and returns it if it is
+// terminal, else nil, with the index to wait on next.
+func (profile *Nomad) finished(ctx context.Context, allocID string, index uint64) (*api.Allocation, uint64, error) {
+	alloc, meta, err := profile.client.Allocations().Info(allocID, (&api.QueryOptions{WaitIndex: index}).WithContext(ctx))
+	if err != nil {
+		return nil, index, err
 	}
-	return alloc
+	if !alloc.ClientTerminalStatus() {
+		return nil, meta.LastIndex, nil
+	}
+	return alloc, meta.LastIndex, nil
+}
+
+// terminated waits on finished from index until the allocation is terminal; a failed read is retried after retryWait.
+func (profile *Nomad) terminated(ctx context.Context, allocID string, index uint64) (*api.Allocation, error) {
+	for {
+		alloc, next, err := profile.finished(ctx, allocID, index)
+		switch {
+		case alloc != nil:
+			return alloc, nil
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
+		case err == nil:
+			index = next
+			continue
+		}
+		profile.handled("read allocation", err)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(retryWait):
+		}
+	}
 }
 
 // Stop deregisters the job, since Nomad replaces a batch allocation stopped alone. Stop returns once the allocation
@@ -819,7 +850,7 @@ func (profile *Nomad) Stop(ctx context.Context, encoded pluginsdk.Handle) error 
 	if err != nil {
 		return err
 	}
-	alloc, _, err := profile.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
+	alloc, meta, err := profile.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	// A purged or garbage-collected allocation has stopped.
 	if notFound(err) {
 		return nil
@@ -835,16 +866,8 @@ func (profile *Nomad) Stop(ctx context.Context, encoded pluginsdk.Handle) error 
 	}
 	// The client kills the task within the kill timeout, and the server marks the allocation lost if the client is
 	// gone, so the wait ends without a deadline of its own.
-	poll := time.NewTicker(time.Second)
-	defer poll.Stop()
-	for profile.finished(ctx, handle.Alloc) == nil {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-poll.C:
-		}
-	}
-	return nil
+	_, err = profile.terminated(ctx, handle.Alloc, meta.LastIndex)
+	return err
 }
 
 // Release deletes the run's variables holding the credentials, the prompt and the inputs.
@@ -875,16 +898,15 @@ func (profile *Nomad) Collect(ctx context.Context, encoded pluginsdk.Handle, lim
 	if err != nil {
 		return err
 	}
-	alloc, _, err := profile.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
-	for err == nil && !alloc.ClientTerminalStatus() {
-		select {
-		case <-ctx.Done():
-			return errors.New("the allocation is still running")
-		case <-time.After(collectPoll):
-		}
-		alloc, _, err = profile.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
+	var alloc *api.Allocation
+	var index uint64
+	for alloc == nil && err == nil {
+		alloc, index, err = profile.finished(ctx, handle.Alloc, index)
 	}
-	if err != nil {
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return errors.New("the allocation is still running")
+	case err != nil:
 		return profile.failed("read allocation", err)
 	}
 	// A lost allocation's client is gone, and its filesystem with it.

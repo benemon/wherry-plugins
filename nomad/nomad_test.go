@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -575,11 +576,8 @@ func TestFollowAfterTaskEnded(t *testing.T) {
 	profile, ctx := devProfile(t)
 	run := testRun("follow-ended")
 	handle := dispatch(t, profile, ctx, run)
-	for profile.finished(ctx, decoded(t, handle).Alloc) == nil {
-		if ctx.Err() != nil {
-			t.Fatal("task never finished")
-		}
-		time.Sleep(100 * time.Millisecond)
+	if _, err := profile.terminated(ctx, decoded(t, handle).Alloc, 0); err != nil {
+		t.Fatalf("task never finished: %v", err)
 	}
 	if lines := collect(t, ctx, profile, handle); len(lines) == 0 || !strings.Contains(string(lines[len(lines)-1].Data), `"result"`) {
 		t.Fatalf("lines = %#v", lines)
@@ -1814,8 +1812,8 @@ func TestSameRunInTwoPoolsRegistersTwoJobs(t *testing.T) {
 	}
 }
 
-// collectServer is a Nomad whose allocation alloc-1 reports running to its first running reads, then ended[0] or
-// complete. It lists the captured outputs plus extra, serves files by name, and records each read.
+// collectServer is a Nomad whose allocation alloc-1 passes through running versions, then ended[0] or complete; a
+// negative running count keeps it running. It lists the captured outputs plus extra, serves files by name, and records each read.
 func collectServer(t *testing.T, running int, extra []map[string]any, files map[string]string, ended ...string) (*Nomad, func() []string, func() []string) {
 	t.Helper()
 	var listing []map[string]any
@@ -1826,21 +1824,15 @@ func collectServer(t *testing.T, running int, extra []map[string]any, files map[
 	if err != nil {
 		t.Fatal(err)
 	}
+	runningVersion := []byte(`{"ID":"alloc-1","ClientStatus":"running"}`)
+	alloc := &fakeAllocation{versions: [][]byte{runningVersion}}
+	if running >= 0 {
+		alloc.versions = append(slices.Repeat(alloc.versions, running), fmt.Appendf(nil, `{"ID":"alloc-1","ClientStatus":%q}`, cmp.Or(append(ended, "complete")...)))
+	}
 	var mu sync.Mutex
 	var reads []string
 	profile, requests := nomadServer(t, map[string]http.HandlerFunc{
-		"GET /v1/allocation/alloc-1": func(response http.ResponseWriter, _ *http.Request) {
-			mu.Lock()
-			status := "complete"
-			if len(ended) > 0 {
-				status = ended[0]
-			}
-			if running--; running >= 0 {
-				status = "running"
-			}
-			mu.Unlock()
-			fmt.Fprintf(response, `{"ID":"alloc-1","ClientStatus":%q}`, status)
-		},
+		"GET /v1/allocation/alloc-1": alloc.ServeHTTP,
 		"GET /v1/client/fs/ls/alloc-1": func(response http.ResponseWriter, request *http.Request) {
 			switch request.URL.Query().Get("path") {
 			case outputsDir:
@@ -1996,7 +1988,7 @@ func TestCollectWaitsForTheAllocationToEnd(t *testing.T) {
 }
 
 func TestCollectRefusesARunningAllocation(t *testing.T) {
-	profile, requests, _ := collectServer(t, 1000, nil, capturedFiles)
+	profile, requests, _ := collectServer(t, -1, nil, capturedFiles)
 	if _, err := collectAll(profile, wide); err == nil || err.Error() != "the allocation is still running" {
 		t.Fatalf("collect from an allocation running past the context = %v; want still running", err)
 	}
@@ -2497,7 +2489,7 @@ func TestSweepOwnsAJobByItsProfileMetaAlone(t *testing.T) {
 	}
 }
 
-// A returned error is the receiver's to log; one the plugin handles itself, such as a poll read, it logs by op and class.
+// A returned error is the receiver's to log; one the plugin handles itself, such as a read of the allocation it waits on, it logs by op and class.
 func TestHandledPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
 	const token, body = "nomad-token-secret", "body-never-logged"
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
@@ -2516,8 +2508,11 @@ func TestHandledPlatformErrorIsLoggedOnceWithoutURLOrToken(t *testing.T) {
 	if logs.Len() != 0 {
 		t.Fatalf("returned error logged by the plugin: %q", logs.String())
 	}
-	if profile.finished(context.Background(), "alloc-id") != nil {
-		t.Fatal("finished read a 503 as a finished allocation")
+	// The wait ends before its retry.
+	ctx, cancel := context.WithTimeout(context.Background(), retryWait/2)
+	defer cancel()
+	if alloc, _ := profile.terminated(ctx, "alloc-id", 0); alloc != nil {
+		t.Fatal("terminated read a 503 as a finished allocation")
 	}
 	lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
 	if len(lines) != 1 || !strings.Contains(lines[0], `"class":"unavailable"`) || !strings.Contains(lines[0], `"op":"read allocation"`) || !strings.Contains(lines[0], `"@level":"warn"`) {
@@ -2599,24 +2594,20 @@ func TestTerminalNamesAnOOMKill(t *testing.T) {
 }
 
 func TestStopDeregistersAndWaitsForTheAllocation(t *testing.T) {
-	running := api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusRunning, TaskStates: map[string]*api.TaskState{taskName: {State: "running"}}}
-	reads := 0
+	running := []byte(`{"ID":"alloc-1","ClientStatus":"running","TaskStates":{"agent":{"State":"running"}}}`)
+	// Nomad reports the task complete from the third version, after the client has delivered the kill signal.
+	alloc := &fakeAllocation{versions: [][]byte{running, running, []byte(`{"ID":"alloc-1","ClientStatus":"complete"}`)}}
 	var purge string
 	profile, requests := nomadServer(t, map[string]http.HandlerFunc{
-		"GET /v1/allocation/alloc-1": func(response http.ResponseWriter, _ *http.Request) {
-			alloc := running
-			// Nomad reports the task complete from the third read, after the client has delivered the kill signal.
-			if reads++; reads >= 3 {
-				alloc = api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusComplete}
-			}
-			_ = json.NewEncoder(response).Encode(&alloc)
-		},
+		"GET /v1/allocation/alloc-1": alloc.ServeHTTP,
 		"DELETE /v1/job/agent-1": func(response http.ResponseWriter, request *http.Request) {
 			purge = request.URL.Query().Get("purge")
 			_, _ = response.Write([]byte(`{"EvalID":"eval-1"}`))
 		},
 	})
-	if err := profile.Stop(context.Background(), pluginsdk.Handle{Data: []byte(`{"v":1,"job":"agent-1","alloc":"alloc-1","format":""}`)}); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := profile.Stop(ctx, pluginsdk.Handle{Data: []byte(`{"v":1,"job":"agent-1","alloc":"alloc-1","format":""}`)}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"GET /v1/allocation/alloc-1", "DELETE /v1/job/agent-1", "GET /v1/allocation/alloc-1", "GET /v1/allocation/alloc-1"}
@@ -2629,9 +2620,9 @@ func TestStopDeregistersAndWaitsForTheAllocation(t *testing.T) {
 }
 
 func TestStopReturnsWhenCancelledDuringTheWait(t *testing.T) {
-	running := api.Allocation{ID: "alloc-1", ClientStatus: api.AllocClientStatusRunning, TaskStates: map[string]*api.TaskState{taskName: {State: "running"}}}
+	alloc := &fakeAllocation{versions: [][]byte{[]byte(`{"ID":"alloc-1","ClientStatus":"running","TaskStates":{"agent":{"State":"running"}}}`)}}
 	profile, requests := nomadServer(t, map[string]http.HandlerFunc{
-		"GET /v1/allocation/alloc-1": func(response http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(response).Encode(&running) },
+		"GET /v1/allocation/alloc-1": alloc.ServeHTTP,
 		"DELETE /v1/job/agent-1":     serve([]byte(`{"EvalID":"eval-1"}`)),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
@@ -2767,24 +2758,35 @@ func TestBrokenStreamOfARunningTaskIsFollowedAgain(t *testing.T) {
 	}
 	fields["ClientStatus"] = "running"
 	running, _ := json.Marshal(fields)
-	var infos, follows atomic.Int32
+	var follows atomic.Int32
 	var offsets []string
 	var mu sync.Mutex
+	reopened := make(chan struct{})
 	const stdout = "line1\nline2\n"
 	profile, requests := nomadServer(t, map[string]http.HandlerFunc{
-		"GET /v1/allocation/" + alloc.ID: func(response http.ResponseWriter, _ *http.Request) {
-			if infos.Add(1) <= 2 {
+		// The task ends once its stream has been opened again.
+		"GET /v1/allocation/" + alloc.ID: func(response http.ResponseWriter, request *http.Request) {
+			if request.URL.Query().Get("index") == "" {
+				response.Header().Set("X-Nomad-Index", "1")
 				_, _ = response.Write(running)
 				return
 			}
-			_, _ = response.Write(raw)
+			select {
+			case <-reopened:
+				response.Header().Set("X-Nomad-Index", "2")
+				_, _ = response.Write(raw)
+			case <-request.Context().Done():
+			}
 		},
 		"GET /v1/client/fs/logs/" + alloc.ID: func(response http.ResponseWriter, request *http.Request) {
 			offset, _ := strconv.Atoi(request.URL.Query().Get("offset"))
 			mu.Lock()
 			offsets = append(offsets, request.URL.Query().Get("follow")+"@"+strconv.Itoa(offset))
 			mu.Unlock()
-			if request.URL.Query().Get("follow") == "true" && follows.Add(1) == 1 {
+			if request.URL.Query().Get("follow") == "true" && follows.Add(1) == 2 {
+				close(reopened)
+			}
+			if request.URL.Query().Get("follow") == "true" && follows.Load() == 1 {
 				_ = json.NewEncoder(response).Encode(&api.StreamFrame{Data: []byte("line1\nli")})
 				_, _ = io.WriteString(response, `{"Data":"`+base64.StdEncoding.EncodeToString([]byte("ne2")))
 				return
@@ -2807,5 +2809,139 @@ func TestBrokenStreamOfARunningTaskIsFollowedAgain(t *testing.T) {
 	}
 	if follows.Load() < 2 || !slices.Contains(offsets, "true@6") {
 		t.Fatalf("log reads %v; want the stream opened again at offset 6", offsets)
+	}
+}
+
+// fakeAllocation answers GET /v1/allocation/<id> as Nomad's blocking query does for an allocation whose versions carry
+// indexes 1, 2 and so on: a read waiting on an index before the current version's has that version at once, one waiting
+// on the current version's has the next, and one past the last version blocks for up to 5 s, Nomad's wait limit cut short.
+// It records each read's wait index.
+type fakeAllocation struct {
+	mu       sync.Mutex
+	versions [][]byte
+	current  int
+	waits    []uint64
+	blocked  int
+}
+
+func (alloc *fakeAllocation) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	wait, _ := strconv.ParseUint(request.URL.Query().Get("index"), 10, 64)
+	alloc.mu.Lock()
+	alloc.waits = append(alloc.waits, wait)
+	if alloc.current == 0 || wait >= uint64(alloc.current) && alloc.current < len(alloc.versions) {
+		alloc.current++
+	}
+	index := alloc.current
+	block := wait >= uint64(index)
+	if block {
+		alloc.blocked++
+	}
+	alloc.mu.Unlock()
+	if block {
+		select {
+		case <-request.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+		alloc.mu.Lock()
+		alloc.blocked--
+		alloc.mu.Unlock()
+	}
+	response.Header().Set("X-Nomad-Index", strconv.Itoa(index))
+	_, _ = response.Write(alloc.versions[index-1])
+}
+
+func (alloc *fakeAllocation) state() ([]uint64, int) {
+	alloc.mu.Lock()
+	defer alloc.mu.Unlock()
+	return slices.Clone(alloc.waits), alloc.blocked
+}
+
+// Follow, Stop and Collect wait for a terminal allocation on blocking reads, each from the index the one before it
+// answered, and a cancelled context ends the read in flight.
+func TestWaitsBlockOnTheAllocation(t *testing.T) {
+	ended := testdata(t, "signal.allocation.json")
+	var fields map[string]any
+	if err := json.Unmarshal(ended, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["ClientStatus"] = "running"
+	running, _ := json.Marshal(fields)
+	id := fields["ID"].(string)
+	encoded := pluginsdk.Handle{Data: []byte(`{"v":1,"job":"agent-1","alloc":"` + id + `","format":""}`)}
+	follow := func(profile *Nomad, ctx context.Context) error {
+		_, err := profile.Follow(ctx, encoded, 0, make(chan pluginsdk.Line, 4))
+		return err
+	}
+	waits := map[string]struct {
+		wait    func(*Nomad, context.Context) error
+		indexes []uint64
+	}{
+		// Follow's wait reads the allocation again from index 0, after Follow's own read.
+		"follow": {follow, []uint64{0, 0, 1, 2}},
+		"stop":   {func(profile *Nomad, ctx context.Context) error { return profile.Stop(ctx, encoded) }, []uint64{0, 1, 2}},
+		"collect": {func(profile *Nomad, ctx context.Context) error {
+			return profile.Collect(ctx, encoded, wide, make(chan pluginsdk.Output, 4))
+		}, []uint64{0, 1, 2}},
+	}
+	server := func(t *testing.T, versions ...[]byte) (*Nomad, *fakeAllocation) {
+		alloc := &fakeAllocation{versions: versions}
+		profile, _ := nomadServer(t, map[string]http.HandlerFunc{
+			"GET /v1/allocation/" + id: alloc.ServeHTTP,
+			"DELETE /v1/job/agent-1":   serve([]byte(`{"EvalID":"eval-1"}`)),
+			// A followed stream that stays open with no frames after the task ends.
+			"GET /v1/client/fs/logs/" + id: func(response http.ResponseWriter, request *http.Request) {
+				_ = json.NewEncoder(response).Encode(&api.StreamFrame{Data: []byte("working\n")})
+				if request.URL.Query().Get("follow") == "true" {
+					response.(http.Flusher).Flush()
+					<-request.Context().Done()
+				}
+			},
+			"GET /v1/client/fs/ls/" + id: func(response http.ResponseWriter, _ *http.Request) {
+				http.Error(response, "no such file or directory", http.StatusNotFound)
+			},
+		})
+		return profile, alloc
+	}
+	t.Run("follow/ended before it is followed", func(t *testing.T) {
+		profile, _ := server(t, ended)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := follow(profile, ctx); err != nil {
+			t.Fatalf("follow of an ended task = %v", err)
+		}
+	})
+	for name, test := range waits {
+		wait := test.wait
+		t.Run(name+"/terminal", func(t *testing.T) {
+			profile, alloc := server(t, running, running, ended)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := wait(profile, ctx)
+			if indexes, _ := alloc.state(); err != nil || !slices.Equal(indexes, test.indexes) {
+				t.Fatalf("wait = %v after reads at indexes %v; want nil after reads at %v", err, indexes[:min(len(indexes), 8)], test.indexes)
+			}
+		})
+		t.Run(name+"/cancelled", func(t *testing.T) {
+			profile, alloc := server(t, running)
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			errs := make(chan error, 1)
+			go func() { errs <- wait(profile, ctx) }()
+			select {
+			case err := <-errs:
+				if err == nil {
+					t.Fatal("wait on a running allocation returned nil when its context ended")
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("wait outlived its context")
+			}
+			for deadline := time.Now().Add(time.Second); ; time.Sleep(10 * time.Millisecond) {
+				if _, blocked := alloc.state(); blocked == 0 {
+					break
+				} else if time.Now().After(deadline) {
+					t.Fatalf("%d blocking reads outlived the context by a second", blocked)
+				}
+			}
+		})
 	}
 }
