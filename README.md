@@ -39,7 +39,10 @@ commit's `ci` run on `main` passed and runs goreleaser as a snapshot
 versioned from the tag less its prefix. The snapshot writes the archives,
 `checksums.txt`, an SBOM per archive (`<archive>.sbom.json`) and the
 cosign signature over the checksums. The workflow then attests the
-archives' provenance and publishes them against the tag. The same build,
+archives' provenance and publishes them against the tag. Its `verify` job
+checks the published release as a user receives it: the assets against
+`.github/release-contents/<plugin>.txt`, the checksums' signature and the
+checksums, and each archive's attestation. The same build,
 unsigned, writes them into `dist` locally:
 
 ```sh
