@@ -416,11 +416,16 @@ The agent sees:
 - each S3 input in `/wherry/inputs`, as described in [S3 inputs](#s3-inputs);
 - each file target as a file in `/run/wherry/credentials/files`, mode 0440,
   owned by root and the pod's fsGroup, so the agent reads it through its
-  group and writes none. `ssh` refuses a private key that others can read
-  only when the agent's user owns it, so it accepts a root-owned key at
-  0440. The Secret volume is memory-backed and a different filesystem from
-  the agent's outputs, so the agent cannot hard-link a credential into
-  them;
+  group and writes none. The run's Secret volume is the boundary: it is a
+  tmpfs that Kubernetes mounts into the run's pod alone, and the pod's
+  fsGroup is the only group that reads it. `ssh` refuses a private key that
+  others can read only when the agent's user owns it, so it accepts a
+  root-owned key at 0440. An agent image that uses `ssh` needs a passwd
+  entry for the agent's UID, since `ssh` and `ssh-keygen` refuse a UID
+  without one; on OpenShift, which picks a random UID, that takes
+  nss_wrapper or a writable `/etc/passwd`. The Secret volume is a different
+  filesystem from the agent's outputs, so the agent cannot hard-link a
+  credential into them;
 - its run directory at `/wherry`, mode 0700 and owned by its UID, and its
   outputs directory, which it creates, at `/wherry/outputs`;
 - `HOME` set to `/wherry`;

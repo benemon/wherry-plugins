@@ -356,8 +356,10 @@ The agent task receives:
   UID and GID with mode 0600. With a user name or no `user`, each file
   belongs to the Nomad client's user, usually root, with Nomad's default
   template mode, 0644, so any user in the task's filesystem can read it.
-  `ssh` refuses a private key that others can read when the agent's user
-  owns the file;
+  Nomad renders the files inside the client's `data_dir`, mode 0700, and
+  that directory is the boundary that keeps other users of the client from
+  them. `ssh` refuses a private key that others can read when the agent's
+  user owns the file;
 - `WHERRY_INPUT_DIR`, `WHERRY_OUTPUT_DIR` and `WHERRY_CREDENTIALS_DIR` set
   to `$NOMAD_TASK_DIR/inputs`, `$NOMAD_TASK_DIR/outputs` and
   `$NOMAD_SECRETS_DIR/credentials`, and the same paths written into the
