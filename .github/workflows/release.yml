@@ -74,8 +74,7 @@ jobs:
         run: |
           .github/release-tools.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      # Builds the archives, writes checksums.txt and an SBOM per archive, and signs checksums.txt with cosign,
-      # keyless through this workflow's OIDC token. A snapshot publishes nothing; VERSION names the archives.
+      # A snapshot publishes nothing; VERSION names the archives.
       - name: Build and sign the release archives
         run: goreleaser release --snapshot --clean --config "$PLUGIN/.goreleaser.yaml"
       # Verify with:

@@ -65,8 +65,7 @@ jobs:
         run: make check PLUGINS="$PLUGIN"
 
   # The plugin's release build as a snapshot, unsigned and unpublished, so a platform that stops compiling or an
-  # archive that changes fails here before a tag: it checks <plugin>/.goreleaser.yaml, cross-compiles, and compares
-  # the archives and the files they hold with .github/release-contents/<plugin>.txt.
+  # archive that changes fails here before a tag.
   release-build:
     runs-on: ubuntu-latest
     strategy:

@@ -52,7 +52,6 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
-# One SBOM per archive, written by syft.
 sboms:
   - artifacts: archive
 
