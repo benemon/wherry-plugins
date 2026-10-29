@@ -947,29 +947,32 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    SCRAM-SHA-512, simple authorization, `kafka-admin` a super user and
    `wherry.operator`), and maps its external listener to `localhost`.
 2. `02-wherry.sh` fetches the wherry CLI of `WHERRY_VERSION` through the
-   receiver image's verifying fetch stage.
+   receiver image's verifying fetch stage, and builds the receiver image
+   with `make image` and the fake agent's image.
 3. `03-provision.sh` runs `wherry admin` from the machine: the pool, the
    tenant, the host and the receiver, from the receiver configuration
    directory `test/e2e/receiver`: `receiver.yaml`,
    `plugins/kubernetes/plugin.yaml`, and the plugin profiles
    `plugins/kubernetes/profiles/10-fake.yaml`, which runs a fake agent, and
-   `20-broken.yaml`, which runs a missing image. It writes the host's
-   configuration, `config.yaml`, with a generated dummy credential and runs
-   `wherry init`.
-4. `04-deploy.sh` builds the receiver image with `make image` and the fake
-   agent's image, loads both into kind, creates the runs claim's volume,
+   `20-broken.yaml`, which runs a missing image, pinned with
+   `--plugin-sha256` to the plugin binary in the receiver image. It runs
+   `wherry admin check`, writes the host's configuration, `config.yaml`,
+   with a generated dummy credential and runs `wherry init`.
+4. `04-deploy.sh` loads the receiver image and the fake agent's image into
+   kind, creates the runs claim's volume,
    [`runs.yaml`](test/e2e/runs.yaml), a hostPath directory on the single
    node marked `ReadWriteMany` and owned by UID 1001, and deploys the
    receiver as [Deploy](#deploy) says, into a namespace enforcing Pod
    Security `restricted`.
-5. `05-runs.sh` submits and watches, as the host: a run it cancels, a plain
-   run, a credentialed run with an input file and an SSH private key, a run
-   with an input file and a run whose image is missing. It checks each
-   state, the result and output, the credentials' mode 0440 and root
-   owner, `ssh-keygen -y` accepting the key as the agent, the input's mode
-   0600 and SHA-256, the start failure's reason in the receiver's log, the
-   credentials' absence from the log, pods and events, and the sweep's
-   removal of the cancelled run's Secret and pod.
+5. `05-runs.sh` submits, as the host, a run it cancels, a plain run, a
+   credentialed run with an input file and an SSH private key, a run with
+   an input file and a run whose image is missing, and waits for each with
+   `wherry wait`, keeping its `wherry logs`. It checks each state by
+   `wait`'s exit code, the result and output, the credentials' mode 0440
+   and root owner, `ssh-keygen -y` accepting the key as the agent, the
+   input's mode 0600 and SHA-256, the start failure's reason in the
+   receiver's log, the credentials' absence from the log, pods and events,
+   and the sweep's removal of the cancelled run's Secret and pod.
 
 `collect.sh` writes the receiver's log and the cluster's state, but no
 Secret, to `artifacts` in the state directory, `$E2E_WORK`, by default

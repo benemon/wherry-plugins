@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Submits and watches, as the host runner, a cancelled run, a plain run, a credentialed run with an input file and an
+# Submits and waits for, as the host runner, a cancelled run, a plain run, a credentialed run with an input file and an
 # SSH private key, a run with an input file and a run that never starts, and checks what each brings back. Ends once
 # the sweep has removed the cancelled run's pod.
 . "$(dirname "$0")/common.sh"
@@ -14,15 +14,17 @@ submit() {
 	[ -n "$run" ] || fail "submit printed no run ID"
 	echo "$run"
 }
-# finish watches a run into $work/<run>.watch and its outputs into $work/outputs/<run>, and checks the state it ended
-# in. watch prints the transcript before the state line.
+# wait's exit code for each state a run ends in; 6 is its timeout.
+declare -A codes=([TASK_STATE_COMPLETED]=0 [TASK_STATE_FAILED]=2 [TASK_STATE_CANCELED]=3 [TASK_STATE_REJECTED]=4)
+# finish waits for a run, with its reply in $work/<run>.reply, its outputs in $work/outputs/<run> and its log in
+# $work/<run>.log, and checks that it ended in the state $2 by wait's exit code.
 finish() {
-	local state
-	wherry watch "$1" --config-file "$host_config" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.watch" || true
-	state=$(grep -x 'TASK_STATE_[A-Z_]*' "$work/$1.watch" | tail -n 1)
-	[ "$state" = "$2" ] || fail "run $1 ended $state; want $2"
+	local code=0
+	host wait "$1" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.reply" || code=$?
+	host logs "$1" >"$work/$1.log"
+	[ "$code" = "${codes[$2]}" ] || fail "run $1: wait exited $code; want ${codes[$2]}, $2"
 }
-replied() { grep -x -F "$2" "$work/$1.watch" >/dev/null || fail "run $1 did not reply '$2'"; }
+replied() { grep -x -F "$2" "$work/$1.reply" >/dev/null || fail "run $1 did not reply '$2'"; }
 sha256() { sha256sum <"$1" | cut -d' ' -f1; }
 ready() { host receivers | grep 'profile=fake plugin=kubernetes agent=fake ready=true' >/dev/null; }
 running() {
