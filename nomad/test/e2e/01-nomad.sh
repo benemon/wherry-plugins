@@ -4,7 +4,7 @@
 # SHA-256. Needs root through sudo, systemd, docker and nomad.
 . "$(dirname "$0")/common.sh"
 : "${WHERRY_VERSION:?}"
-up_sha256=ee14f72ac9eaca3dcb1c7c9803882573df9624ad535483a1a9f92a79024495bb
+up_sha256=366cda461e604733496b6656ecc2097f16bcb0fafb2531646dfd35a32f0722ad
 
 sudo systemctl stop wherry-nomad 2>/dev/null || true
 sudo systemctl reset-failed wherry-nomad 2>/dev/null || true

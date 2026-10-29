@@ -43,8 +43,24 @@ deployed() {
 	[ "$status" = successful ]
 }
 
-# roll runs the receiver job with the image $1 and waits for it to deploy.
+# plugin_sha256 prints the SHA-256 of the plugin binary in the receiver image $1, the pin receiver add and update take.
+plugin_sha256() {
+	docker run --rm --entrypoint sha256sum "$1" /usr/local/libexec/wherry/plugins/wherry-plugin-nomad | cut -d' ' -f1
+}
+
+# pin records the receiver's configuration with the plugin binary of the receiver image $1, which a receiver must run:
+# it refuses a plugin whose SHA-256 is not its record's. A running receiver exits on the new record.
+pin() {
+	(
+		# shellcheck source=/dev/null
+		. "$work/kafka/env"
+		wherry admin receiver update nomad-1 --config-dir "$e2e/receiver" --plugin-sha256 "nomad=$(plugin_sha256 "$1")"
+	)
+}
+
+# roll pins the image $1's plugin, runs the receiver job with the image and waits for it to deploy.
 roll() {
+	pin "$1"
 	nomad job run -detach -var image="$1" "$job" >/dev/null
 	wait_for 300 deployed
 	wait_for 300 ready
@@ -57,13 +73,14 @@ submit() {
 	echo "$run"
 }
 
-# complete watches the run $1 into $work/<run>.watch and its outputs into $work/outputs/<run>, and checks that it
-# completed with the agent's reply and its prompt as echo.txt. watch prints the transcript before the state line.
+# complete waits for the run $1, with its reply in $work/<run>.reply, its outputs in $work/outputs/<run> and its log in
+# $work/<run>.log, and checks that it completed with the agent's reply and its prompt as echo.txt. wait prints the reply
+# and exits 0 for a completed run, 2 failed, 3 canceled, 4 rejected, 6 timed out.
 complete() {
-	local state
-	wherry watch "$1" --config-file "$host_config" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.watch" || true
-	state=$(grep -x 'TASK_STATE_[A-Z_]*' "$work/$1.watch" | tail -n 1)
-	[ "$state" = TASK_STATE_COMPLETED ] || fail "run $1 ended $state; want TASK_STATE_COMPLETED"
-	grep -x -F 'uid 1001' "$work/$1.watch" >/dev/null || fail "run $1 did not reply 'uid 1001'"
+	local code=0
+	host wait "$1" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.reply" || code=$?
+	host logs "$1" >"$work/$1.log"
+	[ "$code" = 0 ] || fail "run $1: wait exited $code; want 0, completed"
+	grep -x -F 'uid 1001' "$work/$1.reply" >/dev/null || fail "run $1 did not reply 'uid 1001'"
 	grep -F "$2" "$work/outputs/$1/echo.txt" >/dev/null || fail "run $1 returned no echo.txt"
 }

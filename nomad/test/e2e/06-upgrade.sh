@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Rolls the receiver job to the previous release's image, submits a run whose agent replies after 90 seconds, and once
 # its agent task runs, rolls the job to the checkout's image. The new receiver must adopt the agent job, not dispatch
-# it again, and complete the run.
+# it again, and complete the run. Both images hold the wherry release WHERRY_VERSION, so the step upgrades the plugin
+# alone; each roll first pins the receiver's record to the plugin binary of the image it runs.
 . "$(dirname "$0")/common.sh"
 roll wherry-receiver:previous
 run=$(submit 'e2e: slow')

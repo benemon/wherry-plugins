@@ -15,7 +15,7 @@ permissions:
 env:
   # The wherry release whose CLI provisions and submits, and which the receiver image holds.
   # ci.yml's nomad-image job pins the same release; change both together.
-  WHERRY_VERSION: v0.1.0-rc.24
+  WHERRY_VERSION: v0.1.0-rc.25
   KIND_VERSION: v0.33.0
   KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
   # A Nomad CE release; NOMAD_SHA256 is its linux_amd64 zip's line in the release's SHA256SUMS.
@@ -46,16 +46,16 @@ jobs:
       - name: Create the cluster and Kafka
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/01-cluster.sh
-      - name: Fetch the wherry CLI
+      - name: Fetch the wherry CLI and build the images
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/02-wherry.sh
       - name: Provision the pool, tenant, host and receiver
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/03-provision.sh
-      - name: Build, load and deploy the receiver
+      - name: Load and deploy the receiver
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/04-deploy.sh
-      - name: Submit and watch the runs
+      - name: Submit and wait for the runs
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/05-runs.sh
       - name: Collect the receiver log and cluster state
@@ -96,16 +96,16 @@ jobs:
       - name: Start the Nomad agent and Kafka
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/01-nomad.sh
-      - name: Fetch the wherry CLI
+      - name: Fetch the wherry CLI and build the images
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/02-wherry.sh
       - name: Provision the pool, tenant, host and receiver
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/03-provision.sh
-      - name: Build the images, validate the example job and run the receiver
+      - name: Validate the example jobs and run the receiver
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/04-deploy.sh
-      - name: Submit and watch a run
+      - name: Submit and wait for a run
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/05-run.sh
       - name: Upgrade from the previous release with a run in flight

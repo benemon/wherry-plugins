@@ -726,25 +726,32 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
    agent and the docker driver, and starts a single-broker Kafka with TLS
    and SCRAM through `test/kafka/up.sh` of `WHERRY_VERSION`.
 2. `02-wherry.sh` fetches the wherry CLI of `WHERRY_VERSION` through the
-   receiver image's verifying fetch stage.
+   receiver image's verifying fetch stage, and builds the receiver image
+   from the checkout and from the latest `nomad/v*` tag before `HEAD`, both
+   with `WHERRY_VERSION`, and the fake agent's image.
 3. `03-provision.sh` runs `wherry admin` from the machine: the pool, the
    tenant, the host and the receiver, from the receiver configuration
    directory `test/e2e/receiver`, whose plugin profile
-   `plugins/nomad/profiles/10-fake.yaml` runs a fake agent. It writes the
-   host's configuration, `config.yaml`, and runs `wherry init`.
-4. `04-deploy.sh` builds the receiver image from the checkout and from the
-   latest `nomad/v*` tag before `HEAD`, and the fake agent's image. It puts
-   the receiver's bundle in its Nomad variable, validates the example job
-   and the host paths example job, runs the example job with the
-   checkout's image, and checks that its receiver logs the plugin's
-   version.
-5. `05-run.sh` submits a run as the host and checks its state, reply and
-   output.
+   `plugins/nomad/profiles/10-fake.yaml` runs a fake agent, pinned with
+   `--plugin-sha256` to the plugin binary in the checkout's image. It runs
+   `wherry admin check`, writes the host's configuration, `config.yaml`,
+   and runs `wherry init`.
+4. `04-deploy.sh` puts the receiver's bundle in its Nomad variable,
+   validates the example job and the host paths example job, runs the
+   example job with the checkout's image, and checks that its receiver
+   logs the plugin's version.
+5. `05-run.sh` submits a run as the host, waits for it with `wherry wait`,
+   and checks its exit code, reply and output.
 6. `06-upgrade.sh` rolls the job to the previous release's image, submits a
    slow run, and rolls the job to the checkout's image once the run's agent
    task runs. The new receiver adopts the agent job and completes the run.
+   Both images hold `WHERRY_VERSION`, so the step upgrades the plugin.
 7. `07-rollback.sh` rolls the job back to the previous release's image and
    completes a run on it.
+
+Each roll first runs `wherry admin receiver update --plugin-sha256` with the
+SHA-256 of the plugin binary in the image it runs, since the receiver
+refuses a plugin its record does not pin.
 
 `collect.sh` writes the Nomad agent's and the receiver's logs and the jobs'
 state to `artifacts` in the state directory, `$E2E_WORK`, by default
