@@ -586,6 +586,13 @@ was not fetched, or did not match its size and SHA-256`, and does not
 dispatch it again. A large S3 input crosses the receiver's
 network and the runs claim's.
 
+The receiver container makes every S3 request: the plugin's fetches of S3
+inputs and the receiver's uploads of S3 outputs from the runs claim. The
+receiver container trusts the storage endpoint's CA, and agent pods need
+no CA for it ([Image](#image)). Against an endpoint whose certificate the
+receiver does not trust, each S3 input fails with `fetch <name>:
+certificate` and each S3 output with `not uploaded: request failed`.
+
 ### Agent environment
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
@@ -701,9 +708,43 @@ holds `/usr/local/bin/wherry` and
 runs as UID 1001 and group 0, with the entrypoint `wherry`; its writable
 paths are volumes whose mount points, `/var/lib/wherry` and `/tmp`, group 0
 can write. It holds no Nomad plugin. Agent pods run the agent's image
-alone, so an upgrade of the plugin is a change of the receiver image. For a
-storage endpoint under a private CA, add the CA with `update-ca-trust` in a
-derived image.
+alone, so an upgrade of the plugin is a change of the receiver image.
+
+For a storage endpoint under a private CA, the receiver reads the system
+bundle `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, which takes no
+configuration. Supply it one of two ways:
+
+- On OpenShift, mount the cluster's
+  [injected trusted CA bundle](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/networking/enable-cluster-wide-proxy#certificate-injection-using-operators_config-cluster-wide-proxy),
+  which holds the system roots and the cluster proxy's `trustedCA`, so the
+  private CA goes in the proxy's `trustedCA`. A ConfigMap with the inject
+  label gets the bundle under the key `ca-bundle.crt`:
+
+  ```yaml
+  apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: wherry-receiver-ca
+    labels: {config.openshift.io/inject-trusted-cabundle: "true"}
+  ```
+
+  Mount it read-only over the image's bundle directory:
+
+  ```yaml
+  volumeMounts:
+    - {name: ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true}
+  volumes:
+    - {name: ca, configMap: {name: wherry-receiver-ca, items: [{key: ca-bundle.crt, path: tls-ca-bundle.pem}]}}
+  ```
+
+- On other Kubernetes, put the full bundle, the system roots and the
+  private CA, in a ConfigMap under the key `ca-bundle.crt` and mount it the
+  same way; the mount replaces the image's bundle, so a ConfigMap holding
+  the private CA alone leaves the receiver trusting nothing else. Or build
+  a derived image that adds the CA with `update-ca-trust`.
+
+[`examples/kubernetes/receiver.yaml`](../examples/kubernetes/receiver.yaml) holds these lines commented
+out; a storage endpoint under a public CA needs none of them.
 
 No image is published, since an image couples a wherry release and a
 plugins release. Push the image you build to a registry the cluster pulls
@@ -855,6 +896,8 @@ ships `kubectl` beside `oc`. What differs:
   kubelet from adding group access to the receiver's signing key on every
   mount, which would stop the receiver. If the namespace's fsGroup ever
   changes, the receiver stops with `chmod 600 it`; fix the modes.
+- For a storage endpoint under a private CA, mount the injected trusted CA
+  bundle in the receiver ([Image](#image)).
 - Streams for Apache Kafka serves as Strimzi.
 - Push the receiver and agent images to the internal registry, into the
   receiver's namespace, through the registry's route, since the Service

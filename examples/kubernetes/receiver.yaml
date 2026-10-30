@@ -71,12 +71,25 @@ spec:
             - {name: state, mountPath: /var/lib/wherry}
             - {name: runs, mountPath: /var/lib/wherry/runs}
             - {name: tmp, mountPath: /tmp}
+            # For a storage endpoint under a private CA; see wherry-receiver-ca below.
+            # - {name: ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true}
       volumes:
         - {name: config, configMap: {name: wherry-receiver-config}}
         - {name: bundle, secret: {secretName: wherry-receiver-bundle, defaultMode: 0440}}
         - {name: state, persistentVolumeClaim: {claimName: wherry-receiver-state}}
         - {name: runs, persistentVolumeClaim: {claimName: wherry-runs}}
         - {name: tmp, emptyDir: {medium: Memory, sizeLimit: 16Mi}}
+        # - {name: ca, configMap: {name: wherry-receiver-ca, items: [{key: ca-bundle.crt, path: tls-ca-bundle.pem}]}}
+# ---
+# Optional, for a storage endpoint under a private CA; a public CA needs none of this. On OpenShift the label fills
+# ca-bundle.crt with the cluster's trusted CAs. On other Kubernetes, drop the label and set ca-bundle.crt to the
+# system roots and the private CA, since the mount replaces the image's bundle. Uncomment the ca volume and mount in
+# the Deployment as well.
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: wherry-receiver-ca
+#   labels: {config.openshift.io/inject-trusted-cabundle: "true"}
 ---
 apiVersion: v1
 kind: Service
