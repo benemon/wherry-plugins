@@ -558,6 +558,25 @@ condition change.
   nor its Secret remains and it has not changed for 10 minutes. A purge
   removes the directory with its pod.
 
+An agent that runs Go keeps its module cache in `$HOME/go/pkg/mod`, under
+its run directory, unless `GOMODCACHE` or `GOPATH` moves it. Go writes the
+cache read-only ([module cache](https://go.dev/ref/mod#module-cache)), so a
+receiver that runs as a non-root user cannot remove the run directory, and
+the directory stays on the runs claim while each sweep logs:
+
+```text
+remove the run directory: unlinkat <runs_dir>/runs/agent-<pool>-<run>/go/pkg/mod/...: permission denied
+```
+
+For such an agent, set Go's
+[`-modcacherw`](https://pkg.go.dev/cmd/go#hdr-Build_flags) flag in the
+plugin profile's `runtime.env`:
+
+```yaml
+env:
+  GOFLAGS: -modcacherw
+```
+
 An adopter can read an ended pod's log for 10 minutes. A pod stranded on a
 lost node is purged 10 minutes after its deletion began.
 
