@@ -565,7 +565,7 @@ receiver that runs as a non-root user cannot remove the run directory, and
 the directory stays on the runs claim while each sweep logs:
 
 ```text
-remove the run directory: unlinkat <runs_dir>/agent-<pool>-<run>/go/pkg/mod/...: permission denied
+remove the run directory: unlinkat <runs_dir>/runs/agent-<pool>-<run>/go/pkg/mod/...: permission denied
 ```
 
 For such an agent, set Go's
