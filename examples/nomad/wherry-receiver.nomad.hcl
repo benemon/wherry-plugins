@@ -22,6 +22,8 @@ job "wherry-receiver" {
       source          = "wherry-receiver"
       access_mode     = "single-node-single-writer"
       attachment_mode = "file-system"
+      # Volume names are not unique across clients; the sticky claim binds the job to this volume's ID.
+      sticky = true
     }
 
     # The receiver's metrics listen on 9464 in the allocation's network namespace, mapped to a dynamic port on the

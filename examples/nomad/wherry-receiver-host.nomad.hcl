@@ -33,6 +33,8 @@ job "wherry-receiver" {
       source          = "wherry-receiver"
       access_mode     = "single-node-single-writer"
       attachment_mode = "file-system"
+      # Volume names are not unique across clients; the sticky claim binds the job to this volume's ID.
+      sticky = true
     }
 
     update {

@@ -623,7 +623,11 @@ specifies the dynamic host volume `wherry-receiver`, which needs Nomad
 by the image's user, 1001 with group 0, with mode 0700; setting the owner
 needs a Nomad client running as root. The receiver creates the `state`
 subdirectory at 0700 with its signing key at 0600. The volume stays on its
-client, and the job's allocations run there.
+client, and the job's allocations run there. Volume names are not unique across
+clients, so the group claims the volume with `sticky = true`
+([stateful deployments](https://developer.hashicorp.com/nomad/docs/concepts/stateful-deployments)):
+the claim binds the job to that volume's ID, and a volume of the same name on
+another client is never mounted in its place.
 
 Each receiver has its own volume, and two receivers never share a state
 directory. For another receiver, copy the volume specification and the job
