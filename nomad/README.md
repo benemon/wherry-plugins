@@ -596,12 +596,58 @@ runs the image the [Containerfile](../examples/nomad/Containerfile) builds.
 The job renders the bundle from the Nomad variable
 `nomad/jobs/wherry-receiver`, which its workload identity reads, into the
 task's secrets directory, owned by the image's user with mode 0600; setting
-the owner needs a Nomad client running as root. Its local configuration
-keeps `state_dir` on the allocation's data directory, which the job's
-[`ephemeral_disk`](https://developer.hashicorp.com/nomad/docs/job-specification/ephemeral_disk),
-sticky with `migrate`, carries to the next allocation. The task's
+the owner needs a Nomad client running as root. The task's
 `kill_timeout` is 30 seconds, and its local configuration's
 `drain_timeout` is 25 seconds.
+
+#### The state volume
+
+The receiver's state directory holds its signing key, and its identity
+with it. The job keeps `state_dir` at `/var/lib/wherry/state` on a
+[host volume](https://developer.hashicorp.com/nomad/docs/other-specifications/volume/host)
+that the group's
+[`volume`](https://developer.hashicorp.com/nomad/docs/job-specification/volume)
+block claims and the task's
+[`volume_mount`](https://developer.hashicorp.com/nomad/docs/job-specification/volume_mount)
+mounts at `/var/lib/wherry`. The volume outlives every allocation, so the
+receiver keeps its key across a `nomad job stop` and `nomad job run`, a
+group scaled to 0 and back, an update and a reschedule. An allocation's
+data directory goes with the allocation: a sticky, migrating
+[`ephemeral_disk`](https://developer.hashicorp.com/nomad/docs/job-specification/ephemeral_disk)
+carries it only to a replacement allocation, and a receiver whose new
+allocation starts without its key fails every start.
+
+[`examples/nomad/wherry-receiver.volume.hcl`](../examples/nomad/wherry-receiver.volume.hcl)
+specifies the dynamic host volume `wherry-receiver`, which needs Nomad
+1.10 or later. The built-in `mkdir` plugin creates it on one client, owned
+by the image's user, 1001 with group 0, with mode 0700; setting the owner
+needs a Nomad client running as root. The receiver creates the `state`
+subdirectory at 0700 with its signing key at 0600. The volume stays on its
+client, and the job's allocations run there. Volume names are not unique across
+clients, so the group claims the volume with `sticky = true`
+([stateful deployments](https://developer.hashicorp.com/nomad/docs/concepts/stateful-deployments)):
+the claim binds the job to that volume's ID, and a volume of the same name on
+another client is never mounted in its place.
+
+Each receiver has its own volume, and two receivers never share a state
+directory. For another receiver, copy the volume specification and the job
+with another volume name. Losing the volume, or the client that holds it,
+loses the receiver's identity; provision the receiver again under a new
+name, as the operator guide says for a lost state directory, and create a
+new volume for it.
+
+A client can instead declare a static
+[`host_volume`](https://developer.hashicorp.com/nomad/docs/configuration/client#host_volume-block)
+named `wherry-receiver`, on a directory owned by 1001 with group 0 and
+mode 0700, which the job claims unchanged:
+
+```hcl
+client {
+  host_volume "wherry-receiver" {
+    path = "/opt/wherry/receiver"
+  }
+}
+```
 
 The receiver reaches Nomad through the
 [task API](https://developer.hashicorp.com/nomad/api-docs/task-api) and
@@ -619,21 +665,28 @@ brokers must advertise an address other than loopback.
 
 Prerequisites: the image pushed where the clients pull from, the
 receiver's bundle `receiver.bundle`, and, with ACLs enabled, the
-[ACL policy](#acl-policy) in `policy.hcl`.
+[ACL policy](#acl-policy) in `policy.hcl` and a token with the
+`host-volume-create` capability, which `nomad volume create` needs.
 
-1. Put the bundle in the job's variable:
+1. Create the state volume:
+
+   ```sh
+   nomad volume create examples/nomad/wherry-receiver.volume.hcl
+   ```
+
+2. Put the bundle in the job's variable:
 
    ```sh
    nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle
    ```
 
-2. Run the job with the image:
+3. Run the job with the image:
 
    ```sh
    nomad job run -var image=registry.example.com/wherry-receiver:<version> examples/nomad/wherry-receiver.nomad.hcl
    ```
 
-3. With ACLs enabled, attach the ACL policy to the job:
+4. With ACLs enabled, attach the ACL policy to the job:
 
    ```sh
    nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
@@ -667,9 +720,10 @@ directory `/usr/local/libexec/wherry/<version>/plugins`. The job's variable
 [default chroot](https://developer.hashicorp.com/nomad/docs/deploy/task-driver/exec#chroot),
 so the client needs no `chroot_env`.
 
-The job's bundle, state directory, `kill_timeout` and workload identity
-are those of
-[the docker shape](#the-receiver-container-under-the-docker-driver). The
+The job's bundle, [state volume](#the-state-volume), `kill_timeout` and
+workload identity are those of
+[the docker shape](#the-receiver-container-under-the-docker-driver), with
+the volume owned by the `wherry` user. The
 task shares the client's network, so the plugin reaches the client's API
 on `127.0.0.1:4646` unless the receiver configuration sets `address` or the
 task's environment sets `NOMAD_ADDR`. The
@@ -682,27 +736,36 @@ and `gid`.
 Prerequisites: a `wherry` system user and group on every client that can
 run the job, the wherry binary and `wherry-plugin-nomad`, verified as
 [Install](#install) describes, the receiver's bundle `receiver.bundle`,
-and, with ACLs enabled, the [ACL policy](#acl-policy) in `policy.hcl`.
+and, with ACLs enabled, the [ACL policy](#acl-policy) in `policy.hcl` and
+a token with the `host-volume-create` capability.
 
 1. On every client that can run the job, install the binary as
    `/usr/local/libexec/wherry/<version>/wherry` and the plugin in
    `/usr/local/libexec/wherry/<version>/plugins`, owned by root and
    writable by no group or other user.
 
-2. Put the bundle in the job's variable:
+2. Create the state volume, with the `wherry` user's IDs as the `uid` and
+   `gid` parameters:
+
+   ```sh
+   sed -e 's/^  uid  = 1001$/  uid  = <UID>/' -e 's/^  gid  = 0$/  gid  = <GID>/' examples/nomad/wherry-receiver.volume.hcl |
+     nomad volume create -
+   ```
+
+3. Put the bundle in the job's variable:
 
    ```sh
    nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle
    ```
 
-3. Run the job with the version and the `wherry` user's IDs on the clients,
+4. Run the job with the version and the `wherry` user's IDs on the clients,
    which are the same on every client:
 
    ```sh
    nomad job run -var version=<version> -var uid=<UID> -var gid=<GID> examples/nomad/wherry-receiver-host.nomad.hcl
    ```
 
-4. With ACLs enabled, attach the ACL policy to the job:
+5. With ACLs enabled, attach the ACL policy to the job:
 
    ```sh
    nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
@@ -761,9 +824,13 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
    `wherry admin check`, writes the host's configuration, `config.yaml`,
    and runs `wherry init`.
 4. `04-deploy.sh` puts the receiver's bundle in its Nomad variable,
+   creates the state volume from
+   [`examples/nomad/wherry-receiver.volume.hcl`](../examples/nomad/wherry-receiver.volume.hcl),
    validates the example job and the host paths example job, runs the
    example job with the checkout's image, and checks that its receiver
-   logs the plugin's version.
+   logs the plugin's version. It then stops the job, runs it again, and
+   checks that the new allocation's receiver starts with the key on the
+   volume.
 5. `05-run.sh` submits a run as the host, waits for it with `wherry wait`,
    and checks its exit code, reply and output.
 6. `06-upgrade.sh` rolls the job to the previous release's image, submits a
