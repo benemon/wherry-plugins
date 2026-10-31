@@ -1,7 +1,8 @@
 # The wherry receiver as a Nomad service job: the image examples/nomad/Containerfile builds, under the docker driver.
 # The receiver reaches the Nomad API through the task API socket and Kafka through the group's bridge network.
 # The receiver's bundle is the item bundle of the Nomad variable nomad/jobs/wherry-receiver, which the job's workload
-# identity reads. nomad/README.md has the commands that put it and run the job.
+# identity reads. Its state directory is on the dynamic host volume examples/nomad/wherry-receiver.volume.hcl specifies.
+# nomad/README.md has the commands that create the volume, put the bundle and run the job.
 # Each receiver has its own bundle, so run one job, of count 1, per receiver.
 variable "image" {
   type        = string
@@ -14,11 +15,13 @@ job "wherry-receiver" {
   group "receiver" {
     count = 1
 
-    # The receiver's signing key is in its state directory on the allocation's data directory. The sticky disk with
-    # migrate carries it to the next allocation, as Nomad's ephemeral_disk documentation describes.
-    ephemeral_disk {
-      sticky  = true
-      migrate = true
+    # The receiver's state directory, with its signing key, is on the host volume wherry-receiver, which outlives every
+    # allocation: a job stop and run, or the group scaled to 0 and back, keeps it. Each receiver has its own volume.
+    volume "state" {
+      type            = "host"
+      source          = "wherry-receiver"
+      access_mode     = "single-node-single-writer"
+      attachment_mode = "file-system"
     }
 
     # The receiver's metrics listen on 9464 in the allocation's network namespace, mapped to a dynamic port on the
@@ -68,13 +71,19 @@ job "wherry-receiver" {
         EOT
       }
 
+      # The state volume at /var/lib/wherry, as in examples/nomad/config.yaml.
+      volume_mount {
+        volume      = "state"
+        destination = "/var/lib/wherry"
+      }
+
       # examples/nomad/config.yaml with the paths of this job and no credentials. A plugin profile that names no
       # credential takes NOMAD_TOKEN from the workload identity.
       template {
         destination = "local/config.yaml"
         data        = <<-EOT
           bundle: /secrets/receiver.bundle
-          state_dir: /alloc/data/state
+          state_dir: /var/lib/wherry/state
           plugin_dir: /usr/local/libexec/wherry/plugins
           metrics_addr: ":9464"
           drain_timeout: 25s

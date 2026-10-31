@@ -2,7 +2,8 @@
 # binary /usr/local/libexec/wherry/<version>/wherry and the plugin directory /usr/local/libexec/wherry/<version>/plugins.
 # /usr is in the exec driver's default chroot, so the client needs no chroot_env.
 # The receiver's bundle is the item bundle of the Nomad variable nomad/jobs/wherry-receiver, which the job's workload
-# identity reads. nomad/README.md has the commands that put it and run the job.
+# identity reads. Its state directory is on a dynamic host volume like examples/nomad/wherry-receiver.volume.hcl, owned
+# by the wherry user. nomad/README.md has the commands that create the volume, put the bundle and run the job.
 # Each receiver has its own bundle, so run one job, of count 1, per receiver.
 variable "version" {
   type        = string
@@ -25,11 +26,13 @@ job "wherry-receiver" {
   group "receiver" {
     count = 1
 
-    # The receiver's signing key is in its state directory on the allocation's data directory. The sticky disk with
-    # migrate carries it to the next allocation, as Nomad's ephemeral_disk documentation describes.
-    ephemeral_disk {
-      sticky  = true
-      migrate = true
+    # The receiver's state directory, with its signing key, is on the host volume wherry-receiver, which outlives every
+    # allocation: a job stop and run, or the group scaled to 0 and back, keeps it. Each receiver has its own volume.
+    volume "state" {
+      type            = "host"
+      source          = "wherry-receiver"
+      access_mode     = "single-node-single-writer"
+      attachment_mode = "file-system"
     }
 
     update {
@@ -68,13 +71,19 @@ job "wherry-receiver" {
         EOT
       }
 
+      # The state volume at /var/lib/wherry, as in examples/nomad/config.yaml.
+      volume_mount {
+        volume      = "state"
+        destination = "/var/lib/wherry"
+      }
+
       # examples/nomad/config.yaml with the paths of this job and no credentials. A plugin profile that names no
       # credential takes NOMAD_TOKEN from the workload identity.
       template {
         destination = "local/config.yaml"
         data        = <<-EOT
           bundle: /secrets/receiver.bundle
-          state_dir: /alloc/data/state
+          state_dir: /var/lib/wherry/state
           plugin_dir: /usr/local/libexec/wherry/${var.version}/plugins
           metrics_addr: ":9464"
           drain_timeout: 25s
