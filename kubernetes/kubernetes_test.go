@@ -1056,7 +1056,7 @@ func TestDispatchOverwritesStaleSecret(t *testing.T) {
 	dispatch(t, profile, testRun("stale"))
 	secret := api.secret(name)
 	if string(secret.Data["prompt"]) != "hello-prompt" || secret.Data["inputs.old"] != nil {
-		t.Fatalf("secret data %v; want the turn's alone", secret.Data)
+		t.Fatalf("secret data %v; want the run's alone", secret.Data)
 	}
 	if puts := paths(api.recorded(), http.MethodPut); len(puts) != 1 {
 		t.Fatalf("puts %v; want one update", puts)
@@ -1229,7 +1229,7 @@ func TestDispatchTimeoutDeletesThePod(t *testing.T) {
 		t.Fatal("the timed-out pod remains")
 	}
 	if api.secret(name) == nil {
-		t.Fatal("the timed-out turn's Secret was deleted; Release or the sweep removes it")
+		t.Fatal("the timed-out run's Secret was deleted; Release or the sweep removes it")
 	}
 }
 
@@ -2346,7 +2346,7 @@ func (api *fakeAPI) sweepPod(t *testing.T, profile *Kubernetes, name, owner stri
 	return pod.Name
 }
 
-// secretFor stores the turn Secret of name, created ago.
+// secretFor stores the run Secret of name, created ago.
 func (api *fakeAPI) secretFor(name, owner string, ago time.Duration) {
 	api.mu.Lock()
 	defer api.mu.Unlock()
@@ -2781,9 +2781,9 @@ func mustClient(t *testing.T, api *fakeAPI) *rest.Config {
 	return client
 }
 
-// turn runs a whole turn with every kind of material through the fake, and returns every request, pod spec, error and
+// wholeRun runs a whole run with every kind of material through the fake, and returns every request, pod spec, error and
 // log line it produced.
-func turn(t *testing.T) (string, []string) {
+func wholeRun(t *testing.T) (string, []string) {
 	t.Helper()
 	fast(t)
 	api := newFakeAPI(t)
@@ -2792,7 +2792,7 @@ func turn(t *testing.T) (string, []string) {
 	profile.logger = hclog.New(&hclog.LoggerOptions{Output: &logs, JSONFormat: true})
 	files := map[string][]byte{"data.csv": []byte("fetched-bytes-secret")}
 	store := newObjects(t, serveFiles(files))
-	run := fetchRun("turn", store, files)
+	run := fetchRun("run", store, files)
 	run.Model = "sonnet"
 	run.Inputs = []pluginsdk.File{{Name: "notes.md", Data: []byte("input-bytes-secret")}}
 	run.Credentials = []pluginsdk.Secret{
@@ -2813,7 +2813,7 @@ func turn(t *testing.T) (string, []string) {
 		t.Fatalf("collected %v, %v", collected, err)
 	}
 	errs = append(errs, err, profile.Release(context.Background(), run.ID), profile.Purge(context.Background(), run.ID), profile.Sweep(context.Background()))
-	// Turns whose fetches fail, by status, by connection, by certificate and by digest.
+	// Runs whose fetches fail, by status, by connection, by certificate and by digest.
 	failed := fetchRun("failed", newObjects(t, func(response http.ResponseWriter, _ *http.Request) {
 		http.Error(response, "SignatureDoesNotMatch", http.StatusForbidden)
 	}), files)
@@ -2868,7 +2868,7 @@ func turn(t *testing.T) (string, []string) {
 }
 
 func TestSecretsNeverInRequestURLs(t *testing.T) {
-	secretBodies, seen := turn(t)
+	secretBodies, seen := wholeRun(t)
 	for _, line := range seen {
 		for _, secret := range []string{"hello-prompt", "test-credential", "input-bytes-secret", "env-credential-secret", "second-env-credential-secret",
 			"task-credential-secret", "second-file-credential-secret", "fetched-bytes-secret", "signature-secret", "X-Amz-Signature", "output-bytes-secret", "unreachable.invalid"} {
@@ -2885,7 +2885,7 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 }
 
 func TestTokenNeverInErrorsOrLogs(t *testing.T) {
-	secretBodies, seen := turn(t)
+	secretBodies, seen := wholeRun(t)
 	for _, line := range append(seen, secretBodies) {
 		if strings.Contains(line, testToken) {
 			t.Fatalf("%q holds the token", line)
