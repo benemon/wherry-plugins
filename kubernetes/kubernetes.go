@@ -474,7 +474,7 @@ func (profile *Kubernetes) buildPod(run pluginsdk.Run, name string) *corev1.Pod 
 	}
 }
 
-// Dispatch starts a turn idempotently and returns once its agent has started or its pod has ended.
+// Dispatch starts a run idempotently and returns once its agent has started or its pod has ended.
 func (profile *Kubernetes) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
 	began := time.Now()
 	name := profile.jobName(run.ID)

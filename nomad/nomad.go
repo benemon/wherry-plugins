@@ -317,7 +317,7 @@ func (profile *Nomad) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsd
 	return pluginsdk.OutcomeCreated, handle, nil
 }
 
-// notStarted returns OutcomeNothingCreated, with the turn's material released, when Info finds no job;
+// notStarted returns OutcomeNothingCreated, with the run's material released, when Info finds no job;
 // otherwise OutcomeUnknown with cause and everything left in place. A failed release is an error, which
 // the core resolves with Lookup.
 func (profile *Nomad) notStarted(ctx context.Context, run pluginsdk.Run, cause error) (pluginsdk.Outcome, pluginsdk.Handle, error) {
