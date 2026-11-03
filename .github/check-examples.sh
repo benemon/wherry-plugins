@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Checks the receiver examples of the plugins named as arguments: each drain_timeout stays at least 10 seconds below
-# its platform's stop window, since a stop takes up to drain_timeout plus 5 seconds, and the Nomad jobs render the
-# bundle from their Nomad variable. Then fails on any tracked file outside a changelog that names a command or variable
-# wherry removed; the pattern is assembled from fragments so this file is scanned like every other.
+# its platform's stop window, since a stop takes up to drain_timeout plus 5 seconds, the Kubernetes receiver limits the
+# volume ownership pass, and the Nomad jobs render the bundle from their Nomad variable. Then fails on a shell script
+# in examples/, and on any tracked file outside a changelog that names a command or variable wherry removed; the
+# pattern is assembled from fragments so this file is scanned like every other.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 status=0
@@ -36,6 +37,8 @@ for plugin in "${plugins[@]}"; do
 	kubernetes)
 		window examples/kubernetes "$(value examples/kubernetes/config.yaml "$drain")" \
 			"$(value examples/kubernetes/receiver.yaml '^ *terminationGracePeriodSeconds: *\([^ #]*\).*$')"
+		grep -x '        fsGroupChangePolicy: OnRootMismatch' examples/kubernetes/receiver.yaml >/dev/null ||
+			failed "examples/kubernetes/receiver.yaml: an ownership pass on every mount opens signing.key to its group"
 		;;
 	nomad)
 		window examples/nomad/wherry-receiver.nomad.hcl "$(value examples/nomad/config.yaml "$drain")" \
@@ -58,6 +61,11 @@ for plugin in "${plugins[@]}"; do
 	*) failed "no example for $plugin" ;;
 	esac
 done
+
+if scripts=$(git ls-files 'examples/*.sh') && [ -n "$scripts" ]; then
+	echo "$scripts"
+	failed "a shell script is in the deployment path; use the platform's own tool"
+fi
 
 removed="wherry ""admin|WHERRY_""TRUST|wherry ""init\\b"
 if hits=$(git grep -n -P "$removed" -- . ':!*CHANGELOG*'); then
