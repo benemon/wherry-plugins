@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/benemon/wherry/pluginsdk v0.8.0-rc.2
 	github.com/hashicorp/go-hclog v1.6.3
-	github.com/hashicorp/nomad/api v0.0.0-20261016150620-df630b26e78a
+	github.com/hashicorp/nomad/api v0.0.0-20261029144823-d0f210429976
 	go.yaml.in/yaml/v3 v3.0.5
 )
 
