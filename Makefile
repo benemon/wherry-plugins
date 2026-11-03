@@ -26,16 +26,17 @@ build: ## Build every plugin (GOOS, GOARCH, BIN)
 	done
 
 .PHONY: check-cross
-# check-cross runs build for an OS other than this one and checks each binary's GOOS, so a recipe that drops the
-# exported GOOS fails here.
+# check-cross runs build for an OS and architecture other than the host's and checks each binary's, so a recipe that
+# drops the exported GOOS or GOARCH fails here. GOHOSTOS and GOHOSTARCH ignore an exported GOOS and GOARCH.
 check-cross: ## Fail on a cross build that ignores GOOS and GOARCH
 	@set -e; out=$$(mktemp -d); trap 'rm -rf "$$out"' EXIT; \
-	goos=linux; [ "$$(go env GOOS)" = linux ] && goos=darwin; \
-	GOOS=$$goos GOARCH=arm64 $(MAKE) --no-print-directory build BIN="$$out" PLUGINS="$(PLUGINS)"; \
+	goos=linux; [ "$$(go env GOHOSTOS)" = linux ] && goos=darwin; \
+	goarch=arm64; [ "$$(go env GOHOSTARCH)" = arm64 ] && goarch=amd64; \
+	GOOS=$$goos GOARCH=$$goarch $(MAKE) --no-print-directory build BIN="$$out" PLUGINS="$(PLUGINS)"; \
 	for p in $(PLUGINS); do \
 		want=$$goos; [ $$p = systemd ] && want=linux; \
 		got=$$(go version -m "$$out/wherry-plugin-$$p" | awk '$$2 ~ /^GO(OS|ARCH)=/ {printf "%s ", $$2}'); \
-		if [ "$$got" != "GOARCH=arm64 GOOS=$$want " ]; then echo "FAIL: wherry-plugin-$$p built as $$got, want GOOS=$$want GOARCH=arm64"; exit 1; fi; \
+		if [ "$$got" != "GOARCH=$$goarch GOOS=$$want " ]; then echo "FAIL: wherry-plugin-$$p built as $$got, want GOOS=$$want GOARCH=$$goarch"; exit 1; fi; \
 		echo "wherry-plugin-$$p: $$got"; \
 	done
 
