@@ -1,16 +1,15 @@
 # Receiver examples
 
-wherry gives every receiver two artefacts: its bundle, which
-`wherry operator receiver apply` writes to
-`bundles/receivers/<name>.bundle` in the operator's working directory, and
-its local configuration, `config.yaml`, whose elements, `bundle`,
-`ca_file`, `state_dir`, `plugin_dir`, `metrics_addr`, `drain_timeout` and
-`credentials`,
-[Receiver local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration)
-describes. Each example here holds the `config.yaml` for its platform and
-shows how the platform takes the two, with the platform's own tools. Its
-`drain_timeout` stays at least 10 seconds below the platform's stop window,
-which the example sets; `make check-examples` checks it.
+A receiver deploys from two files. `wherry operator receiver apply` writes its
+bundle to `bundles/receivers/<name>.bundle` in the operator's working
+directory. The operator writes its local configuration, `config.yaml`
+([Receiver local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration)).
+Each example here holds the `config.yaml` for its platform and shows how
+the platform takes the two files, with the platform's own tools. Each
+example sets its platform's stop window and keeps `drain_timeout` at least
+10 seconds below it
+([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)).
+`make check-examples` checks it.
 
 These examples show ways to run a receiver and its plugins. Adapt them to
 your environment. They are not published images or packages.
@@ -25,7 +24,7 @@ systemd credential. See the [systemd plugin's full run instructions](../systemd/
 ## Kubernetes
 
 This example builds a receiver image and applies, with `kubectl apply -k`,
-a Kustomize directory: a Deployment, service account, Role, state claim,
+a Kustomize directory: a Deployment, service account, Role, RoleBinding, state claim,
 ReadWriteMany runs claim and metrics Service, with a Secret generated from
 the bundle and a ConfigMap generated from the receiver's [local
 configuration](kubernetes/config.yaml). See the

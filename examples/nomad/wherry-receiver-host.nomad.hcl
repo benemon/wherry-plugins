@@ -12,12 +12,12 @@
 #   version=<version>
 #   sed "s|/<version>/|/$version/|" examples/nomad/config-host.yaml >config.yaml
 #   nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle config=@config.yaml
+#   nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl   # with ACLs enabled
 #   nomad job run -var version="$version" -var uid=<UID> -var gid=<GID> examples/nomad/wherry-receiver-host.nomad.hcl
-# and, with ACLs enabled, the plugin's ACL policy attached to the job as for the docker job. Upgrade or roll back by
-# installing the version on every client, recording its pin as for the docker job, then at once putting the item config
-# with the version's plugin_dir and running the job again with the version. Release archives fetched with artifact
-# blocks, each pinned by options.checksum from its release's verified checksums.txt, can take the place of the
-# installed binaries.
+# policy.hcl is the plugin's ACL policy, as for the docker job. Upgrade or roll back by installing the version on every client, recording its pin as for the docker job, then at once putting
+# the item config with the version's plugin_dir and running the job again with the version. Release archives fetched
+# with artifact blocks, each pinned by options.checksum from its release's verified checksums.txt, can take the place
+# of the installed binaries.
 variable "version" {
   type        = string
   description = "The directory under /usr/local/libexec/wherry that holds the wherry binary and its plugin directory."

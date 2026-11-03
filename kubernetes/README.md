@@ -6,9 +6,10 @@ every plugin profile of that plugin. The plugin runs each of the receiver's
 runs as one pod and one Secret in a namespace, with one directory on a
 ReadWriteMany claim that the receiver's pod and every agent pod mount.
 
-Kubernetes 1.31 or later is the platform. The plugin, the receiver image
-and the receiver's manifests also run unchanged on OpenShift 4.18 or later;
-[OpenShift](#openshift) lists what differs there.
+CI tests the plugin on Kubernetes 1.35, a kind node
+([End to end on kind](#end-to-end-on-kind)). The plugin, the receiver image
+and the receiver's manifests also run unchanged on OpenShift, which no CI
+lane tests; [OpenShift](#openshift) lists what differs there.
 
 ## Build
 
@@ -89,9 +90,10 @@ credentials:
     file: /etc/wherry/kubernetes-token/token
 ```
 
-The receiver refuses a credential file that its group can write or others
-can read, write or execute. A rotated token takes effect on the receiver's
-next start.
+The receiver checks the file's mode as
+[Credential sources](https://benemon.github.io/wherry/security#credential-sources)
+describes, and reads a rotated token at its next start
+([Platform credentials](https://benemon.github.io/wherry/configuration#platform-credentials)).
 
 | Variable | Effect |
 | --- | --- |
@@ -136,15 +138,16 @@ namespaces, nodes or other cluster-scoped objects. Pods it creates are
 admitted by the namespace's Pod Security level, so with the namespace at
 `restricted` none runs privileged or as root.
 
-Do not:
-
-- bind the Role's rules with a ClusterRoleBinding, or in any other
-  namespace;
-- run anything but the receiver and its agent pods in the namespace, since
-  the Role there reaches every Secret, and a pod reaches every claim;
-- lower the namespace's Pod Security level below `restricted`;
-- grant RBAC to the namespace's `default` service account. Agent pods run
-  as it with no token mounted, and no agent may hold any API right.
+> [!WARNING]
+> Do not:
+>
+> - bind the Role's rules with a ClusterRoleBinding, or in any other
+>   namespace;
+> - run anything but the receiver and its agent pods in the namespace, since
+>   the Role there reaches every Secret, and a pod reaches every claim;
+> - lower the namespace's Pod Security level below `restricted`;
+> - grant RBAC to the namespace's `default` service account. Agent pods run
+>   as it with no token mounted, and no agent may hold any API right.
 
 ## Settings
 
@@ -399,11 +402,8 @@ A first `ErrImagePull` and an unscheduled pod are waited on.
 
 ### Credential targets
 
-The run's Secret holds each environment target under `env.<variable>` and
-each file target under `credentials.<file>`, and a Secret key is at most 253
-bytes, so an environment target's name is at most 249 bytes and a file
-target's at most 241. Dispatch refuses a longer one. An environment target
-replaces a runtime `env` variable of the same name.
+The run's Secret carries the targets ([Secrets](#secrets)). An environment
+target replaces a runtime `env` variable of the same name.
 
 The agent sees:
 
@@ -417,16 +417,7 @@ The agent sees:
 - each S3 input in `/wherry/inputs`, as described in [S3 inputs](#s3-inputs);
 - each file target as a file in `/run/wherry/credentials/files`, mode 0440,
   owned by root and the pod's fsGroup, so the agent reads it through its
-  group and writes none. The run's Secret volume is the boundary: it is a
-  tmpfs that Kubernetes mounts into the run's pod alone, and the pod's
-  fsGroup is the only group that reads it. `ssh` refuses a private key that
-  others can read only when the agent's user owns it, so it accepts a
-  root-owned key at 0440. An agent image that uses `ssh` needs a passwd
-  entry for the agent's UID, since `ssh` and `ssh-keygen` refuse a UID
-  without one; on OpenShift, which picks a random UID, that takes
-  nss_wrapper or a writable `/etc/passwd`. The Secret volume is a different
-  filesystem from the agent's outputs, so the agent cannot hard-link a
-  credential into them;
+  group and writes none;
 - its run directory at `/wherry`, mode 0700 and owned by its UID, and its
   outputs directory, which it creates, at `/wherry/outputs`;
 - `HOME` set to `/wherry`;
@@ -438,6 +429,16 @@ The agent sees:
 - the variables of the plugin protocol's `AgentEnvironment`, as described
   in [Agent environment](#agent-environment);
 - the runtime's `command`, `args`, `env` and `resources`.
+
+The run's Secret volume is the boundary around the file targets. It is a
+tmpfs that Kubernetes mounts into the run's pod alone, and the pod's
+fsGroup is the only group that reads it. It is a different filesystem from
+the agent's outputs, so the agent cannot hard-link a credential into them.
+`ssh` refuses a private key that others can read only when the agent's
+user owns it, so it accepts a root-owned key at 0440. An agent image that
+uses `ssh` needs a passwd entry for the agent's UID, since `ssh` and
+`ssh-keygen` refuse a UID without one. On OpenShift, which picks a random
+UID, that takes nss_wrapper or a writable `/etc/passwd`.
 
 ### Runs claim
 
@@ -461,8 +462,7 @@ The plugin reads the agent's standard output from the logs API, which
 interleaves standard error with it. A line the agent writes to standard
 error in the middle of a standard output line splits that transcript line.
 Send standard error elsewhere in the agent's command, such as
-`2>"$HOME/agent.err"`. Kubernetes 1.32 adds `PodLogOptions.Stream` to read
-standard output alone, which removes this on a later minimum platform.
+`2>"$HOME/agent.err"`.
 
 The plugin follows the agent's log while it runs, and the kubelet's follow
 stream carries every byte across log rotation. A follow that starts from
@@ -512,15 +512,16 @@ exit code and its termination reason, such as 137 and `OOMKilled`.
 
 A run's Secret holds its prompt (`prompt`), each environment target
 (`env.<variable>`) and each file target (`credentials.<file>`), as raw
-bytes, so binary files arrive intact. The agent container mounts the prompt
-and file targets from it and reads environment targets through Secret key
-references.
+bytes, so binary files arrive intact. The agent container mounts the
+prompt and file targets from it and reads environment targets through
+Secret key references.
 
-The API server limits a Secret's values together to 1 MiB, and a key to
-253 characters. Dispatch refuses a run over either limit, creating nothing:
+The API server limits a Secret's values together to 1 MiB, and a key to 253
+characters. Dispatch refuses a run over either limit, creating nothing:
 
-- A file target name over 241 characters fails the run naming the target;
-  the receiver calls it an input.
+- An environment target name over 249 characters, or a file target name
+  over 241, fails the run naming the target; the receiver calls it an
+  input.
 - A prompt and target values over 1 MiB fail the run with
   `the prompt and credentials exceed the 1 MiB Secret limit`.
 
@@ -615,17 +616,18 @@ certificate` and each S3 output with `not uploaded: request failed`.
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
 over the runtime's `env` and removes those of
-[`AgentUnset`](https://github.com/benemon/wherry/blob/main/pluginsdk/pluginsdk.go)
+[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.8.0-rc.2/pluginsdk/pluginsdk.go#L249)
 from it, so no system, global or environment `git` configuration reaches
 the agent's clones. It removes them from the runtime's `env` only; keep
 them out of agent images' `ENV`. CA and proxy variables pass through as the
-operator sets them. This protects an agent that follows its prompt. An
-agent that runs commands of its own can undo this.
+operator sets them. A command the agent runs can set the variables again.
 
 ## Metrics
 
 The plugin speaks plugin protocol version 10, and a receiver of another
-protocol version refuses it, so upgrade it with the receiver. For each
+protocol version refuses it at its start, as
+[Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
+upgrade it with the receiver. For each
 plugin profile it reports these families, which the receiver serves on its
 `/metrics` with the plugin profile's name as `profile`:
 
@@ -636,10 +638,6 @@ plugin profile it reports these families, which the receiver serves on its
 | `wherry_plugin_sweep_deletions_total` | counter | `kind` | the plugin profile's pods a sweep purged (`job`), Secrets it deleted (`variable`) and run directories it removed (`directory`) |
 | `wherry_plugin_placement_seconds` | histogram | none | time from a Dispatch that creates the pod to the plugin seeing its agent container running |
 | `wherry_plugin_storage_free_bytes` | gauge | none | the free bytes of the runs claim at `runs_dir` |
-
-`wherry_plugin_storage_free_bytes` and the `directory` kind need a receiver
-that declares them; an older receiver drops their samples and counts each
-in `wherry_metrics_dropped_total`.
 
 An API call's class comes from its status: 401 and 403 are `denied`, 409
 `conflict`, 408, 504 and the `Timeout` and `ServerTimeout` reasons
@@ -695,9 +693,9 @@ Deployment and the metrics Service.
 their namespace and image and generates the Secret `wherry-receiver-bundle`
 from the receiver's bundle and the ConfigMap `wherry-receiver-config` from
 its local configuration,
-[`config.yaml`](../examples/kubernetes/config.yaml). The bundle and
-`config.yaml` are the two artefacts wherry gives every receiver; the
-Secret and the ConfigMap are how the cluster takes them. Kubernetes and
+[`config.yaml`](../examples/kubernetes/config.yaml). `wherry operator
+receiver apply` writes the bundle and the operator writes `config.yaml`;
+the Secret and the ConfigMap are how the cluster takes them. Kubernetes and
 OpenShift take the same manifests; only the namespace, the image and the
 Kafka bootstrap address differ.
 
@@ -872,10 +870,8 @@ the ConfigMap mounted read-only at `/etc/wherry/config`.
 - One replica with the `Recreate` strategy: a receiver is one principal
   with one key pair, and a rolling update would briefly run two.
 - `terminationGracePeriodSeconds: 30`, with `drain_timeout: 20s` in the
-  local configuration, so held runs go on for up to 20 seconds after
-  `SIGTERM` before the receiver releases them for adoption. A stop takes
-  up to `drain_timeout` plus 5 seconds, so `drain_timeout` stays at least
-  10 seconds below the window.
+  local configuration
+  ([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)).
 - The receiver's service account token is mounted, and the plugin, a child
   process of the receiver, uses it.
 - The pod sets no `runAsUser`, so it runs as the image's UID 1001 with
@@ -895,9 +891,10 @@ the ConfigMap mounted read-only at `/etc/wherry/config`.
   first mount, so the key keeps its mode across restarts. If the fsGroup
   ever changes, the pass runs again and the receiver stops with
   `chmod 600 it`; fix the modes. A restarted pod mounts the same volume
-  and is the same receiver. Losing the PVC loses the receiver's identity; provision it
-  again under a new name, as the operator guide says for a lost state
-  directory.
+  and is the same receiver. Losing the PVC loses the receiver's identity;
+  provision it again under a new name, as
+  [Replace a lost key](https://benemon.github.io/wherry/operations#replace-a-lost-key)
+  says for a lost state directory.
 - The runs claim `wherry-runs` is `ReadWriteMany` and mounted at
   `/var/lib/wherry/runs`. Its storage class's default applies; set one that
   provisions `ReadWriteMany` volumes ([Runs claim](#runs-claim)). The
@@ -922,7 +919,8 @@ the ConfigMap mounted read-only at `/etc/wherry/config`.
 
 The pool's Kafka runs in the same cluster under Strimzi, with Kafka 4.3, share groups enabled, and a
 `tls` internal listener with `authentication: scram-sha-512` and
-`authorization: simple`. The operator guide's Strimzi notes apply. Where
+`authorization: simple`. The operator guide's
+[Strimzi](https://benemon.github.io/wherry/operations#strimzi) notes apply. Where
 the listener sets `networkPolicyPeers`, they admit the receiver's
 namespace.
 
@@ -934,7 +932,9 @@ Service names. The bundle carries no CA: the receiver trusts the broker
 through `config.yaml`'s `ca_file`, the Strimzi cluster CA
 (`<cluster>-cluster-ca-cert`, key `ca.crt`) copied in as `kafka-ca.crt`.
 
-Strimzi renews its cluster CA, and nothing renews the receiver's copy:
+Strimzi renews its cluster CA
+([Certificate renewal](https://strimzi.io/docs/operators/latest/deploying#con-certificate-renewal-str)),
+and nothing renews the receiver's copy:
 
 1. When the renewal begins, Strimzi keeps the old certificate in
    `<cluster>-cluster-ca-cert` beside the new `ca.crt`. Write both
@@ -960,18 +960,14 @@ runs the release binary, whose pin is its line in the release's verified
 [Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
 prints it.
 
-The receiver's record holds one pin per plugin type, and the receiver
-refuses a binary it does not pin. An upgrade or a rollback is therefore a
-change of pin followed at once by a change of image:
+An upgrade or a rollback records the new pin, then rolls the image at
+once:
 
 1. Set the new image's pin as `plugin_sha256.kubernetes` in the receiver's
-   file and run `wherry operator receiver apply kubernetes-1`. The
-   running receiver drains on the new record and exits; until the new image
-   runs, its restarts refuse the old binary.
+   file and run `wherry operator receiver apply kubernetes-1`
+   ([Change a receiver's configuration](https://benemon.github.io/wherry/operations#change-a-receiver-s-configuration)).
+   Until the new image runs, the receiver's restarts refuse the old binary.
 2. Set `images` to the new image and run `kubectl apply -k`.
-
-Rolling the image first starts a receiver whose binary its record does not
-pin, which exits until the pin is recorded.
 
 ### Kubernetes and Nomad together
 
@@ -993,8 +989,11 @@ The image and the Kustomize directory are the same on OpenShift, which
 ships `kubectl` beside `oc`. What differs:
 
 - Create the namespace with `oc new-project wherry`. OpenShift sets the
-  namespace's Pod Security labels itself and admits pods by SCC: the
-  receiver's pod and agent pods run under restricted-v2. Do not allow the
+  namespace's
+  [Pod Security labels](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/authentication_and_authorization/understanding-and-managing-pod-security-admission)
+  itself and admits pods by
+  [SCC](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/authentication_and_authorization/managing-pod-security-policies):
+  the receiver's pod and agent pods run under restricted-v2. Do not allow the
   receiver's service account any SCC beyond restricted-v2; OpenShift admits
   a pod against the SCCs its creator may use as well as its service
   account's, so `anyuid` or `privileged` would admit agent pods running as
@@ -1092,7 +1091,8 @@ the same.
 
 [`test/e2e`](test/e2e) runs a receiver from the receiver image and the
 plugin together on a kind cluster, as the `e2e` workflow does for every
-change to `kubernetes/`, the root `Makefile` or the workflow. Each step is
+change to `kubernetes/`, `examples/kubernetes/`, the root `Makefile`,
+`.github/changed.sh` or the workflow. Each step is
 a script; with Docker, kind and kubectl on a Linux machine, and the wherry
 release the workflow pins:
 

@@ -63,7 +63,7 @@ for plugin in "${plugins[@]}"; do
 			kustomize=$(mktemp -d)
 			cp examples/kubernetes/* "$kustomize"
 			touch "$kustomize/receiver.bundle"
-			sed -i 's|^  # - path: fsgroup.yaml$|  - path: fsgroup.yaml|' "$kustomize/kustomization.yaml"
+			sed 's|^  # - path: fsgroup.yaml$|  - path: fsgroup.yaml|' examples/kubernetes/kustomization.yaml >"$kustomize/kustomization.yaml"
 			if rendered=$(kubectl kustomize "$kustomize"); then
 				grep -E -x ' +fsGroup: [0-9]+' <<<"$rendered" >/dev/null &&
 					grep -E -x ' +fsGroupChangePolicy: OnRootMismatch' <<<"$rendered" >/dev/null ||

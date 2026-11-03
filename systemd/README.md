@@ -18,10 +18,9 @@ The plugin builds against the tagged plugin protocol module,
 make build
 ```
 
-This writes `wherry-plugin-systemd` at the repository root. The plugin
-builds for Linux alone; on another OS, set `GOOS=linux GOARCH=amd64`.
-`make check` runs the CI gates, and the release build,
-`systemd/.goreleaser.yaml`, writes release archives for linux amd64 and
+This writes `wherry-plugin-systemd` at the repository root, built for
+Linux on any OS; `GOARCH` sets the architecture. `make check` runs the CI
+gates, and the release build, `systemd/.goreleaser.yaml`, writes release archives for linux amd64 and
 arm64, and `checksums.txt`, into `dist` (see the [repository README](../README.md)).
 
 ## Install
@@ -364,21 +363,15 @@ whose unit is not starting. The plugin never uses `SetCredential=`, whose
 value any local user reads from the unit's properties and its transient
 unit file.
 
-systemd copies the targets into the unit's store,
-`/run/credentials/<unit>/` on the host, readable by root and the run's
-user, until the unit stops. The agent sees the store read-only at
-`/run/wherry/credentials`, on a separate filesystem from `/wherry`, so the
-agent cannot hard-link a target into its outputs. Where the store is a
-ramfs, as systemd 252 mounts it first, each file is 0400 owned by the
-agent's UID in a 0500 directory it owns. Where the store is a tmpfs, as
-systemd 255 mounts it first on Linux 6.3 and later, each file is root
-0400 in a root 0500 directory, and an ACL entry gives the agent's UID
-read access, and search on the directory; `stat` shows them as 0440 and
-0550, since the group bits of a file with an ACL are its mask, and the
-owning group's entry grants nothing. Either way only root and the agent's
-UID read the targets, and the unit's credential store is the boundary that
-enforces it. `ssh` accepts the key in both.
-A run without targets sees `/run/wherry/credentials` empty.
+systemd copies the targets into the unit's credential store,
+`/run/credentials/<unit>/` on the host, until the unit stops; the
+store's file system and modes are systemd's
+([Credentials](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Credentials)).
+Only root and the agent's UID read the targets, and the unit's credential
+store is the boundary that enforces it. The agent sees the store read-only
+at `/run/wherry/credentials`, on a separate filesystem from `/wherry`, so
+the agent cannot hard-link a target into its outputs. `ssh` accepts a key
+from it. A run without targets sees `/run/wherry/credentials` empty.
 
 For each environment target, a shell wrapper reads
 `/run/wherry/credentials/.env.<variable>`, keeps trailing newlines, and
@@ -446,11 +439,10 @@ includes the fetch time.
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
 over the runtime's `env` and removes those of
-[`AgentUnset`](https://github.com/benemon/wherry/blob/main/pluginsdk/pluginsdk.go)
+[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.8.0-rc.2/pluginsdk/pluginsdk.go#L249)
 from it, so no system, global or environment `git` configuration reaches
 the agent's clones. CA and proxy variables pass through as the operator
-sets them. This protects an agent that follows its prompt. An agent that
-runs commands of its own can undo this.
+sets them. A command the agent runs can set the variables again.
 
 Any local user, an agent included, reads every unit's `Description`,
 `ExecStart` and `Environment` over the system bus, so run IDs, plugin
@@ -519,11 +511,11 @@ The receiver runs as root under its own unit,
 as `wherry receiver run --config-file /etc/wherry/config.yaml`, and
 its agent units run in [`examples/systemd/wherry.slice`](../examples/systemd/wherry.slice),
 outside the receiver's cgroup. Restarting or stopping the receiver never
-touches them: on `SIGTERM` the receiver lets held runs go on for up to the
-local configuration's 20-second `drain_timeout`, then exits without
-stopping its jobs, and the restarted receiver adopts them. A stop takes up
-to `drain_timeout` plus 5 seconds, so `drain_timeout` stays at least 10
-seconds below the unit's `TimeoutStopSec=30`. A run is adopted only by a
+touches them: the receiver exits without stopping its jobs, and the
+restarted receiver adopts them. The local configuration's `drain_timeout`
+is 20 seconds and the unit's `TimeoutStopSec=` is 30
+([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)).
+A run is adopted only by a
 receiver with the same plugin profile on the same host, so give each systemd
 receiver a pool of its own.
 
@@ -533,8 +525,9 @@ From the repository root:
 
 1. Install `/usr/local/bin/wherry` (root, 0755) and
    `/usr/local/libexec/wherry/plugins/wherry-plugin-systemd` (root, 0755, in
-   a root 0755 directory). A binary copied from a home directory keeps the
-   `user_home_t` label, so restore the labels:
+   a root 0755 directory). On a host with SELinux enabled, a binary copied
+   from a home directory keeps the `user_home_t` label, so restore the
+   labels:
 
    ```sh
    restorecon -Rv /usr/local/bin /usr/local/libexec/wherry
@@ -574,25 +567,30 @@ From the repository root:
    the receiver's local configuration,
    [`examples/systemd/config.yaml`](../examples/systemd/config.yaml), which
    names the bundle, the state directory, the plugin directory and the
-   metrics address, adding `ca_file` for a broker under a private CA:
+   metrics address:
 
    ```sh
    install -D -m 0600 <working directory>/bundles/receivers/<name>.bundle /etc/wherry/receiver.bundle
    install -m 0600 examples/systemd/config.yaml /etc/wherry/config.yaml
    ```
 
-   The unit takes the bundle with `LoadCredential=bundle:/etc/wherry/receiver.bundle`,
-   systemd's mechanism for a service's secrets: at each start systemd
-   copies the file, read-only, into the unit's credential directory, a
-   memory file system that is never swapped, that only the unit's processes
-   and root see, and that goes when the unit stops. `config.yaml` names the
-   bundle at that directory's path, `/run/credentials/wherry-receiver.service/bundle`;
-   a YAML file cannot expand `$CREDENTIALS_DIRECTORY`. The same mechanism
-   keeps the bundle encrypted on disk:
-   [`systemd-creds encrypt`](https://www.freedesktop.org/software/systemd/man/latest/systemd-creds.html)
-   it and load it with `LoadCredentialEncrypted=` in place of
-   `LoadCredential=`. A new bundle takes effect at the next
-   `systemctl restart wherry-receiver`.
+   For a broker under a private CA, install the CA's certificates and
+   uncomment `ca_file: /etc/wherry/kafka-ca.pem` in
+   `/etc/wherry/config.yaml`:
+
+   ```sh
+   install -m 0644 <CA file> /etc/wherry/kafka-ca.pem
+   ```
+
+   The unit takes the bundle as a systemd
+   [credential](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Credentials),
+   `LoadCredential=bundle:/etc/wherry/receiver.bundle`. `config.yaml`
+   names it at the credential directory's path,
+   `/run/credentials/wherry-receiver.service/bundle`, since a YAML file
+   cannot expand `$CREDENTIALS_DIRECTORY`. To keep the bundle encrypted on
+   disk, [`systemd-creds encrypt`](https://www.freedesktop.org/software/systemd/man/latest/systemd-creds.html)
+   it and load it with `LoadCredentialEncrypted=`. A new bundle takes
+   effect at the next `systemctl restart wherry-receiver`.
 
 7. Start the receiver:
 
@@ -609,20 +607,16 @@ with a `firewalld` rule.
 The pin is the SHA-256 of the release binary, its line in the release's
 verified `checksums.txt`, as
 [Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
-prints it:
+prints it.
 
-```sh
-awk -v name="wherry-plugin-systemd_${version}_linux_${arch}" '$2 == name {print $1}' checksums.txt
-```
-
-The receiver's record holds one pin per plugin type, and the receiver
-refuses a binary it does not pin. An upgrade or a rollback is therefore a
-change of pin followed at once by a change of binary:
+An upgrade or a rollback records the new pin, then installs the new
+binary at once:
 
 1. Set the new binary's pin as `plugin_sha256.systemd` in the receiver's
-   file and run `wherry operator receiver apply <name>`. The running
-   receiver drains on the new record and exits; until the new binary is
-   installed, its restarts refuse the old one.
+   file and run `wherry operator receiver apply <name>`
+   ([Change a receiver's configuration](https://benemon.github.io/wherry/operations#change-a-receiver-s-configuration)).
+   Until the new binary is installed, the receiver's restarts refuse the
+   old one.
 2. Install the new binary as
    `/usr/local/libexec/wherry/plugins/wherry-plugin-systemd`; the next
    restart runs it.

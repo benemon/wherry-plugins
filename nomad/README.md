@@ -388,10 +388,14 @@ The agent task receives:
 
 The plugin collects outputs from `$NOMAD_TASK_DIR/outputs` through the
 allocation filesystem API, once the allocation is terminal. A stop cut
-short returns before its allocation ends, so the plugin reads the allocation
-every 500 ms until it is terminal, for as long as the receiver's collect
-call lasts, and returns an error when the call ends with the allocation
-still running. It lists the whole tree first, and refuses it, reading
+short returns before its allocation ends, so the plugin waits on the
+allocation with
+[blocking queries](https://developer.hashicorp.com/nomad/api-docs#blocking-queries)
+on its modify index until it is terminal, for as long as the receiver's
+collect call lasts. A call that ends first fails with
+`the allocation is still running`. A lost allocation fails with
+`the allocation was lost`, since its client, and the task's filesystem
+with it, is gone. The plugin lists the whole tree first, and refuses it, reading
 nothing, when it holds more entries than the receiver's limit. The
 listing's modes come from `lstat`, so a link shows as a link; the API's
 stat and read follow links, and both block on a FIFO, so the plugin reads
@@ -421,9 +425,10 @@ The prompt and the credentials travel in the Nomad variable
 identity reads. The run's input files travel in the job's group variable,
 `nomad/jobs/agent-<pool>-<run>/agent`, one item per file holding
 its base64 encoding, since Nomad's implicit workload policy reads no deeper
-path. Nomad caps a variable at 64 KiB of item names and values together,
-so a run's inputs hold about 48 KiB. The plugin declares an inline limit
-of 45056 bytes, which leaves 4 KiB for the inputs' names, so a host sends
+path. Nomad caps a variable's size
+([Variables API](https://developer.hashicorp.com/nomad/api-docs/variables/variables)),
+and base64 adds a third. The plugin declares an inline limit of 45056
+bytes, which leaves room for the inputs' names, so a host sends
 larger inputs through the pool's bucket; Dispatch refuses a run over the
 variable, naming the input, and creates nothing. The plugin deletes the
 variables when the run ends.
@@ -455,8 +460,8 @@ of the agent task. It sets `options.checksum` to `sha256:<hex>`,
 whose name ends like an archive.
 
 Nomad verifies the checksum after the download ends, so it bounds neither
-the redirect target nor the size. On Nomad 2.0.7 the fetcher follows
-redirects and no artifact option stops it, so the checksum alone holds a
+the redirect target nor the size. On Nomad 2.1.1, the release CI runs, the
+fetcher follows redirects and no artifact option stops it, so the checksum alone holds a
 redirected fetch to the object. The Nomad client's `artifact.http_max_size`
 is the only limit on how much a fetch reads. A fetch that fails or does not
 verify fails the task before it starts, and the plugin reports the job
@@ -475,11 +480,10 @@ system, global or environment `git` configuration reaches the agent's
 clones. It removes them from the runtime's `env` only. A `raw_exec` task
 also inherits the Nomad client's environment, a container keeps its
 image's `ENV`, and Nomad offers no way to unset either. Add the variables
-of [`AgentUnset`](https://github.com/benemon/wherry/blob/main/pluginsdk/pluginsdk.go)
+of [`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.8.0-rc.2/pluginsdk/pluginsdk.go#L249)
 to the client's `env.denylist`, and keep them out of agent images. CA and
-proxy variables pass through as the operator sets them. This protects an
-agent that follows its prompt. An agent that runs commands of its own can
-undo this.
+proxy variables pass through as the operator sets them. A command the
+agent runs can set the variables again.
 
 ## Metrics
 
@@ -585,7 +589,8 @@ This is the primary shape, and the CI lane `nomad` in
 back. [`examples/nomad/wherry-receiver.nomad.hcl`](../examples/nomad/wherry-receiver.nomad.hcl)
 runs the image the [Containerfile](../examples/nomad/Containerfile) builds.
 
-The job takes the two artefacts wherry gives every receiver from the
+The job takes the receiver's bundle, which `wherry operator receiver apply`
+writes, and its local configuration, which the operator writes, from the
 Nomad variable `nomad/jobs/wherry-receiver`, which its workload identity
 reads, through `template` blocks: the item `bundle`, the receiver's bundle,
 into the task's secrets directory, owned by the image's user with mode
@@ -595,9 +600,8 @@ into the task's secrets directory, owned by the image's user with mode
 running as root. For a broker under a private CA, the item `ca` holds the
 CA, which the job renders to `/secrets/kafka-ca.pem`, and `config.yaml`'s
 `ca_file` names it. The task's `kill_timeout` is 30 seconds, and the local
-configuration's `drain_timeout` is 20 seconds: a stop takes up to
-`drain_timeout` plus 5 seconds, so `drain_timeout` stays at least 10
-seconds below the window.
+configuration's `drain_timeout` is 20 seconds
+([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)).
 
 #### The state volume
 
@@ -632,8 +636,9 @@ Each receiver has its own volume, and two receivers never share a state
 directory. For another receiver, copy the volume specification and the job
 with another volume name. Losing the volume, or the client that holds it,
 loses the receiver's identity; provision the receiver again under a new
-name, as the operator guide says for a lost state directory, and create a
-new volume for it.
+name, as
+[Replace a lost key](https://benemon.github.io/wherry/operations#replace-a-lost-key)
+says for a lost state directory, and create a new volume for it.
 
 A client can instead declare a static
 [`host_volume`](https://developer.hashicorp.com/nomad/docs/configuration/client#host_volume-block)
@@ -697,16 +702,16 @@ pushed where the clients pull from, and, with ACLs enabled, the
      config=@examples/nomad/config.yaml
    ```
 
-4. Run the job with the image:
-
-   ```sh
-   nomad job run -var image=registry.example.com/wherry-receiver:<version> examples/nomad/wherry-receiver.nomad.hcl
-   ```
-
-5. With ACLs enabled, attach the ACL policy to the job:
+4. With ACLs enabled, attach the ACL policy to the job before it runs:
 
    ```sh
    nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
+   ```
+
+5. Run the job with the image:
+
+   ```sh
+   nomad job run -var image=registry.example.com/wherry-receiver:<version> examples/nomad/wherry-receiver.nomad.hcl
    ```
 
 A changed item restarts the task, which reads the new bundle or local
@@ -730,20 +735,18 @@ takes its line in the release's verified `checksums.txt`, as
 [Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
 prints it.
 
-The receiver's record holds one pin per plugin type, and the receiver
-refuses a binary it does not pin. An upgrade or a rollback is therefore a
-change of pin followed at once by a change of image:
+An upgrade or a rollback records the new pin, then runs the new image at
+once:
 
 1. Set the new image's pin as `plugin_sha256.nomad` in the receiver's file
-   and run `wherry operator receiver apply nomad-1`. The running receiver
-   drains on the new record and exits; until the new image runs, its
-   restarts refuse the old binary.
+   and run `wherry operator receiver apply nomad-1`
+   ([Change a receiver's configuration](https://benemon.github.io/wherry/operations#change-a-receiver-s-configuration)).
+   Until the new image runs, the receiver's restarts refuse the old binary.
 2. Run the job with the new image.
 
-Running the new image first starts a receiver whose binary its record
-does not pin, which exits until the pin is recorded. The CI lane's
-upgrade and rollback follow this order, and read the recorded pin back
-with `wherry operator receiver show nomad-1` before running the job.
+The CI lane's upgrade and rollback follow this order, and read the
+recorded pin back with `wherry operator receiver show nomad-1` before
+running the job.
 
 ### The exec driver
 

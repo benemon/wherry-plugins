@@ -14,8 +14,8 @@ for their installation.
 | [`kubernetes`](kubernetes) | `wherry-plugin-kubernetes` | `kubernetes` |
 | [`systemd`](systemd) | `wherry-plugin-systemd` | `systemd` |
 
-The plugins name the settings of a plugin profile's `config` alike; units
-follow each platform:
+The three plugins share the shape of a plugin profile's `config`. Names
+and units differ where the platform's differ:
 
 | Setting | Nomad | Kubernetes | systemd |
 | --- | --- | --- | --- |
@@ -34,20 +34,14 @@ every plugin, `make check` runs the CI gates, and
 image example in [`examples/`](examples/).
 
 A `<plugin>/v*` tag releases that plugin through
-`.github/workflows/release.yml`. The workflow checks that the tagged
-commit's `ci` run on `main` passed and runs goreleaser as a snapshot
-versioned from the tag less its prefix. The snapshot writes the archives,
-`checksums.txt`, an SBOM per archive (`<archive>.sbom.json`) and the
-cosign signature over the checksums. `checksums.txt` also lists the
-SHA-256 of each plugin binary as `wherry-plugin-<plugin>_<version>_<os>_<arch>`,
-the pin a receiver's file gives as `plugin_sha256` to
-`wherry operator receiver apply`; the binary is published inside its
-archive. The workflow then attests the
-archives' provenance and publishes them against the tag. Its `verify` job
-checks the published release as a user receives it: the assets against
-`.github/release-contents/<plugin>.txt`, the checksums' signature and the
-checksums, and each archive's attestation. The same build,
-unsigned, writes them into `dist` locally:
+`.github/workflows/release.yml`, once the tagged commit's `ci` run on
+`main` has passed. The release assets are the archives, an SBOM per
+archive (`<archive>.sbom.json`), `checksums.txt` and its cosign signature,
+`checksums.txt.sigstore.json`. Each archive also carries a provenance
+attestation. `checksums.txt` lists the SHA-256 of each plugin binary as
+`wherry-plugin-<plugin>_<version>_<os>_<arch>`: the pin a receiver's file
+gives as `plugin_sha256` to `wherry operator receiver apply`. The same
+build, unsigned, writes the assets into `dist` locally:
 
 ```sh
 VERSION=<version> goreleaser release --snapshot --clean --skip=sign --config <directory>/.goreleaser.yaml
