@@ -425,9 +425,10 @@ The prompt and the credentials travel in the Nomad variable
 identity reads. The run's input files travel in the job's group variable,
 `nomad/jobs/agent-<pool>-<run>/agent`, one item per file holding
 its base64 encoding, since Nomad's implicit workload policy reads no deeper
-path. Nomad caps a variable at 64 KiB of item names and values together,
-so a run's inputs hold about 48 KiB. The plugin declares an inline limit
-of 45056 bytes, which leaves 4 KiB for the inputs' names, so a host sends
+path. Nomad caps a variable's size
+([Variables API](https://developer.hashicorp.com/nomad/api-docs/variables/variables)),
+and base64 adds a third. The plugin declares an inline limit of 45056
+bytes, which leaves room for the inputs' names, so a host sends
 larger inputs through the pool's bucket; Dispatch refuses a run over the
 variable, naming the input, and creates nothing. The plugin deletes the
 variables when the run ends.
@@ -481,9 +482,8 @@ also inherits the Nomad client's environment, a container keeps its
 image's `ENV`, and Nomad offers no way to unset either. Add the variables
 of [`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.8.0-rc.2/pluginsdk/pluginsdk.go#L249)
 to the client's `env.denylist`, and keep them out of agent images. CA and
-proxy variables pass through as the operator sets them. This protects an
-agent that follows its prompt. An agent that runs commands of its own can
-undo this.
+proxy variables pass through as the operator sets them. A command the
+agent runs can set the variables again.
 
 ## Metrics
 
@@ -735,20 +735,18 @@ takes its line in the release's verified `checksums.txt`, as
 [Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
 prints it.
 
-The receiver's record holds one pin per plugin type, and the receiver
-refuses a binary it does not pin. An upgrade or a rollback is therefore a
-change of pin followed at once by a change of image:
+An upgrade or a rollback records the new pin, then runs the new image at
+once:
 
 1. Set the new image's pin as `plugin_sha256.nomad` in the receiver's file
-   and run `wherry operator receiver apply nomad-1`. The running receiver
-   drains on the new record and exits; until the new image runs, its
-   restarts refuse the old binary.
+   and run `wherry operator receiver apply nomad-1`
+   ([Change a receiver's configuration](https://benemon.github.io/wherry/operations#change-a-receiver-s-configuration)).
+   Until the new image runs, the receiver's restarts refuse the old binary.
 2. Run the job with the new image.
 
-Running the new image first starts a receiver whose binary its record
-does not pin, which exits until the pin is recorded. The CI lane's
-upgrade and rollback follow this order, and read the recorded pin back
-with `wherry operator receiver show nomad-1` before running the job.
+The CI lane's upgrade and rollback follow this order, and read the
+recorded pin back with `wherry operator receiver show nomad-1` before
+running the job.
 
 ### The exec driver
 

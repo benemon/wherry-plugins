@@ -18,10 +18,9 @@ The plugin builds against the tagged plugin protocol module,
 make build
 ```
 
-This writes `wherry-plugin-systemd` at the repository root. The plugin
-builds for Linux alone; on another OS, set `GOOS=linux GOARCH=amd64`.
-`make check` runs the CI gates, and the release build,
-`systemd/.goreleaser.yaml`, writes release archives for linux amd64 and
+This writes `wherry-plugin-systemd` at the repository root, built for
+Linux on any OS; `GOARCH` sets the architecture. `make check` runs the CI
+gates, and the release build, `systemd/.goreleaser.yaml`, writes release archives for linux amd64 and
 arm64, and `checksums.txt`, into `dist` (see the [repository README](../README.md)).
 
 ## Install
@@ -443,8 +442,7 @@ over the runtime's `env` and removes those of
 [`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.8.0-rc.2/pluginsdk/pluginsdk.go#L249)
 from it, so no system, global or environment `git` configuration reaches
 the agent's clones. CA and proxy variables pass through as the operator
-sets them. This protects an agent that follows its prompt. An agent that
-runs commands of its own can undo this.
+sets them. A command the agent runs can set the variables again.
 
 Any local user, an agent included, reads every unit's `Description`,
 `ExecStart` and `Environment` over the system bus, so run IDs, plugin
@@ -584,18 +582,15 @@ From the repository root:
    install -m 0644 <CA file> /etc/wherry/kafka-ca.pem
    ```
 
-   The unit takes the bundle with `LoadCredential=bundle:/etc/wherry/receiver.bundle`,
-   systemd's mechanism for a service's secrets: at each start systemd
-   copies the file, read-only, into the unit's credential directory, a
-   memory file system that is never swapped, that only the unit's processes
-   and root see, and that goes when the unit stops. `config.yaml` names the
-   bundle at that directory's path, `/run/credentials/wherry-receiver.service/bundle`;
-   a YAML file cannot expand `$CREDENTIALS_DIRECTORY`. The same mechanism
-   keeps the bundle encrypted on disk:
-   [`systemd-creds encrypt`](https://www.freedesktop.org/software/systemd/man/latest/systemd-creds.html)
-   it and load it with `LoadCredentialEncrypted=` in place of
-   `LoadCredential=`. A new bundle takes effect at the next
-   `systemctl restart wherry-receiver`.
+   The unit takes the bundle as a systemd
+   [credential](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Credentials),
+   `LoadCredential=bundle:/etc/wherry/receiver.bundle`. `config.yaml`
+   names it at the credential directory's path,
+   `/run/credentials/wherry-receiver.service/bundle`, since a YAML file
+   cannot expand `$CREDENTIALS_DIRECTORY`. To keep the bundle encrypted on
+   disk, [`systemd-creds encrypt`](https://www.freedesktop.org/software/systemd/man/latest/systemd-creds.html)
+   it and load it with `LoadCredentialEncrypted=`. A new bundle takes
+   effect at the next `systemctl restart wherry-receiver`.
 
 7. Start the receiver:
 
@@ -612,20 +607,16 @@ with a `firewalld` rule.
 The pin is the SHA-256 of the release binary, its line in the release's
 verified `checksums.txt`, as
 [Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
-prints it:
+prints it.
 
-```sh
-awk -v name="wherry-plugin-systemd_${version}_linux_${arch}" '$2 == name {print $1}' checksums.txt
-```
-
-The receiver's record holds one pin per plugin type, and the receiver
-refuses a binary it does not pin. An upgrade or a rollback is therefore a
-change of pin followed at once by a change of binary:
+An upgrade or a rollback records the new pin, then installs the new
+binary at once:
 
 1. Set the new binary's pin as `plugin_sha256.systemd` in the receiver's
-   file and run `wherry operator receiver apply <name>`. The running
-   receiver drains on the new record and exits; until the new binary is
-   installed, its restarts refuse the old one.
+   file and run `wherry operator receiver apply <name>`
+   ([Change a receiver's configuration](https://benemon.github.io/wherry/operations#change-a-receiver-s-configuration)).
+   Until the new binary is installed, the receiver's restarts refuse the
+   old one.
 2. Install the new binary as
    `/usr/local/libexec/wherry/plugins/wherry-plugin-systemd`; the next
    restart runs it.
