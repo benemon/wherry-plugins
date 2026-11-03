@@ -702,16 +702,16 @@ pushed where the clients pull from, and, with ACLs enabled, the
      config=@examples/nomad/config.yaml
    ```
 
-4. Run the job with the image:
-
-   ```sh
-   nomad job run -var image=registry.example.com/wherry-receiver:<version> examples/nomad/wherry-receiver.nomad.hcl
-   ```
-
-5. With ACLs enabled, attach the ACL policy to the job:
+4. With ACLs enabled, attach the ACL policy to the job before it runs:
 
    ```sh
    nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
+   ```
+
+5. Run the job with the image:
+
+   ```sh
+   nomad job run -var image=registry.example.com/wherry-receiver:<version> examples/nomad/wherry-receiver.nomad.hcl
    ```
 
 A changed item restarts the task, which reads the new bundle or local

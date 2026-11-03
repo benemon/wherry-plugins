@@ -138,15 +138,16 @@ namespaces, nodes or other cluster-scoped objects. Pods it creates are
 admitted by the namespace's Pod Security level, so with the namespace at
 `restricted` none runs privileged or as root.
 
-Do not:
-
-- bind the Role's rules with a ClusterRoleBinding, or in any other
-  namespace;
-- run anything but the receiver and its agent pods in the namespace, since
-  the Role there reaches every Secret, and a pod reaches every claim;
-- lower the namespace's Pod Security level below `restricted`;
-- grant RBAC to the namespace's `default` service account. Agent pods run
-  as it with no token mounted, and no agent may hold any API right.
+> [!WARNING]
+> Do not:
+>
+> - bind the Role's rules with a ClusterRoleBinding, or in any other
+>   namespace;
+> - run anything but the receiver and its agent pods in the namespace, since
+>   the Role there reaches every Secret, and a pod reaches every claim;
+> - lower the namespace's Pod Security level below `restricted`;
+> - grant RBAC to the namespace's `default` service account. Agent pods run
+>   as it with no token mounted, and no agent may hold any API right.
 
 ## Settings
 
