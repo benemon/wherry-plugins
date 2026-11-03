@@ -161,7 +161,7 @@ the `config` before the plugin sees it. The plugin reads the merged
 | --- | --- | --- |
 | `address` | in-cluster | API server URL; must be `https://` |
 | `ca_file` | the service account's CA when `address` is empty; the system roots otherwise | CA bundle for the API, a path on the receiver |
-| `namespace` | required | namespace for agent pods and their Secrets; a DNS-1123 label |
+| `namespace` | in the cluster with `address` unset, the receiver's own, from its service account's `/var/run/secrets/kubernetes.io/serviceaccount/namespace`; required otherwise | namespace for agent pods and their Secrets; a DNS-1123 label |
 | `node_selector` | none | node labels agent pods require |
 | `tolerations` | none | taints agent pods tolerate |
 | `runs_claim` | required | the ReadWriteMany PersistentVolumeClaim in `namespace` that agent pods mount; a claim name |
@@ -228,14 +228,13 @@ withdraws its offer and takes no new work. Readiness checks nothing else:
 
 In a [receiver configuration directory](https://benemon.github.io/wherry/configuration#receiver-configuration-directory),
 `plugins/kubernetes/plugin.yaml` holds the plugin's settings, here for a
-receiver in the cluster, whose namespace is its own and whose service
-account supplies the token:
+receiver in the cluster, whose service account supplies the token and
+names the namespace, its own:
 
 ```yaml
 labels:
   platform: kubernetes
 config:
-  namespace: wherry
   runs_claim: wherry-runs
   runs_dir: /var/lib/wherry/runs
 ```

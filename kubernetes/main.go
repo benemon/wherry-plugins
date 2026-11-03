@@ -4,7 +4,11 @@ package main
 
 import (
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/benemon/wherry/pluginsdk"
 	"github.com/go-logr/logr"
@@ -30,6 +34,14 @@ func newProfile(settings pluginsdk.Settings, logger hclog.Logger) (pluginsdk.Plu
 	client, err := newClient(config, settings.Credential)
 	if err != nil {
 		return nil, err
+	}
+	if config.Address == "" && config.Namespace == "" {
+		// In the cluster, the receiver's own namespace, which its service account names.
+		namespace, err := os.ReadFile(filepath.Join(serviceAccountDir, "namespace"))
+		if err != nil {
+			return nil, errors.New("no namespace, and no service account namespace")
+		}
+		config.Namespace = strings.TrimSpace(string(namespace))
 	}
 	return New(config, settings.Name, settings.Pool, client, logger)
 }

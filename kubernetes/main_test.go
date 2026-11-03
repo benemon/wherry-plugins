@@ -200,6 +200,54 @@ func TestFactoryTokenFromCredentialElseServiceAccount(t *testing.T) {
 	}
 }
 
+func TestFactoryNamespaceFromServiceAccount(t *testing.T) {
+	api := newFakeAPI(t)
+	accountDir := t.TempDir()
+	ca, err := os.ReadFile(api.caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{"token": []byte("service-account-token"), "ca.crt": ca} {
+		if err := os.WriteFile(filepath.Join(accountDir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func(dir string) { serviceAccountDir = dir }(serviceAccountDir)
+	serviceAccountDir = accountDir
+	host, port, _ := strings.Cut(strings.TrimPrefix(api.server.URL, "https://"), ":")
+	t.Setenv("KUBERNETES_SERVICE_HOST", host)
+	t.Setenv("KUBERNETES_SERVICE_PORT", port)
+	unset := podConfig("", "", t.TempDir(), testImage)
+	delete(unset, "namespace")
+	if _, err := newProfile(settings(t, "in-cluster", unset), hclog.NewNullLogger()); err == nil ||
+		err.Error() != "no namespace, and no service account namespace" {
+		t.Fatalf("no namespace file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(accountDir, "namespace"), []byte("receiver-ns"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	built, err := newProfile(settings(t, "in-cluster", unset), hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if namespace := built.(*Kubernetes).namespace; namespace != "receiver-ns" {
+		t.Fatalf("namespace %q; want the service account's, receiver-ns", namespace)
+	}
+	set := podConfig("", "", t.TempDir(), testImage)
+	if built, err = newProfile(settings(t, "in-cluster", set), hclog.NewNullLogger()); err != nil {
+		t.Fatal(err)
+	}
+	if namespace := built.(*Kubernetes).namespace; namespace != testNamespace {
+		t.Fatalf("namespace %q; want the config's, %s", namespace, testNamespace)
+	}
+	remote := podConfig(api.server.URL, api.caFile, "/var/lib/wherry/runs", testImage)
+	delete(remote, "namespace")
+	if _, err := newProfile(settings(t, "remote", remote), hclog.NewNullLogger()); err == nil ||
+		err.Error() != "namespace must be a DNS-1123 label" {
+		t.Fatalf("remote without a namespace: %v", err)
+	}
+}
+
 func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings) {
 	t.Helper()
 	dev := devConfig(t)
