@@ -13,7 +13,7 @@ submit() {
 		sleep 2
 	done
 	run=$(sed -n 's/^run_id=\([^ ]*\) .*/\1/p' <<<"$out")
-	[ -n "$run" ] || fail "submit printed no run ID"
+	[ -n "$run" ] || fail "submit printed no run ID: $out"
 	echo "$run"
 }
 # wait's exit code for each state a run ends in; 6 is its timeout.
