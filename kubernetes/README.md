@@ -462,8 +462,7 @@ The plugin reads the agent's standard output from the logs API, which
 interleaves standard error with it. A line the agent writes to standard
 error in the middle of a standard output line splits that transcript line.
 Send standard error elsewhere in the agent's command, such as
-`2>"$HOME/agent.err"`. Kubernetes 1.32 adds `PodLogOptions.Stream` to read
-standard output alone, which removes this on a later minimum platform.
+`2>"$HOME/agent.err"`.
 
 The plugin follows the agent's log while it runs, and the kubelet's follow
 stream carries every byte across log rotation. A follow that starts from
@@ -639,10 +638,6 @@ plugin profile it reports these families, which the receiver serves on its
 | `wherry_plugin_sweep_deletions_total` | counter | `kind` | the plugin profile's pods a sweep purged (`job`), Secrets it deleted (`variable`) and run directories it removed (`directory`) |
 | `wherry_plugin_placement_seconds` | histogram | none | time from a Dispatch that creates the pod to the plugin seeing its agent container running |
 | `wherry_plugin_storage_free_bytes` | gauge | none | the free bytes of the runs claim at `runs_dir` |
-
-`wherry_plugin_storage_free_bytes` and the `directory` kind need a receiver
-that declares them; an older receiver drops their samples and counts each
-in `wherry_metrics_dropped_total`.
 
 An API call's class comes from its status: 401 and 403 are `denied`, 409
 `conflict`, 408, 504 and the `Timeout` and `ServerTimeout` reasons
