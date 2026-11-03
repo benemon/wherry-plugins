@@ -364,21 +364,15 @@ whose unit is not starting. The plugin never uses `SetCredential=`, whose
 value any local user reads from the unit's properties and its transient
 unit file.
 
-systemd copies the targets into the unit's store,
-`/run/credentials/<unit>/` on the host, readable by root and the run's
-user, until the unit stops. The agent sees the store read-only at
-`/run/wherry/credentials`, on a separate filesystem from `/wherry`, so the
-agent cannot hard-link a target into its outputs. Where the store is a
-ramfs, as systemd 252 mounts it first, each file is 0400 owned by the
-agent's UID in a 0500 directory it owns. Where the store is a tmpfs, as
-systemd 255 mounts it first on Linux 6.3 and later, each file is root
-0400 in a root 0500 directory, and an ACL entry gives the agent's UID
-read access, and search on the directory; `stat` shows them as 0440 and
-0550, since the group bits of a file with an ACL are its mask, and the
-owning group's entry grants nothing. Either way only root and the agent's
-UID read the targets, and the unit's credential store is the boundary that
-enforces it. `ssh` accepts the key in both.
-A run without targets sees `/run/wherry/credentials` empty.
+systemd copies the targets into the unit's credential store,
+`/run/credentials/<unit>/` on the host, until the unit stops; the
+store's file system and modes are systemd's
+([Credentials](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Credentials)).
+Only root and the agent's UID read the targets, and the unit's credential
+store is the boundary that enforces it. The agent sees the store read-only
+at `/run/wherry/credentials`, on a separate filesystem from `/wherry`, so
+the agent cannot hard-link a target into its outputs. `ssh` accepts a key
+from it. A run without targets sees `/run/wherry/credentials` empty.
 
 For each environment target, a shell wrapper reads
 `/run/wherry/credentials/.env.<variable>`, keeps trailing newlines, and
@@ -519,11 +513,11 @@ The receiver runs as root under its own unit,
 as `wherry receiver run --config-file /etc/wherry/config.yaml`, and
 its agent units run in [`examples/systemd/wherry.slice`](../examples/systemd/wherry.slice),
 outside the receiver's cgroup. Restarting or stopping the receiver never
-touches them: on `SIGTERM` the receiver lets held runs go on for up to the
-local configuration's 20-second `drain_timeout`, then exits without
-stopping its jobs, and the restarted receiver adopts them. A stop takes up
-to `drain_timeout` plus 5 seconds, so `drain_timeout` stays at least 10
-seconds below the unit's `TimeoutStopSec=30`. A run is adopted only by a
+touches them: the receiver exits without stopping its jobs, and the
+restarted receiver adopts them. The local configuration's `drain_timeout`
+is 20 seconds and the unit's `TimeoutStopSec=` is 30
+([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)).
+A run is adopted only by a
 receiver with the same plugin profile on the same host, so give each systemd
 receiver a pool of its own.
 

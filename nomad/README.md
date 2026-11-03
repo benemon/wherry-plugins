@@ -600,9 +600,8 @@ into the task's secrets directory, owned by the image's user with mode
 running as root. For a broker under a private CA, the item `ca` holds the
 CA, which the job renders to `/secrets/kafka-ca.pem`, and `config.yaml`'s
 `ca_file` names it. The task's `kill_timeout` is 30 seconds, and the local
-configuration's `drain_timeout` is 20 seconds: a stop takes up to
-`drain_timeout` plus 5 seconds, so `drain_timeout` stays at least 10
-seconds below the window.
+configuration's `drain_timeout` is 20 seconds
+([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)).
 
 #### The state volume
 

@@ -90,9 +90,10 @@ credentials:
     file: /etc/wherry/kubernetes-token/token
 ```
 
-The receiver refuses a credential file that its group can write or others
-can read, write or execute. A rotated token takes effect on the receiver's
-next start.
+The receiver checks the file's mode as
+[Credential sources](https://benemon.github.io/wherry/security#credential-sources)
+describes, and reads a rotated token at its next start
+([Platform credentials](https://benemon.github.io/wherry/configuration#platform-credentials)).
 
 | Variable | Effect |
 | --- | --- |
@@ -870,10 +871,8 @@ the ConfigMap mounted read-only at `/etc/wherry/config`.
 - One replica with the `Recreate` strategy: a receiver is one principal
   with one key pair, and a rolling update would briefly run two.
 - `terminationGracePeriodSeconds: 30`, with `drain_timeout: 20s` in the
-  local configuration, so held runs go on for up to 20 seconds after
-  `SIGTERM` before the receiver releases them for adoption. A stop takes
-  up to `drain_timeout` plus 5 seconds, so `drain_timeout` stays at least
-  10 seconds below the window.
+  local configuration
+  ([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)).
 - The receiver's service account token is mounted, and the plugin, a child
   process of the receiver, uses it.
 - The pod sets no `runAsUser`, so it runs as the image's UID 1001 with
@@ -934,7 +933,9 @@ Service names. The bundle carries no CA: the receiver trusts the broker
 through `config.yaml`'s `ca_file`, the Strimzi cluster CA
 (`<cluster>-cluster-ca-cert`, key `ca.crt`) copied in as `kafka-ca.crt`.
 
-Strimzi renews its cluster CA, and nothing renews the receiver's copy:
+Strimzi renews its cluster CA
+([Certificate renewal](https://strimzi.io/docs/operators/latest/deploying#con-certificate-renewal-str)),
+and nothing renews the receiver's copy:
 
 1. When the renewal begins, Strimzi keeps the old certificate in
    `<cluster>-cluster-ca-cert` beside the new `ca.crt`. Write both
@@ -993,8 +994,11 @@ The image and the Kustomize directory are the same on OpenShift, which
 ships `kubectl` beside `oc`. What differs:
 
 - Create the namespace with `oc new-project wherry`. OpenShift sets the
-  namespace's Pod Security labels itself and admits pods by SCC: the
-  receiver's pod and agent pods run under restricted-v2. Do not allow the
+  namespace's
+  [Pod Security labels](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/authentication_and_authorization/understanding-and-managing-pod-security-admission)
+  itself and admits pods by
+  [SCC](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/authentication_and_authorization/managing-pod-security-policies):
+  the receiver's pod and agent pods run under restricted-v2. Do not allow the
   receiver's service account any SCC beyond restricted-v2; OpenShift admits
   a pod against the SCCs its creator may use as well as its service
   account's, so `anyuid` or `privileged` would admit agent pods running as
