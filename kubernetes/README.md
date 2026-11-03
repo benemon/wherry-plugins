@@ -6,9 +6,10 @@ every plugin profile of that plugin. The plugin runs each of the receiver's
 runs as one pod and one Secret in a namespace, with one directory on a
 ReadWriteMany claim that the receiver's pod and every agent pod mount.
 
-Kubernetes 1.31 or later is the platform. The plugin, the receiver image
-and the receiver's manifests also run unchanged on OpenShift 4.18 or later;
-[OpenShift](#openshift) lists what differs there.
+CI tests the plugin on Kubernetes 1.35, a kind node
+([End to end on kind](#end-to-end-on-kind)). The plugin, the receiver image
+and the receiver's manifests also run unchanged on OpenShift, which no CI
+lane tests; [OpenShift](#openshift) lists what differs there.
 
 ## Build
 
@@ -615,7 +616,7 @@ certificate` and each S3 output with `not uploaded: request failed`.
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
 over the runtime's `env` and removes those of
-[`AgentUnset`](https://github.com/benemon/wherry/blob/main/pluginsdk/pluginsdk.go)
+[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.8.0-rc.2/pluginsdk/pluginsdk.go#L249)
 from it, so no system, global or environment `git` configuration reaches
 the agent's clones. It removes them from the runtime's `env` only; keep
 them out of agent images' `ENV`. CA and proxy variables pass through as the
@@ -625,7 +626,9 @@ agent that runs commands of its own can undo this.
 ## Metrics
 
 The plugin speaks plugin protocol version 10, and a receiver of another
-protocol version refuses it, so upgrade it with the receiver. For each
+protocol version refuses it at its start, as
+[Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
+upgrade it with the receiver. For each
 plugin profile it reports these families, which the receiver serves on its
 `/metrics` with the plugin profile's name as `profile`:
 
@@ -695,9 +698,9 @@ Deployment and the metrics Service.
 their namespace and image and generates the Secret `wherry-receiver-bundle`
 from the receiver's bundle and the ConfigMap `wherry-receiver-config` from
 its local configuration,
-[`config.yaml`](../examples/kubernetes/config.yaml). The bundle and
-`config.yaml` are the two artefacts wherry gives every receiver; the
-Secret and the ConfigMap are how the cluster takes them. Kubernetes and
+[`config.yaml`](../examples/kubernetes/config.yaml). `wherry operator
+receiver apply` writes the bundle and the operator writes `config.yaml`;
+the Secret and the ConfigMap are how the cluster takes them. Kubernetes and
 OpenShift take the same manifests; only the namespace, the image and the
 Kafka bootstrap address differ.
 
@@ -895,9 +898,10 @@ the ConfigMap mounted read-only at `/etc/wherry/config`.
   first mount, so the key keeps its mode across restarts. If the fsGroup
   ever changes, the pass runs again and the receiver stops with
   `chmod 600 it`; fix the modes. A restarted pod mounts the same volume
-  and is the same receiver. Losing the PVC loses the receiver's identity; provision it
-  again under a new name, as the operator guide says for a lost state
-  directory.
+  and is the same receiver. Losing the PVC loses the receiver's identity;
+  provision it again under a new name, as
+  [Replace a lost key](https://benemon.github.io/wherry/operations#replace-a-lost-key)
+  says for a lost state directory.
 - The runs claim `wherry-runs` is `ReadWriteMany` and mounted at
   `/var/lib/wherry/runs`. Its storage class's default applies; set one that
   provisions `ReadWriteMany` volumes ([Runs claim](#runs-claim)). The
@@ -922,7 +926,8 @@ the ConfigMap mounted read-only at `/etc/wherry/config`.
 
 The pool's Kafka runs in the same cluster under Strimzi, with Kafka 4.3, share groups enabled, and a
 `tls` internal listener with `authentication: scram-sha-512` and
-`authorization: simple`. The operator guide's Strimzi notes apply. Where
+`authorization: simple`. The operator guide's
+[Strimzi](https://benemon.github.io/wherry/operations#strimzi) notes apply. Where
 the listener sets `networkPolicyPeers`, they admit the receiver's
 namespace.
 
@@ -1092,7 +1097,8 @@ the same.
 
 [`test/e2e`](test/e2e) runs a receiver from the receiver image and the
 plugin together on a kind cluster, as the `e2e` workflow does for every
-change to `kubernetes/`, the root `Makefile` or the workflow. Each step is
+change to `kubernetes/`, `examples/kubernetes/`, the root `Makefile`,
+`.github/changed.sh` or the workflow. Each step is
 a script; with Docker, kind and kubectl on a Linux machine, and the wherry
 release the workflow pins:
 

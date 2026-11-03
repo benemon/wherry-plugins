@@ -388,10 +388,14 @@ The agent task receives:
 
 The plugin collects outputs from `$NOMAD_TASK_DIR/outputs` through the
 allocation filesystem API, once the allocation is terminal. A stop cut
-short returns before its allocation ends, so the plugin reads the allocation
-every 500 ms until it is terminal, for as long as the receiver's collect
-call lasts, and returns an error when the call ends with the allocation
-still running. It lists the whole tree first, and refuses it, reading
+short returns before its allocation ends, so the plugin waits on the
+allocation with
+[blocking queries](https://developer.hashicorp.com/nomad/api-docs#blocking-queries)
+on its modify index until it is terminal, for as long as the receiver's
+collect call lasts. A call that ends first fails with
+`the allocation is still running`. A lost allocation fails with
+`the allocation was lost`, since its client, and the task's filesystem
+with it, is gone. The plugin lists the whole tree first, and refuses it, reading
 nothing, when it holds more entries than the receiver's limit. The
 listing's modes come from `lstat`, so a link shows as a link; the API's
 stat and read follow links, and both block on a FIFO, so the plugin reads
@@ -455,8 +459,8 @@ of the agent task. It sets `options.checksum` to `sha256:<hex>`,
 whose name ends like an archive.
 
 Nomad verifies the checksum after the download ends, so it bounds neither
-the redirect target nor the size. On Nomad 2.0.7 the fetcher follows
-redirects and no artifact option stops it, so the checksum alone holds a
+the redirect target nor the size. On Nomad 2.1.1, the release CI runs, the
+fetcher follows redirects and no artifact option stops it, so the checksum alone holds a
 redirected fetch to the object. The Nomad client's `artifact.http_max_size`
 is the only limit on how much a fetch reads. A fetch that fails or does not
 verify fails the task before it starts, and the plugin reports the job
@@ -475,7 +479,7 @@ system, global or environment `git` configuration reaches the agent's
 clones. It removes them from the runtime's `env` only. A `raw_exec` task
 also inherits the Nomad client's environment, a container keeps its
 image's `ENV`, and Nomad offers no way to unset either. Add the variables
-of [`AgentUnset`](https://github.com/benemon/wherry/blob/main/pluginsdk/pluginsdk.go)
+of [`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.8.0-rc.2/pluginsdk/pluginsdk.go#L249)
 to the client's `env.denylist`, and keep them out of agent images. CA and
 proxy variables pass through as the operator sets them. This protects an
 agent that follows its prompt. An agent that runs commands of its own can
@@ -585,7 +589,8 @@ This is the primary shape, and the CI lane `nomad` in
 back. [`examples/nomad/wherry-receiver.nomad.hcl`](../examples/nomad/wherry-receiver.nomad.hcl)
 runs the image the [Containerfile](../examples/nomad/Containerfile) builds.
 
-The job takes the two artefacts wherry gives every receiver from the
+The job takes the receiver's bundle, which `wherry operator receiver apply`
+writes, and its local configuration, which the operator writes, from the
 Nomad variable `nomad/jobs/wherry-receiver`, which its workload identity
 reads, through `template` blocks: the item `bundle`, the receiver's bundle,
 into the task's secrets directory, owned by the image's user with mode
@@ -632,8 +637,9 @@ Each receiver has its own volume, and two receivers never share a state
 directory. For another receiver, copy the volume specification and the job
 with another volume name. Losing the volume, or the client that holds it,
 loses the receiver's identity; provision the receiver again under a new
-name, as the operator guide says for a lost state directory, and create a
-new volume for it.
+name, as
+[Replace a lost key](https://benemon.github.io/wherry/operations#replace-a-lost-key)
+says for a lost state directory, and create a new volume for it.
 
 A client can instead declare a static
 [`host_volume`](https://developer.hashicorp.com/nomad/docs/configuration/client#host_volume-block)

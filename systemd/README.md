@@ -446,7 +446,7 @@ includes the fetch time.
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
 over the runtime's `env` and removes those of
-[`AgentUnset`](https://github.com/benemon/wherry/blob/main/pluginsdk/pluginsdk.go)
+[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.8.0-rc.2/pluginsdk/pluginsdk.go#L249)
 from it, so no system, global or environment `git` configuration reaches
 the agent's clones. CA and proxy variables pass through as the operator
 sets them. This protects an agent that follows its prompt. An agent that
@@ -533,8 +533,9 @@ From the repository root:
 
 1. Install `/usr/local/bin/wherry` (root, 0755) and
    `/usr/local/libexec/wherry/plugins/wherry-plugin-systemd` (root, 0755, in
-   a root 0755 directory). A binary copied from a home directory keeps the
-   `user_home_t` label, so restore the labels:
+   a root 0755 directory). On a host with SELinux enabled, a binary copied
+   from a home directory keeps the `user_home_t` label, so restore the
+   labels:
 
    ```sh
    restorecon -Rv /usr/local/bin /usr/local/libexec/wherry
@@ -574,11 +575,19 @@ From the repository root:
    the receiver's local configuration,
    [`examples/systemd/config.yaml`](../examples/systemd/config.yaml), which
    names the bundle, the state directory, the plugin directory and the
-   metrics address, adding `ca_file` for a broker under a private CA:
+   metrics address:
 
    ```sh
    install -D -m 0600 <working directory>/bundles/receivers/<name>.bundle /etc/wherry/receiver.bundle
    install -m 0600 examples/systemd/config.yaml /etc/wherry/config.yaml
+   ```
+
+   For a broker under a private CA, install the CA's certificates and
+   uncomment `ca_file: /etc/wherry/kafka-ca.pem` in
+   `/etc/wherry/config.yaml`:
+
+   ```sh
+   install -m 0644 <CA file> /etc/wherry/kafka-ca.pem
    ```
 
    The unit takes the bundle with `LoadCredential=bundle:/etc/wherry/receiver.bundle`,

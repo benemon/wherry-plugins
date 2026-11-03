@@ -14,8 +14,8 @@ for their installation.
 | [`kubernetes`](kubernetes) | `wherry-plugin-kubernetes` | `kubernetes` |
 | [`systemd`](systemd) | `wherry-plugin-systemd` | `systemd` |
 
-The plugins name the settings of a plugin profile's `config` alike; units
-follow each platform:
+The three plugins use the same names for the settings of a plugin
+profile's `config`. Each platform sets the units:
 
 | Setting | Nomad | Kubernetes | systemd |
 | --- | --- | --- | --- |
