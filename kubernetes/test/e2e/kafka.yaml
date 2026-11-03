@@ -1,6 +1,7 @@
 # A single-node Kafka 4.3 as the operator guide's Prepare Kafka and Strimzi sections require: KRaft, share groups,
-# SCRAM-SHA-512 over TLS, simple authorization with kafka-admin a super user, and wherry.operator. Receivers use the
-# internal tls listener; the runner uses external through the node ports kind.yaml maps to localhost.
+# SCRAM-SHA-512 over TLS, and simple authorization with kafka-admin the Kafka super user, which wherry operator init
+# delegates to wherry.operator. Receivers use the internal tls listener; the runner uses external through the node
+# ports kind.yaml maps to localhost.
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool
 metadata:
@@ -55,7 +56,7 @@ spec:
     template:
       userOperatorContainer:
         env:
-          - {name: STRIMZI_IGNORED_USERS_PATTERN, value: '^wherry\.(tnt|rcv)\..+'}
+          - {name: STRIMZI_IGNORED_USERS_PATTERN, value: '^wherry\.(operator|tnt\..+|rcv\..+)$'}
 ---
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaUser
@@ -64,16 +65,3 @@ metadata:
   labels: {strimzi.io/cluster: wherry-kafka}
 spec:
   authentication: {type: scram-sha-512}
----
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaUser
-metadata:
-  name: wherry.operator
-  labels: {strimzi.io/cluster: wherry-kafka}
-spec:
-  authentication: {type: scram-sha-512}
-  authorization:
-    type: simple
-    acls:
-      - resource: {type: topic, name: wherry.admin, patternType: literal}
-        operations: [Read, Write, Describe]

@@ -39,10 +39,10 @@ plugin on its host.
    ```
 
 The receiver runs the plugin only from a binary whose SHA-256 is the pin
-its record holds for the type, which `receiver add` and `receiver update`
-take as `--plugin-sha256 nomad=HEX` from the binary's line in the release's
-`checksums.txt`; see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
-The plugin is not run by hand.
+its record holds for the type: `plugin_sha256: {nomad: HEX}` in the
+receiver's file, which `wherry operator receiver apply` records.
+[The plugin pin](#the-plugin-pin) says where `HEX` comes from. The plugin
+is not run by hand.
 
 ## Credentials
 
@@ -562,28 +562,20 @@ client host's egress separately.
 The [Nomad example Containerfile](../examples/nomad/Containerfile) builds
 from the repository root. It downloads and verifies the wherry release,
 builds `wherry-plugin-nomad`, and places both binaries in a UBI minimal
-image whose entrypoint is `wherry`. The container runs the receiver as
-`wherry receiver run --config-file FILE`, with `FILE` the receiver's local
-configuration mounted in the container.
-[`examples/nomad/config.yaml`](../examples/nomad/config.yaml) is one for
-this image, naming the bundle, state directory, plugin directory, metrics
-address and a 25-second `drain_timeout`, and a source for the `nomad-token`
-credential.
-
-Build it with Docker, the plugin's version and a wherry release version:
+image whose entrypoint is `wherry`. Build it with Docker, the plugin's
+version and a wherry release version:
 
 ```sh
 docker build -f examples/nomad/Containerfile --build-arg VERSION=<version> --build-arg WHERRY_VERSION=<version> .
 ```
 
-The receiver's `drain_timeout` and the stop window are set together, as
-[Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)
-describes, so stop the container with `docker stop --time 30`.
+The image runs as a Nomad job, as below.
 
 ## Run the receiver in Nomad
 
-A receiver that drives Nomad can run as a Nomad job itself, in one of three
-shapes. Each receiver has its own bundle, so run one job, of count 1, per
+A receiver that drives Nomad runs as a Nomad job itself: the receiver
+container under the docker driver, or, as an example only, the exec
+driver. Each receiver has its own bundle, so run one job, of count 1, per
 receiver.
 
 ### The receiver container under the docker driver
@@ -593,12 +585,19 @@ This is the primary shape, and the CI lane `nomad` in
 back. [`examples/nomad/wherry-receiver.nomad.hcl`](../examples/nomad/wherry-receiver.nomad.hcl)
 runs the image the [Containerfile](../examples/nomad/Containerfile) builds.
 
-The job renders the bundle from the Nomad variable
-`nomad/jobs/wherry-receiver`, which its workload identity reads, into the
-task's secrets directory, owned by the image's user with mode 0600; setting
-the owner needs a Nomad client running as root. The task's
-`kill_timeout` is 30 seconds, and its local configuration's
-`drain_timeout` is 25 seconds.
+The job takes the two artefacts wherry gives every receiver from the
+Nomad variable `nomad/jobs/wherry-receiver`, which its workload identity
+reads, through `template` blocks: the item `bundle`, the receiver's bundle,
+into the task's secrets directory, owned by the image's user with mode
+0600, and the item `config`, its local configuration
+[`examples/nomad/config.yaml`](../examples/nomad/config.yaml), at
+`/local/config.yaml`. Setting the bundle's owner needs a Nomad client
+running as root. For a broker under a private CA, the item `ca` holds the
+CA, which the job renders to `/secrets/kafka-ca.pem`, and `config.yaml`'s
+`ca_file` names it. The task's `kill_timeout` is 30 seconds, and the local
+configuration's `drain_timeout` is 20 seconds: a stop takes up to
+`drain_timeout` plus 5 seconds, so `drain_timeout` stays at least 10
+seconds below the window.
 
 #### The state volume
 
@@ -663,106 +662,45 @@ on the client, and maps the receiver's metrics on 9464 to the dynamic port
 `metrics`. The task reaches the Kafka brokers through the bridge, so the
 brokers must advertise an address other than loopback.
 
-Prerequisites: the image pushed where the clients pull from, the
-receiver's bundle `receiver.bundle`, and, with ACLs enabled, the
+Prerequisites: the operator's working directory and the pool, the image
+pushed where the clients pull from, and, with ACLs enabled, the
 [ACL policy](#acl-policy) in `policy.hcl` and a token with the
 `host-volume-create` capability, which `nomad volume create` needs.
 
-1. Create the state volume:
+1. In the operator's working directory, write the receiver's file,
+   `receivers/nomad-1.yaml`, with the pool, the image's
+   [plugin pin](#the-plugin-pin) as `plugin_sha256.nomad` and the plugin
+   profiles ([Receiver configuration](#receiver-configuration)), and apply
+   it, which writes the receiver's bundle,
+   `bundles/receivers/nomad-1.bundle`:
+
+   ```sh
+   wherry operator receiver apply nomad-1
+   ```
+
+   The task runs as the image's user, UID 1001, and a profile whose
+   `config` names no `credential` takes the workload identity's token, so
+   a profile names no platform credential here.
+
+2. Create the state volume:
 
    ```sh
    nomad volume create examples/nomad/wherry-receiver.volume.hcl
    ```
 
-2. Put the bundle in the job's variable:
+3. Put the bundle and the local configuration in the job's variable,
+   adding `ca=@<CA file>` and uncommenting `ca_file` in a copy of
+   `config.yaml` for a broker under a private CA:
 
    ```sh
-   nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle
+   nomad var put nomad/jobs/wherry-receiver bundle=@<working directory>/bundles/receivers/nomad-1.bundle \
+     config=@examples/nomad/config.yaml
    ```
 
-3. Run the job with the image:
+4. Run the job with the image:
 
    ```sh
    nomad job run -var image=registry.example.com/wherry-receiver:<version> examples/nomad/wherry-receiver.nomad.hcl
-   ```
-
-4. With ACLs enabled, attach the ACL policy to the job:
-
-   ```sh
-   nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
-   ```
-
-Upgrade or roll back by running the job again with another image. The old
-receiver releases its runs when it stops, and the new one adopts their
-agent jobs.
-
-### Release archives fetched with artifact blocks
-
-A job whose task fetches the wherry and `wherry-plugin-nomad` release
-archives with [`artifact`](https://developer.hashicorp.com/nomad/docs/job-specification/artifact)
-blocks, and runs `wherry receiver run` from them under the `exec` driver.
-An artifact cannot verify a cosign signature, so verify each release's
-`checksums.txt` as [Install](#install) describes and pin each archive's
-SHA-256 from it in `options.checksum`, and the plugin binary's SHA-256 from
-it on the receiver's record with `receiver update --plugin-sha256`. The
-version is part of each artifact's source, so an upgrade or rollback is a
-change to the job.
-
-### Versioned host paths
-
-[`examples/nomad/wherry-receiver-host.nomad.hcl`](../examples/nomad/wherry-receiver-host.nomad.hcl)
-runs `wherry receiver run` under the
-[`exec`](https://developer.hashicorp.com/nomad/docs/drivers/exec) driver
-from binaries installed on the client under a directory per version: the
-binary `/usr/local/libexec/wherry/<version>/wherry` and the plugin
-directory `/usr/local/libexec/wherry/<version>/plugins`. The job's variable
-`version` names the directory. `/usr` is in the `exec` driver's
-[default chroot](https://developer.hashicorp.com/nomad/docs/deploy/task-driver/exec#chroot),
-so the client needs no `chroot_env`.
-
-The job's bundle, [state volume](#the-state-volume), `kill_timeout` and
-workload identity are those of
-[the docker shape](#the-receiver-container-under-the-docker-driver), with
-the volume owned by the `wherry` user. The
-task shares the client's network, so the plugin reaches the client's API
-on `127.0.0.1:4646` unless the receiver configuration sets `address` or the
-task's environment sets `NOMAD_ADDR`. The
-task runs as a dedicated `wherry` user, since the bundle holds the
-receiver's credentials. The job's `uid` and `gid` variables set the
-rendered bundle's owner through the template's
-[`uid`](https://developer.hashicorp.com/nomad/docs/job-specification/template#uid)
-and `gid`.
-
-Prerequisites: a `wherry` system user and group on every client that can
-run the job, the wherry binary and `wherry-plugin-nomad`, verified as
-[Install](#install) describes, the receiver's bundle `receiver.bundle`,
-and, with ACLs enabled, the [ACL policy](#acl-policy) in `policy.hcl` and
-a token with the `host-volume-create` capability.
-
-1. On every client that can run the job, install the binary as
-   `/usr/local/libexec/wherry/<version>/wherry` and the plugin in
-   `/usr/local/libexec/wherry/<version>/plugins`, owned by root and
-   writable by no group or other user.
-
-2. Create the state volume, with the `wherry` user's IDs as the `uid` and
-   `gid` parameters:
-
-   ```sh
-   sed -e 's/^  uid  = 1001$/  uid  = <UID>/' -e 's/^  gid  = 0$/  gid  = <GID>/' examples/nomad/wherry-receiver.volume.hcl |
-     nomad volume create -
-   ```
-
-3. Put the bundle in the job's variable:
-
-   ```sh
-   nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle
-   ```
-
-4. Run the job with the version and the `wherry` user's IDs on the clients,
-   which are the same on every client:
-
-   ```sh
-   nomad job run -var version=<version> -var uid=<UID> -var gid=<GID> examples/nomad/wherry-receiver-host.nomad.hcl
    ```
 
 5. With ACLs enabled, attach the ACL policy to the job:
@@ -771,9 +709,56 @@ a token with the `host-volume-create` capability.
    nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
    ```
 
-Upgrade or roll back by installing the version on every client and
-running the job again with it. The previous version's directory stays for
-a rollback.
+A changed item restarts the task, which reads the new bundle or local
+configuration. Upgrade or roll back by recording the other image's pin,
+then running the job with that image ([The plugin pin](#the-plugin-pin)).
+The old receiver releases its runs when it stops, and the new one adopts
+their agent jobs.
+
+#### The plugin pin
+
+The image builds the plugin from the checkout, so the pin is the SHA-256
+of the plugin binary inside the image as pushed, the image the job runs:
+
+```sh
+docker run --rm --entrypoint sha256sum registry.example.com/wherry-receiver:<version> \
+  /usr/local/libexec/wherry/plugins/wherry-plugin-nomad
+```
+
+A receiver that runs the release binary, as the exec driver example does,
+takes its line in the release's verified `checksums.txt`, as
+[Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
+prints it.
+
+The receiver's record holds one pin per plugin type, and the receiver
+refuses a binary it does not pin. An upgrade or a rollback is therefore a
+change of pin followed at once by a change of image:
+
+1. Set the new image's pin as `plugin_sha256.nomad` in the receiver's file
+   and run `wherry operator receiver apply nomad-1`. The running receiver
+   drains on the new record and exits; until the new image runs, its
+   restarts refuse the old binary.
+2. Run the job with the new image.
+
+Running the new image first starts a receiver whose binary its record
+does not pin, which exits until the pin is recorded. The CI lane's
+upgrade and rollback follow this order, and read the recorded pin back
+with `wherry operator receiver show nomad-1` before running the job.
+
+### The exec driver
+
+[`examples/nomad/wherry-receiver-host.nomad.hcl`](../examples/nomad/wherry-receiver-host.nomad.hcl)
+is an example only: it runs `wherry receiver run` under the
+[`exec`](https://developer.hashicorp.com/nomad/docs/drivers/exec) driver
+from binaries installed on the client under a directory per version, as a
+dedicated `wherry` user, with the bundle, state volume, `kill_timeout` and
+workload identity of [the docker shape](#the-receiver-container-under-the-docker-driver).
+It renders its local configuration from the variable's item `config` as
+the docker job does, from
+[`examples/nomad/config-host.yaml`](../examples/nomad/config-host.yaml),
+whose `plugin_dir` names the version's plugin directory; a new version
+takes a new item `config`. Its comments give its steps. CI validates the
+job but does not run it.
 
 ## Tests
 
@@ -816,14 +801,18 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
    receiver image's verifying fetch stage, and builds the receiver image
    from the checkout and from the latest `nomad/v*` tag before `HEAD`, both
    with `WHERRY_VERSION`, and the fake agent's image.
-3. `03-provision.sh` runs `wherry admin` from the machine: the pool, the
-   tenant, the host and the receiver, from the receiver configuration
-   directory `test/e2e/receiver`, whose plugin profile
-   `plugins/nomad/profiles/10-fake.yaml` runs a fake agent, pinned with
-   `--plugin-sha256` to the plugin binary in the checkout's image. It runs
-   `wherry admin check`, writes the host's configuration, `config.yaml`,
-   and runs `wherry init`.
-4. `04-deploy.sh` puts the receiver's bundle in its Nomad variable,
+3. `03-provision.sh` provisions as the operator guide does, in an operator
+   working directory: `wherry operator init` with the broker's Kafka super
+   user, `operator pool apply -f`, `pool entitle`, `host add`, and
+   `receiver apply -f` of the receiver configuration directory
+   `test/e2e/receiver`, whose plugin profile
+   `plugins/nomad/profiles/10-fake.yaml` runs a fake agent, with the pin of
+   the plugin binary in the checkout's image appended. It runs
+   `operator check`, then `wherry host init` with the host's bundle and
+   the broker's CA as `ca.pem`.
+4. `04-deploy.sh` puts the receiver's bundle,
+   [`examples/nomad/config.yaml`](../examples/nomad/config.yaml) with its
+   `ca_file` uncommented, and the broker's CA in the job's Nomad variable,
    creates the state volume from
    [`examples/nomad/wherry-receiver.volume.hcl`](../examples/nomad/wherry-receiver.volume.hcl),
    validates the example job and the host paths example job, runs the
@@ -842,9 +831,10 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
 7. `07-rollback.sh` rolls the job back to the previous release's image and
    completes a run on it.
 
-Each roll first runs `wherry admin receiver update --plugin-sha256` with the
-SHA-256 of the plugin binary in the image it runs, since the receiver
-refuses a plugin its record does not pin.
+Each roll follows [The plugin pin](#the-plugin-pin)'s order: it first
+applies the receiver's configuration with the SHA-256 of the plugin binary
+in the image it runs, then runs the job with the image, and checks that the
+new allocation's receiver never refused its plugin's pin.
 
 `collect.sh` writes the Nomad agent's and the receiver's logs and the jobs'
 state to `artifacts` in the state directory, `$E2E_WORK`, by default

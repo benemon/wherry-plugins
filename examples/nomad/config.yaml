@@ -1,15 +1,16 @@
-# The receiver's local configuration for the image examples/nomad/Containerfile builds, mounted at
-# /etc/wherry/config.yaml with the bundle beside it. state_dir holds the receiver's signing key under /var/lib/wherry,
-# which group 0 writes; a volume there keeps the key across restarts. The image installs the plugin in plugin_dir.
-bundle: /etc/wherry/receiver.bundle
+# The receiver's local configuration for examples/nomad/wherry-receiver.nomad.hcl, which renders it to
+# /local/config.yaml from the item config of the Nomad variable nomad/jobs/wherry-receiver, and the bundle to
+# /secrets/receiver.bundle from the item bundle. state_dir is on the job's host volume at /var/lib/wherry. The image
+# installs the plugin in plugin_dir.
+bundle: /secrets/receiver.bundle
+# For a broker under a private CA: the variable's item ca, which the job renders to /secrets/kafka-ca.pem. Unset, the
+# system roots.
+# ca_file: /secrets/kafka-ca.pem
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"
-# Held runs go on for up to drain_timeout after SIGTERM, within the 30 seconds docker stop --time 30 allows.
-drain_timeout: 25s
-# The receiver configuration's plugin config sets credential: nomad-token. The token can come from a file instead, a
-# regular file that its group cannot write and others cannot read, write or execute:
-# nomad-token: {file: /etc/wherry/nomad-token}
-credentials:
-  nomad-token:
-    env: NOMAD_TOKEN
+# A stop takes up to drain_timeout plus 5 seconds, so drain_timeout stays at least 10 seconds below the job's
+# kill_timeout, 30 seconds.
+drain_timeout: 20s
+# No credentials: a plugin profile that names no credential takes NOMAD_TOKEN, which the job's workload identity sets.
+# A profile's credential: nomad-token takes a source here, such as nomad-token: {env: NOMAD_TOKEN}.

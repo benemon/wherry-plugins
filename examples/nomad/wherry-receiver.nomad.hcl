@@ -1,8 +1,9 @@
 # The wherry receiver as a Nomad service job: the image examples/nomad/Containerfile builds, under the docker driver.
 # The receiver reaches the Nomad API through the task API socket and Kafka through the group's bridge network.
-# The receiver's bundle is the item bundle of the Nomad variable nomad/jobs/wherry-receiver, which the job's workload
-# identity reads. Its state directory is on the dynamic host volume examples/nomad/wherry-receiver.volume.hcl specifies.
-# nomad/README.md has the commands that create the volume, put the bundle and run the job.
+# The receiver's bundle and its local configuration, examples/nomad/config.yaml, are the items bundle and config of the
+# Nomad variable nomad/jobs/wherry-receiver, which the job's workload identity reads. Its state directory is on the
+# dynamic host volume examples/nomad/wherry-receiver.volume.hcl specifies. nomad/README.md has the commands that create
+# the volume, put the variable and run the job.
 # Each receiver has its own bundle, so run one job, of count 1, per receiver.
 variable "image" {
   type        = string
@@ -43,7 +44,7 @@ job "wherry-receiver" {
 
     task "receiver" {
       driver = "docker"
-      # The receiver's drain_timeout, 25 seconds, stays below this window.
+      # config.yaml's drain_timeout, 20 seconds, stays at least 10 seconds below this window.
       kill_timeout = "30s"
 
       config {
@@ -79,16 +80,19 @@ job "wherry-receiver" {
         destination = "/var/lib/wherry"
       }
 
-      # examples/nomad/config.yaml with the paths of this job and no credentials. A plugin profile that names no
-      # credential takes NOMAD_TOKEN from the workload identity.
+      # A private CA the broker's certificate chains to, which config.yaml's ca_file names; empty without the item ca.
+      template {
+        destination = "secrets/kafka-ca.pem"
+        data        = <<-EOT
+          {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .ca }}{{ end }}
+        EOT
+      }
+
+      # examples/nomad/config.yaml.
       template {
         destination = "local/config.yaml"
         data        = <<-EOT
-          bundle: /secrets/receiver.bundle
-          state_dir: /var/lib/wherry/state
-          plugin_dir: /usr/local/libexec/wherry/plugins
-          metrics_addr: ":9464"
-          drain_timeout: 25s
+          {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .config }}{{ end }}
         EOT
       }
 

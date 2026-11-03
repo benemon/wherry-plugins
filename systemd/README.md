@@ -34,10 +34,10 @@ install it in the receiver's plugin directory, as
 describes with `plugin=systemd`. [Build](#build) covers building it from source.
 
 The receiver runs the plugin only from a binary whose SHA-256 is the pin
-its record holds for the type, which `receiver add` and `receiver update`
-take as `--plugin-sha256 systemd=HEX` from the binary's line in the release's
-`checksums.txt`; see [`wherry receiver`](https://benemon.github.io/wherry/commands#receiver-command).
-The plugin is not run by hand.
+its record holds for the type: `plugin_sha256: {systemd: HEX}` in the
+receiver's file, which `wherry operator receiver apply` records.
+[The plugin pin](#the-plugin-pin) says where `HEX` comes from. The plugin
+is not run by hand.
 
 ## Credentials
 
@@ -520,9 +520,10 @@ as `wherry receiver run --config-file /etc/wherry/config.yaml`, and
 its agent units run in [`examples/systemd/wherry.slice`](../examples/systemd/wherry.slice),
 outside the receiver's cgroup. Restarting or stopping the receiver never
 touches them: on `SIGTERM` the receiver lets held runs go on for up to the
-local configuration's 25-second `drain_timeout`, within the unit's
-`TimeoutStopSec=30`, then exits without stopping its jobs, and the
-restarted receiver adopts them. A run is adopted only by a
+local configuration's 20-second `drain_timeout`, then exits without
+stopping its jobs, and the restarted receiver adopts them. A stop takes up
+to `drain_timeout` plus 5 seconds, so `drain_timeout` stays at least 10
+seconds below the unit's `TimeoutStopSec=30`. A run is adopted only by a
 receiver with the same plugin profile on the same host, so give each systemd
 receiver a pool of its own.
 
@@ -558,18 +559,42 @@ From the repository root:
 
 4. Record `sysctl kernel.core_pattern`, which says whether a core dump
    pipes to systemd-coredump, abrt or neither.
-5. Write the bundle `wherry admin receiver add <name>` produced to
-   `/etc/wherry/receiver.bundle`, root 0600, and install the receiver's
-   local configuration,
-   [`examples/systemd/config.yaml`](../examples/systemd/config.yaml), which
-   names the bundle, the state directory, the plugin directory and the
-   metrics address:
+5. In the operator's working directory, write the receiver's file,
+   `receivers/<name>.yaml`, with its own pool, the
+   [plugin pin](#the-plugin-pin) as `plugin_sha256.systemd` and the plugin
+   profiles ([Receiver configuration](#receiver-configuration)), and apply
+   it, which writes the receiver's bundle,
+   `bundles/receivers/<name>.bundle`:
 
    ```sh
+   wherry operator receiver apply <name>
+   ```
+
+6. Put the bundle at `/etc/wherry/receiver.bundle`, root 0600, and install
+   the receiver's local configuration,
+   [`examples/systemd/config.yaml`](../examples/systemd/config.yaml), which
+   names the bundle, the state directory, the plugin directory and the
+   metrics address, adding `ca_file` for a broker under a private CA:
+
+   ```sh
+   install -D -m 0600 <working directory>/bundles/receivers/<name>.bundle /etc/wherry/receiver.bundle
    install -m 0600 examples/systemd/config.yaml /etc/wherry/config.yaml
    ```
 
-6. Start the receiver:
+   The unit takes the bundle with `LoadCredential=bundle:/etc/wherry/receiver.bundle`,
+   systemd's mechanism for a service's secrets: at each start systemd
+   copies the file, read-only, into the unit's credential directory, a
+   memory file system that is never swapped, that only the unit's processes
+   and root see, and that goes when the unit stops. `config.yaml` names the
+   bundle at that directory's path, `/run/credentials/wherry-receiver.service/bundle`;
+   a YAML file cannot expand `$CREDENTIALS_DIRECTORY`. The same mechanism
+   keeps the bundle encrypted on disk:
+   [`systemd-creds encrypt`](https://www.freedesktop.org/software/systemd/man/latest/systemd-creds.html)
+   it and load it with `LoadCredentialEncrypted=` in place of
+   `LoadCredential=`. A new bundle takes effect at the next
+   `systemctl restart wherry-receiver`.
+
+7. Start the receiver:
 
    ```sh
    systemctl daemon-reload && systemctl enable --now wherry-receiver
@@ -578,6 +603,29 @@ From the repository root:
 The receiver's metrics listen on port 9464, the configuration's
 `metrics_addr`. The endpoint has no authentication; admit only Prometheus to it
 with a `firewalld` rule.
+
+### The plugin pin
+
+The pin is the SHA-256 of the release binary, its line in the release's
+verified `checksums.txt`, as
+[Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
+prints it:
+
+```sh
+awk -v name="wherry-plugin-systemd_${version}_linux_${arch}" '$2 == name {print $1}' checksums.txt
+```
+
+The receiver's record holds one pin per plugin type, and the receiver
+refuses a binary it does not pin. An upgrade or a rollback is therefore a
+change of pin followed at once by a change of binary:
+
+1. Set the new binary's pin as `plugin_sha256.systemd` in the receiver's
+   file and run `wherry operator receiver apply <name>`. The running
+   receiver drains on the new record and exits; until the new binary is
+   installed, its restarts refuse the old one.
+2. Install the new binary as
+   `/usr/local/libexec/wherry/plugins/wherry-plugin-systemd`; the next
+   restart runs it.
 
 ### SELinux
 

@@ -1,0 +1,20 @@
+# The receiver for kubectl apply -k, from a copy of this directory outside any git working tree: Kustomize reads only
+# files inside it, so the receiver's bundle, which holds its Kafka password, is copied in as receiver.bundle.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: wherry
+resources: [receiver.yaml]
+images:
+  - {name: wherry-receiver, newName: registry.example.com/wherry-receiver, newTag: <version>}
+# Each generated name carries a hash of its content, so a new bundle or configuration rolls the Deployment.
+secretGenerator:
+  - {name: wherry-receiver-bundle, files: [bundle.yaml=receiver.bundle]}
+configMapGenerator:
+  - {name: wherry-receiver-config, files: [config.yaml]}
+  # For a broker under a private CA, such as Strimzi's cluster CA, copied in as kafka-ca.crt; config.yaml's ca_file
+  # names it.
+  # - {name: wherry-receiver-kafka-ca, files: [ca.crt=kafka-ca.crt]}
+patches:
+  # On Kubernetes, for a state claim whose volume root neither UID 1001 nor group 0 can write. Not on OpenShift, whose
+  # SCC sets the pod's fsGroup itself.
+  # - path: fsgroup.yaml

@@ -3,15 +3,17 @@
 # SSH private key, a run with an input file and a run that never starts, and checks what each brings back. Ends once
 # the sweep has removed the cancelled run's pod.
 . "$(dirname "$0")/common.sh"
-fail() {
-	echo "FAIL: $*" >&2
-	exit 1
-}
-host() { wherry "$1" --config-file "$host_config" "${@:2}"; }
+host() { wherry host "$@"; }
+# A pool takes submits once a receiver has taken custody and published the pool key, a few seconds after it starts.
 submit() {
-	local run
-	run=$(host submit --selector "$@" | sed -n 's/^run_id=\([^ ]*\) .*/\1/p')
-	[ -n "$run" ] || fail "submit printed no run ID"
+	local out run i
+	for i in $(seq 60); do
+		out=$(host submit --selector "$@" 2>&1) && break
+		[[ $out == *"has no custodian yet"* ]] || break
+		sleep 2
+	done
+	run=$(sed -n 's/^run_id=\([^ ]*\) .*/\1/p' <<<"$out")
+	[ -n "$run" ] || fail "submit printed no run ID: $out"
 	echo "$run"
 }
 # wait's exit code for each state a run ends in; 6 is its timeout.

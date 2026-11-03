@@ -57,8 +57,12 @@ check-markers: ## Fail on tool-attribution markers in tracked files
 	fi; \
 	echo "no tool-attribution markers in tracked files"
 
+.PHONY: check-examples
+check-examples: ## Fail on a receiver example whose drain_timeout is not 10s below its stop window, or a removed command
+	@.github/check-examples.sh $(PLUGINS)
+
 .PHONY: check
-check: check-fmt vet test check-licenses check-markers ## Run every CI gate
+check: check-fmt vet test check-licenses check-markers check-examples ## Run every CI gate
 
 .PHONY: image
 image: ## Build the receiver image (VERSION, WHERRY_VERSION, CONTAINER)

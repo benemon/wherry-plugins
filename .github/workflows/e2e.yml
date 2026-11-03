@@ -15,12 +15,12 @@ permissions:
 env:
   # The wherry release whose CLI provisions and submits, and which the receiver image holds.
   # ci.yml's nomad-image job pins the same release; change both together.
-  WHERRY_VERSION: v0.1.0-rc.25
+  WHERRY_VERSION: v0.1.0-rc.26
   KIND_VERSION: v0.33.0
   KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
   # A Nomad CE release; NOMAD_SHA256 is its linux_amd64 zip's line in the release's SHA256SUMS.
-  NOMAD_VERSION: 2.0.7
-  NOMAD_SHA256: 4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1
+  NOMAD_VERSION: 2.1.1
+  NOMAD_SHA256: 073084f7690fdaea756ff1eff8b669b25c3a6c17778f19ae0c47606973ed3f39
   # The CNI reference plugins Nomad's bridge networking runs; CNI_PLUGINS_SHA256 is the linux-amd64 archive's .sha256.
   CNI_PLUGINS_VERSION: v1.9.1
   CNI_PLUGINS_SHA256: b98f74a0f8522f0a83867178729c1aa70f2158f90c45a2ca8fa791db1c76b303

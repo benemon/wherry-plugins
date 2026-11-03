@@ -1,41 +1,41 @@
 #!/usr/bin/env bash
-# Provisions as the operator guide does, with wherry admin from the runner: the pool e2e, the tenant e2e, the host
-# runner and the receiver kind-1, pinned to the plugin binary of wherry-receiver:e2e, and checks the result with wherry
-# admin check, which reports a tenant feed below the 2 MiB record limit. Then writes the host's client configuration,
-# with a generated dummy credential and SSH private key, and registers the host key.
+# Provisions as the operator guide does, from the runner in the operator working directory $E2E_WORK/operator:
+# operator init with the Kafka super user kafka-admin, the pool e2e, the tenant e2e, the host runner and the receiver
+# kind-1, whose file names the in-cluster bootstrap address and pins the plugin binary of wherry-receiver:e2e, then
+# operator check. Then sets the host up from its bundle with wherry host init, trusting the Strimzi cluster CA through
+# ca.pem and with sources for a generated dummy credential and SSH private key.
 . "$(dirname "$0")/common.sh"
 umask 077
 kubectl get secret -n kafka wherry-kafka-cluster-ca-cert -o jsonpath='{.data.ca\.crt}' | base64 -d >"$work/ca.crt"
-for user in kafka-admin wherry.operator; do
-	kubectl get secret -n kafka "$user" -o jsonpath='{.data.password}' | base64 -d >"$work/$user.password"
-	mask "$(cat "$work/$user.password")"
-done
-export WHERRY_TRUST_BROKER=localhost:31092 WHERRY_TRUST_CA=$work/ca.crt \
-	WHERRY_TRUST_ADMIN_USER=kafka-admin WHERRY_TRUST_ADMIN_PASSWORD_FILE=$work/kafka-admin.password \
-	WHERRY_TRUST_OPERATOR_USER=wherry.operator WHERRY_TRUST_OPERATOR_PASSWORD_FILE=$work/wherry.operator.password
+kubectl get secret -n kafka kafka-admin -o jsonpath='{.data.password}' | base64 -d >"$work/kafka-admin.password"
+mask "$(cat "$work/kafka-admin.password")"
 
-wherry admin pool create e2e --config-file "$e2e/pool.yaml"
-wherry admin pool entitle e2e --tenant e2e
-wherry admin host add runner --tenant e2e --bundle-file "$work/host.bundle"
+mkdir -p "$operator"
+wherry operator init --dir "$operator" --broker localhost:31092 --ca-file "$work/ca.crt" \
+	--super-user kafka-admin --super-user-password-file "$work/kafka-admin.password"
+mask "$(cat "$operator/operator.password")"
+wherry operator pool apply e2e --dir "$operator" -f "$e2e/pool.yaml"
+wherry operator pool entitle e2e --tenant e2e --dir "$operator"
+wherry operator host add runner --tenant e2e --dir "$operator"
 plugin_sha256=$(docker run --rm --entrypoint sha256sum wherry-receiver:e2e \
 	/usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes | cut -d' ' -f1)
-wherry admin receiver add kind-1 --pool e2e --config-dir "$e2e/receiver" --plugin-sha256 "kubernetes=$plugin_sha256" \
-	--bundle-file "$work/receiver.bundle"
-wherry admin check
-for bundle in host receiver; do
-	mask "$(sed -n 's/^password: *//p' "$work/$bundle.bundle" | tr -d "\"'")"
+cp -R "$e2e/receiver" "$work/receiver"
+printf 'plugin_sha256:\n  kubernetes: %s\n' "$plugin_sha256" >>"$work/receiver/receiver.yaml"
+wherry operator receiver apply kind-1 --dir "$operator" -f "$work/receiver"
+wherry operator check --dir "$operator"
+for bundle in "$operator/bundles/hosts/e2e/runner.bundle" "$operator/bundles/receivers/kind-1.bundle"; do
+	mask "$(sed -n 's/^password: *//p' "$bundle" | tr -d "\"'")"
 done
 
-mkdir -p "$work/host"
+mkdir -p "$work/host" "$(dirname "$host_config")"
+cp "$work/ca.crt" "$(dirname "$host_config")/ca.pem"
 head -c 24 /dev/urandom | base64 >"$work/host/dummy"
 mask "$(cat "$work/host/dummy")"
 ssh-keygen -q -t ed25519 -N '' -C wherry-e2e -f "$work/host/deploy-key"
+# The host's own sources for the credentials 05-runs.sh names; host init keeps them.
 cat >"$host_config" <<YAML
-bundle: "$work/host.bundle"
-host_key: "$work/host/host.key"
-state_dir: "$work/host/state"
 credentials:
   dummy: {file: "$work/host/dummy"}
   deploy: {file: "$work/host/deploy-key"}
 YAML
-wherry init --config-file "$host_config"
+wherry host init "$operator/bundles/hosts/e2e/runner.bundle"

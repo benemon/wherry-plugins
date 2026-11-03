@@ -40,8 +40,9 @@ versioned from the tag less its prefix. The snapshot writes the archives,
 `checksums.txt`, an SBOM per archive (`<archive>.sbom.json`) and the
 cosign signature over the checksums. `checksums.txt` also lists the
 SHA-256 of each plugin binary as `wherry-plugin-<plugin>_<version>_<os>_<arch>`,
-the pin `wherry admin receiver update --plugin-sha256` takes; the binary is
-published inside its archive. The workflow then attests the
+the pin a receiver's file gives as `plugin_sha256` to
+`wherry operator receiver apply`; the binary is published inside its
+archive. The workflow then attests the
 archives' provenance and publishes them against the tag. Its `verify` job
 checks the published release as a user receives it: the assets against
 `.github/release-contents/<plugin>.txt`, the checksums' signature and the

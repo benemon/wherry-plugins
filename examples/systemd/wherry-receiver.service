@@ -10,9 +10,11 @@ After=network-online.target
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/wherry receiver run --config-file /etc/wherry/config.yaml
+# The receiver's bundle, root 0600, which config.yaml names at /run/credentials/wherry-receiver.service/bundle.
+LoadCredential=bundle:/etc/wherry/receiver.bundle
 Restart=on-failure
 RestartSec=5s
-# config.yaml's drain_timeout, 25 seconds, stays below this window.
+# config.yaml's drain_timeout, 20 seconds, stays at least 10 seconds below this window.
 TimeoutStopSec=30
 StateDirectory=wherry
 StateDirectoryMode=0700

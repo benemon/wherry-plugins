@@ -1,5 +1,4 @@
 config:
-  namespace: wherry
   runs_claim: wherry-runs
   runs_dir: /var/lib/wherry/runs
   runtime:
