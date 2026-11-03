@@ -1,0 +1,17 @@
+# The receiver's local configuration for examples/nomad/wherry-receiver-host.nomad.hcl, which renders it to
+# /local/config.yaml from the item config of the Nomad variable nomad/jobs/wherry-receiver, and the bundle to
+# /secrets/receiver.bundle from the item bundle. state_dir is on the job's host volume at /var/lib/wherry. plugin_dir
+# is the plugin directory of the version the job runs, <version> as the job's variable version; a new version takes a
+# new item config.
+bundle: /secrets/receiver.bundle
+# For a broker under a private CA: the variable's item ca, which the job renders to /secrets/kafka-ca.pem. Unset, the
+# system roots.
+# ca_file: /secrets/kafka-ca.pem
+state_dir: /var/lib/wherry/state
+plugin_dir: /usr/local/libexec/wherry/<version>/plugins
+metrics_addr: ":9464"
+# A stop takes up to drain_timeout plus 5 seconds, so drain_timeout stays at least 10 seconds below the job's
+# kill_timeout, 30 seconds.
+drain_timeout: 20s
+# No credentials: a plugin profile that names no credential takes NOMAD_TOKEN, which the job's workload identity sets.
+# A profile's credential: nomad-token takes a source here, such as nomad-token: {env: NOMAD_TOKEN}.

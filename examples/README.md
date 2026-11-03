@@ -44,4 +44,5 @@ runs that image as a receiver inside Nomad, rendering the bundle and its
 keeps its signing key across a job stop and run; see
 [Run the receiver in Nomad](../nomad/README.md#run-the-receiver-in-nomad).
 [A job under the exec driver](nomad/wherry-receiver-host.nomad.hcl) is an
-example only.
+example only; its [local configuration](nomad/config-host.yaml) names the
+plugin directory of the version it runs.

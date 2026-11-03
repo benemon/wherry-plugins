@@ -742,7 +742,8 @@ change of pin followed at once by a change of image:
 
 Running the new image first starts a receiver whose binary its record
 does not pin, which exits until the pin is recorded. The CI lane's
-upgrade and rollback follow this order.
+upgrade and rollback follow this order, and read the recorded pin back
+with `wherry operator receiver show nomad-1` before running the job.
 
 ### The exec driver
 
@@ -752,7 +753,12 @@ is an example only: it runs `wherry receiver run` under the
 from binaries installed on the client under a directory per version, as a
 dedicated `wherry` user, with the bundle, state volume, `kill_timeout` and
 workload identity of [the docker shape](#the-receiver-container-under-the-docker-driver).
-Its comments give its steps. CI validates the job but does not run it.
+It renders its local configuration from the variable's item `config` as
+the docker job does, from
+[`examples/nomad/config-host.yaml`](../examples/nomad/config-host.yaml),
+whose `plugin_dir` names the version's plugin directory; a new version
+takes a new item `config`. Its comments give its steps. CI validates the
+job but does not run it.
 
 ## Tests
 

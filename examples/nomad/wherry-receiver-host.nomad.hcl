@@ -2,19 +2,22 @@
 # client: the wherry binary /usr/local/libexec/wherry/<version>/wherry and the plugin directory
 # /usr/local/libexec/wherry/<version>/plugins, root's and writable by no group or other user. /usr is in the exec
 # driver's default chroot, so the client needs no chroot_env. CI validates this job but does not run it.
-# The receiver's bundle is the item bundle of the Nomad variable nomad/jobs/wherry-receiver, which the job's workload
-# identity reads, and its local configuration is examples/nomad/config.yaml with this job's plugin_dir, below. Its
-# state directory is on a dynamic host volume like examples/nomad/wherry-receiver.volume.hcl, owned by the wherry user.
-# Each receiver has its own bundle, so run one job, of count 1, per receiver. With a wherry system user and group on
-# every client that can run the job, and the binaries installed and verified as nomad/README.md's Install says:
+# The receiver's bundle and its local configuration, examples/nomad/config-host.yaml with the version's plugin_dir, are
+# the items bundle and config of the Nomad variable nomad/jobs/wherry-receiver, which the job's workload identity reads.
+# Its state directory is on a dynamic host volume like examples/nomad/wherry-receiver.volume.hcl, owned by the wherry
+# user. Each receiver has its own bundle, so run one job, of count 1, per receiver. With a wherry system user and group
+# on every client that can run the job, and the binaries installed and verified as nomad/README.md's Install says:
 #   sed -e 's/^  uid  = 1001$/  uid  = <UID>/' -e 's/^  gid  = 0$/  gid  = <GID>/' examples/nomad/wherry-receiver.volume.hcl |
 #     nomad volume create -
-#   nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle
-#   nomad job run -var version=<version> -var uid=<UID> -var gid=<GID> examples/nomad/wherry-receiver-host.nomad.hcl
+#   version=<version>
+#   sed "s|/<version>/|/$version/|" examples/nomad/config-host.yaml >config.yaml
+#   nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle config=@config.yaml
+#   nomad job run -var version="$version" -var uid=<UID> -var gid=<GID> examples/nomad/wherry-receiver-host.nomad.hcl
 # and, with ACLs enabled, the plugin's ACL policy attached to the job as for the docker job. Upgrade or roll back by
-# installing the version on every client and running the job again with it, after the receiver's pin as for the docker
-# job. Release archives fetched with artifact blocks, each pinned by options.checksum from its release's verified
-# checksums.txt, can take the place of the installed binaries.
+# installing the version on every client, recording its pin as for the docker job, then at once putting the item config
+# with the version's plugin_dir and running the job again with the version. Release archives fetched with artifact
+# blocks, each pinned by options.checksum from its release's verified checksums.txt, can take the place of the
+# installed binaries.
 variable "version" {
   type        = string
   description = "The directory under /usr/local/libexec/wherry that holds the wherry binary and its plugin directory."
@@ -57,7 +60,7 @@ job "wherry-receiver" {
       driver = "exec"
       # A dedicated user: the bundle holds the receiver's credentials, and nobody is shared by unrelated processes.
       user = "wherry"
-      # The configuration's drain_timeout, 20 seconds, stays at least 10 seconds below this window.
+      # config-host.yaml's drain_timeout, 20 seconds, stays at least 10 seconds below this window.
       kill_timeout = "30s"
 
       # The task shares the client's network, so the plugin reaches the Nomad API at the receiver configuration's
@@ -97,17 +100,11 @@ job "wherry-receiver" {
         EOT
       }
 
-      # examples/nomad/config.yaml with this job's versioned plugin_dir. A plugin profile that names no credential takes
-      # NOMAD_TOKEN from the workload identity.
+      # examples/nomad/config-host.yaml, its plugin_dir the version's.
       template {
         destination = "local/config.yaml"
         data        = <<-EOT
-          bundle: /secrets/receiver.bundle
-          # ca_file: /secrets/kafka-ca.pem
-          state_dir: /var/lib/wherry/state
-          plugin_dir: /usr/local/libexec/wherry/${var.version}/plugins
-          metrics_addr: ":9464"
-          drain_timeout: 20s
+          {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .config }}{{ end }}
         EOT
       }
 

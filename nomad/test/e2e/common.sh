@@ -60,18 +60,29 @@ pin() {
 	wherry operator receiver apply nomad-1 --dir "$operator" -f "$work/receiver"
 }
 
+# pinned fails the step unless the receiver nomad-1's record, as receiver show prints it, pins the plugin binary of the
+# receiver image $1.
+pinned() {
+	local recorded want
+	recorded=$(wherry operator receiver show nomad-1 --dir "$operator" |
+		awk '/^plugin_sha256:/ { pins = 1; next } /^[^ ]/ { pins = 0 } pins && $1 == "nomad:" { print $2 }')
+	want=$(plugin_sha256 "$1")
+	[ "$recorded" = "$want" ] || fail "the receiver's record pins '$recorded', not $1's plugin $want"
+}
+
 # newest prints the ID of the receiver job's newest running allocation.
 newest() {
 	api job/wherry-receiver/allocations | jq -r \
 		'map(select(.DesiredStatus == "run" and .ClientStatus == "running")) | sort_by(.CreateIndex) | last | .ID // empty'
 }
 
-# roll upgrades or rolls back the receiver as nomad/README.md orders it: it pins the image $1's plugin, then runs the
-# receiver job with the image and waits for it to deploy. The new allocation's receiver must never have run under
-# another pin.
+# roll upgrades or rolls back the receiver as nomad/README.md orders it: it pins the image $1's plugin, then, once the
+# record holds that pin, runs the receiver job with the image and waits for it to deploy. The new allocation's receiver
+# must never have run under another pin.
 roll() {
 	local alloc
 	pin "$1"
+	pinned "$1"
 	nomad job run -detach -var image="$1" "$job" >/dev/null
 	wait_for 300 deployed
 	wait_for 300 ready
