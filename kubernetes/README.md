@@ -67,7 +67,7 @@ the value of the credential the profile's merged `config` names with
 its [local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration)
 and passes when it configures the profile
 ([Platform credentials](https://benemon.github.io/wherry/configuration#platform-credentials)).
-The token never reaches `wherry.admin` or the bundle.
+The token never reaches `wherry.operator` or the bundle.
 
 With `address` empty, the plugin reaches the API server of the cluster the
 receiver runs in, from `KUBERNETES_SERVICE_HOST` and
