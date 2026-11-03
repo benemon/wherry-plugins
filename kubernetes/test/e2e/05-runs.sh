@@ -4,9 +4,15 @@
 # the sweep has removed the cancelled run's pod.
 . "$(dirname "$0")/common.sh"
 host() { wherry host "$@"; }
+# A pool takes submits once a receiver has taken custody and published the pool key, a few seconds after it starts.
 submit() {
-	local run
-	run=$(host submit --selector "$@" | sed -n 's/^run_id=\([^ ]*\) .*/\1/p')
+	local out run i
+	for i in $(seq 60); do
+		out=$(host submit --selector "$@" 2>&1) && break
+		[[ $out == *"has no custodian yet"* ]] || break
+		sleep 2
+	done
+	run=$(sed -n 's/^run_id=\([^ ]*\) .*/\1/p' <<<"$out")
 	[ -n "$run" ] || fail "submit printed no run ID"
 	echo "$run"
 }

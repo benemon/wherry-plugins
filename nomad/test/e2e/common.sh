@@ -104,9 +104,15 @@ metrics_address() {
 		jq -r '.AllocatedResources.Shared.Ports[] | select(.Label == "metrics") | "\(.HostIP):\(.Value)"'
 }
 
+# A pool takes submits once a receiver has taken custody and published the pool key, a few seconds after it starts.
 submit() {
-	local run
-	run=$(host submit --selector e2e=fake --output echo.txt:required --prompt "$1" | sed -n 's/^run_id=\([^ ]*\) .*/\1/p')
+	local out run i
+	for i in $(seq 60); do
+		out=$(host submit --selector e2e=fake --output echo.txt:required --prompt "$1" 2>&1) && break
+		[[ $out == *"has no custodian yet"* ]] || break
+		sleep 2
+	done
+	run=$(sed -n 's/^run_id=\([^ ]*\) .*/\1/p' <<<"$out")
 	[ -n "$run" ] || fail "submit printed no run ID"
 	echo "$run"
 }
