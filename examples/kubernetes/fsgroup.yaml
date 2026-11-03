@@ -1,0 +1,11 @@
+# Gives the receiver's volumes the group 1001, which the receiver then holds, so it can write a state claim whose
+# volume root is root's. The kubelet's ownership pass adds group read and write to every file on a volume, and the
+# receiver refuses a signing.key open to its group, so receiver.yaml's fsGroupChangePolicy: OnRootMismatch limits the
+# pass to a volume whose root does not yet carry the group: the empty volume, before the key exists.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: wherry-receiver}
+spec:
+  template:
+    spec:
+      securityContext: {fsGroup: 1001}

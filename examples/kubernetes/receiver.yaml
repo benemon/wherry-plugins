@@ -1,4 +1,4 @@
-# The in-cluster receiver. apply.sh applies this file unchanged but for the namespace and the image, on Kubernetes and
+# The in-cluster receiver. kustomization.yaml applies this file with its namespace and image, on Kubernetes and
 # OpenShift alike, beside the Secret wherry-receiver-bundle and the ConfigMap wherry-receiver-config, which holds the
 # receiver's local configuration config.yaml. Agent pods run in the same namespace and mount the runs claim with the
 # receiver.
@@ -20,8 +20,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata: {name: wherry-receiver}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: wherry-receiver}
+# Kustomize sets the subject's namespace to the kustomization's.
 subjects:
-  - {kind: ServiceAccount, name: wherry-receiver, namespace: wherry}
+  - {kind: ServiceAccount, name: wherry-receiver}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -49,11 +50,14 @@ spec:
     metadata: {labels: {app: wherry-receiver}}
     spec:
       serviceAccountName: wherry-receiver
-      # config.yaml's drain_timeout, 25 seconds, stays below this window.
+      # config.yaml's drain_timeout, 20 seconds, stays at least 10 seconds below this window.
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}
+        # With an fsGroup, set by fsgroup.yaml or OpenShift's SCC, the kubelet's ownership pass makes signing.key
+        # group-readable, which the receiver refuses; OnRootMismatch runs it only on a volume whose root lacks the
+        # group, the empty volume on its first mount.
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: receiver
@@ -68,6 +72,7 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/wherry/config, readOnly: true}
             - {name: bundle, mountPath: /etc/wherry/bundle, readOnly: true}
+            - {name: kafka-ca, mountPath: /etc/wherry/kafka-ca, readOnly: true}
             - {name: state, mountPath: /var/lib/wherry}
             - {name: runs, mountPath: /var/lib/wherry/runs}
             - {name: tmp, mountPath: /tmp}
@@ -76,6 +81,8 @@ spec:
       volumes:
         - {name: config, configMap: {name: wherry-receiver-config}}
         - {name: bundle, secret: {secretName: wherry-receiver-bundle, defaultMode: 0440}}
+        # Empty unless kustomization.yaml generates it for a broker under a private CA.
+        - {name: kafka-ca, configMap: {name: wherry-receiver-kafka-ca, optional: true}}
         - {name: state, persistentVolumeClaim: {claimName: wherry-receiver-state}}
         - {name: runs, persistentVolumeClaim: {claimName: wherry-runs}}
         - {name: tmp, emptyDir: {medium: Memory, sizeLimit: 16Mi}}

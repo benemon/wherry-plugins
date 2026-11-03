@@ -1,0 +1,18 @@
+# The state claim's volume: a local volume on the single kind node, bound to the claim wherry-receiver-state that
+# examples/kubernetes/receiver.yaml makes in the namespace wherry. A local volume, unlike hostPath, takes the pod's
+# fsGroup, so the kubelet makes its ownership pass on it.
+apiVersion: v1
+kind: PersistentVolume
+metadata: {name: wherry-receiver-state}
+spec:
+  accessModes: [ReadWriteOnce]
+  capacity: {storage: 1Gi}
+  storageClassName: standard
+  persistentVolumeReclaimPolicy: Retain
+  claimRef: {namespace: wherry, name: wherry-receiver-state}
+  local: {path: /var/lib/wherry-state}
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - {key: kubernetes.io/hostname, operator: In, values: [wherry-e2e-control-plane]}

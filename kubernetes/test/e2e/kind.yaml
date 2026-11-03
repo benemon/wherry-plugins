@@ -1,4 +1,4 @@
-# One node. The Kafka listener's node ports reach the runner, which runs wherry admin and the host commands.
+# One node. The Kafka listener's node ports reach the runner, which runs wherry operator and the host commands.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:

@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # The wherry release e2e.yml pins; change both together.
-      WHERRY_VERSION: v0.1.0-rc.25
+      WHERRY_VERSION: v0.1.0-rc.26
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -51,7 +51,9 @@ jobs:
         id: changes
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: .github/changed.sh "$BASE" "^($PLUGIN/|Makefile\$|\.github/workflows/ci\.yml\$|\.github/changed\.sh\$)"
+        run: >-
+          .github/changed.sh "$BASE"
+          "^($PLUGIN/|examples/$PLUGIN/|Makefile\$|\.github/check-examples\.sh\$|\.github/workflows/ci\.yml\$|\.github/changed\.sh\$)"
       - name: Set up Go
         if: steps.changes.outputs.changed == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7

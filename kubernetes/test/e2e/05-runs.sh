@@ -3,11 +3,7 @@
 # SSH private key, a run with an input file and a run that never starts, and checks what each brings back. Ends once
 # the sweep has removed the cancelled run's pod.
 . "$(dirname "$0")/common.sh"
-fail() {
-	echo "FAIL: $*" >&2
-	exit 1
-}
-host() { wherry "$1" --config-file "$host_config" "${@:2}"; }
+host() { wherry host "$@"; }
 submit() {
 	local run
 	run=$(host submit --selector "$@" | sed -n 's/^run_id=\([^ ]*\) .*/\1/p')
