@@ -5,6 +5,7 @@
 # Create a dedicated wherry user and group on every eligible client. The client must run as root to set ownership.
 # Each receiver has its own bundle and persistent state volume. Run one job with count 1 per receiver.
 # First record the verified plugin pin and provide config-host.yaml to wherry operator receiver apply.
+# Copy the generated bundle to receiver.bundle and the supplied local configuration to config.yaml.
 # Then, from the repository checkout:
 #   sed -e 's/^  uid  = 1001$/  uid  = <UID>/' -e 's/^  gid  = 0$/  gid  = <GID>/' examples/nomad/wherry-receiver.volume.hcl |
 #     nomad volume create -
