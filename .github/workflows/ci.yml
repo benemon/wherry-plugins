@@ -16,7 +16,7 @@ jobs:
   nomad-image:
     runs-on: ubuntu-latest
     env:
-      # The wherry release e2e.yml pins; change both together.
+      # The wherry release e2e.yml pins; change it with e2e.yml's and the systemd-host job's.
       WHERRY_VERSION: v0.1.0-rc.28
     steps:
       - name: Check out repository
@@ -116,9 +116,14 @@ jobs:
           .github/release-contents.sh dist | tee "$RUNNER_TEMP/release-contents.txt"
           diff -u ".github/release-contents/$PLUGIN.txt" "$RUNNER_TEMP/release-contents.txt"
 
-  # The systemd plugin's real-host suite, as root on the runner's systemd.
+  # The systemd plugin's real-host suite, as root on the runner's systemd, then systemd/README.md's install, upgrade and
+  # rollback of the receiver as a systemd service, from the previous release to the checkout and back.
   systemd-host:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # The wherry release e2e.yml pins; change it with e2e.yml's and the nomad-image job's.
+      WHERRY_VERSION: v0.1.0-rc.28
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -129,7 +134,9 @@ jobs:
         id: changes
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: .github/changed.sh "$BASE" "^(systemd/|Makefile\$|\.github/workflows/ci\.yml\$|\.github/changed\.sh\$)"
+        run: >-
+          .github/changed.sh "$BASE"
+          "^(systemd/|examples/systemd/|kubernetes/test/e2e/agent/|Makefile\$|\.github/workflows/ci\.yml\$|\.github/(changed|plugin-protocol|release-tools)\.sh\$)"
       - name: Set up Go
         if: steps.changes.outputs.changed == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -157,3 +164,39 @@ jobs:
         run: >-
           sudo env WHERRY_SYSTEMD_DEV=1 WHERRY_SYSTEMD_PLUGIN="$RUNNER_TEMP/wherry-plugin-systemd"
           "$RUNNER_TEMP/systemd.test" -test.count=1 -test.v -test.run 'OnSystemd|Conformance|Transient|DaemonReload|TwoRuns|UnitPropertiesOn'
+      # The steps below need the tags for the previous release, which fetch-depth: 0 fetched, and cosign, which verifies
+      # the wherry and plugin releases as the README's commands do. 05 and 06 skip, with a notice, and 04 installs the
+      # checkout's plugin, when the previous release serves another plugin protocol.
+      - name: Install cosign, with the release build's other pinned tools
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          .github/release-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Start Kafka
+        if: steps.changes.outputs.changed == 'true'
+        run: systemd/test/e2e/01-broker.sh
+      - name: Fetch and verify wherry and the previous release's plugin, and build the checkout's
+        if: steps.changes.outputs.changed == 'true'
+        run: systemd/test/e2e/02-fetch.sh
+      - name: Provision the pool, tenant and host
+        if: steps.changes.outputs.changed == 'true'
+        run: systemd/test/e2e/03-provision.sh
+      - name: Install and start the receiver as a systemd service
+        if: steps.changes.outputs.changed == 'true'
+        run: systemd/test/e2e/04-install.sh
+      - name: Upgrade the receiver to the checkout's plugin
+        if: steps.changes.outputs.changed == 'true'
+        run: systemd/test/e2e/05-upgrade.sh
+      - name: Roll the receiver back to the previous release's plugin
+        if: steps.changes.outputs.changed == 'true'
+        run: systemd/test/e2e/06-rollback.sh
+      - name: Collect the receiver's journal and status and the broker's log
+        if: failure() && steps.changes.outputs.changed == 'true'
+        run: systemd/test/e2e/collect.sh
+      - name: Upload the collected state
+        if: failure() && steps.changes.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-systemd-state
+          path: ${{ runner.temp }}/wherry-systemd-e2e/artifacts
+          retention-days: 7

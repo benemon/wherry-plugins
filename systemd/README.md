@@ -811,3 +811,73 @@ They include the protocol's conformance suite,
 plugin binary, and under the receiver unit's capability bounding set. CI
 builds both binaries and runs them on the GitHub runner's systemd, 255
 on Ubuntu 24.04.
+
+### End to end on the runner's systemd
+
+[`test/e2e`](test/e2e) then runs
+[Run the receiver as a systemd service](#run-the-receiver-as-a-systemd-service)
+on the same runner, as the `systemd-host` job of the `ci` workflow does for
+every change to `systemd/`, `examples/systemd/`, the fake agent, the root
+`Makefile`, `.github/changed.sh`, `.github/plugin-protocol.sh`,
+`.github/release-tools.sh` or the workflow. Each step is a script, run as a
+user with root through `sudo`: the README's host commands run as root, and
+the operator and host commands as the user. With systemd 252 or later,
+Docker, cosign, Go and the repository's `systemd/v*` tags on a disposable
+Linux machine with no receiver installed, and the wherry release the
+workflow pins:
+
+```sh
+export WHERRY_VERSION=$(sed -n 's/^      WHERRY_VERSION: //p' .github/workflows/ci.yml | head -n 1)
+for step in systemd/test/e2e/0*.sh; do "$step" || { systemd/test/e2e/collect.sh; break; }; done
+```
+
+1. `01-broker.sh`, harness, starts a single-broker Kafka with TLS and SCRAM
+   on `127.0.0.1:9093` through `test/kafka/up.sh` of `WHERRY_VERSION`,
+   pinned by SHA-256.
+2. `02-fetch.sh` downloads and verifies, each in an empty directory, wherry
+   of `WHERRY_VERSION` with step 1's commands, and the plugin of the
+   previous release, the latest `systemd/v*` tag before `HEAD`, with the
+   [Install plugins](https://benemon.github.io/wherry/operations-receivers#install-plugins)
+   commands. It builds the checkout's plugin with version `e2e`, as both
+   Containerfiles do. It fails when there is no such tag.
+3. `03-provision.sh`, harness, provisions what the procedure starts with:
+   `wherry operator init`, the pool `e2e` and the tenant `e2e` entitled to
+   it with the host `runner`, then `wherry host init`.
+4. `04-install.sh` runs steps 1 to 6 with the previous release's plugin:
+   it installs the version directory and the `current` and
+   `/usr/local/bin/wherry` links, checks the pin against the release's
+   checksums, writes `receivers/systemd-1.yaml` from
+   [`test/e2e/receiver.yaml`](test/e2e/receiver.yaml), whose plugin profile
+   runs the fake agent `kubernetes/test/e2e/agent/agent.sh`, with
+   [`examples/systemd/config.yaml`](../examples/systemd/config.yaml)'s
+   `ca_file` set to `/etc/wherry/kafka-ca.pem`, applies it, installs the
+   units, the bundle, the configuration and the broker's CA, and starts the
+   receiver. It then completes a run.
+5. `05-upgrade.sh` runs [Upgrade](#upgrade)'s steps 1 to 4 to the
+   checkout's plugin and completes a run.
+6. `06-rollback.sh` runs Upgrade's rollback sentence: it applies the
+   previous release's pin, repoints `current` to its version, restarts,
+   and completes a run.
+
+After each start or restart, the step reads the journal of the invocation
+it began alone,
+`journalctl -u wherry-receiver _SYSTEMD_INVOCATION_ID=<id>`, with the ID
+from `systemctl show -p InvocationID --value wherry-receiver`. It fails on
+a line ending `and the pin is <pin>`, requires the identity line
+`plugin systemd: version <version> protocol <n>` of the version the step
+installed, waits for `wherry host receivers` to show `systemd-1` `live`,
+and checks the unit has not begun another invocation since.
+
+`04-install.sh`, `05-upgrade.sh` and `06-rollback.sh` first run
+[`.github/plugin-protocol.sh`](../.github/plugin-protocol.sh), which
+compares the plugin protocol the previous release and the checkout serve,
+from `pluginsdk/link.go` at the version each `go.mod` requires. When they
+differ, a 0.x clean break, `04-install.sh` installs the checkout's plugin,
+and `05-upgrade.sh` and `06-rollback.sh` skip with a notice naming both
+protocols, since the release notes then say to upgrade the receiver and its
+plugins together, or to reset.
+
+`collect.sh` writes the receiver unit's journal and status, the agent
+units' status and the broker container's log, but no bundle, credential or
+configuration, to `artifacts` in the state directory, `$E2E_WORK`, by
+default `$TMPDIR/wherry-systemd-e2e`.
