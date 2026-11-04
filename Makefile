@@ -80,8 +80,9 @@ check-examples: ## Fail on a receiver example whose drain_timeout is not 10s bel
 	@.github/check-examples.sh $(PLUGINS)
 
 .PHONY: check-protocol
-# The e2e lanes skip the previous-release roll when .github/plugin-protocol.sh finds the plugin's previous release and
-# the checkout serving different plugin protocols; this tests that comparison. It needs the repository's tags.
+# The e2e lanes skip the previous-release roll when .github/plugin-protocol.sh finds no plugin protocol the plugin's
+# previous release and the checkout both serve, and fail on any error of the check; this tests its parsing, comparison
+# and failures. It needs the repository's tags, jq, and pluginsdk in the module cache, as test leaves it.
 check-protocol: ## Fail on a plugin protocol comparison that skips the wrong roll
 	@.github/plugin-protocol-test.sh $(PLUGINS)
 
