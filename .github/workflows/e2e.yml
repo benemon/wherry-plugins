@@ -14,7 +14,7 @@ permissions:
 
 env:
   # The wherry release whose CLI provisions and submits, and which the receiver image holds.
-  # ci.yml's nomad-image job pins the same release; change both together.
+  # ci.yml pins the same release for its nomad-image and systemd-host jobs; change both together.
   WHERRY_VERSION: v0.1.0-rc.28
   KIND_VERSION: v0.33.0
   KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
@@ -33,13 +33,24 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          # The upgrade starts from the latest kubernetes/v* tag.
           fetch-depth: 0
           persist-credentials: false
       - name: Find changes to the Kubernetes plugin or the shared build files
         id: changes
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: .github/changed.sh "$BASE" '^(kubernetes/|examples/kubernetes/|Makefile$|\.github/workflows/e2e\.yml$|\.github/changed\.sh$)'
+        run: >-
+          .github/changed.sh "$BASE"
+          '^(kubernetes/|examples/kubernetes/|Makefile$|\.github/workflows/e2e\.yml$|\.github/changed\.sh$|\.github/plugin-protocol\.sh$)'
+      # 02's .github/plugin-protocol.sh downloads, with go mod download, the pluginsdk module each side requires.
+      - name: Set up Go
+        if: steps.changes.outputs.changed == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: kubernetes/go.mod
+          check-latest: true
+          cache: false
       - name: Install kind
         if: steps.changes.outputs.changed == 'true'
         run: |
@@ -49,7 +60,7 @@ jobs:
       - name: Create the cluster and Kafka
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/01-cluster.sh
-      - name: Fetch the wherry CLI and build the images
+      - name: Fetch the wherry CLI and build the images, the checkout's and the previous release's
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/02-wherry.sh
       - name: Provision the pool, tenant, host and receiver
@@ -61,6 +72,14 @@ jobs:
       - name: Submit and wait for the runs
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/05-runs.sh
+      # 06 and 07 skip, with 02's notice, when 02's plugin protocol check finds no protocol the previous release and the
+      # checkout both serve; any failure of the check fails 02.
+      - name: Upgrade from the previous release
+        if: steps.changes.outputs.changed == 'true'
+        run: kubernetes/test/e2e/06-upgrade.sh
+      - name: Roll back to the previous release
+        if: steps.changes.outputs.changed == 'true'
+        run: kubernetes/test/e2e/07-rollback.sh
       - name: Collect the receiver log and cluster state
         if: failure() && steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/collect.sh
@@ -86,7 +105,17 @@ jobs:
         id: changes
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: .github/changed.sh "$BASE" '^(nomad/|examples/nomad/|kubernetes/test/e2e/agent/|\.github/workflows/e2e\.yml$|\.github/changed\.sh$)'
+        run: >-
+          .github/changed.sh "$BASE"
+          '^(nomad/|examples/nomad/|kubernetes/test/e2e/agent/|\.github/workflows/e2e\.yml$|\.github/changed\.sh$|\.github/plugin-protocol\.sh$)'
+      # 02's .github/plugin-protocol.sh downloads, with go mod download, the pluginsdk module each side requires.
+      - name: Set up Go
+        if: steps.changes.outputs.changed == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: nomad/go.mod
+          check-latest: true
+          cache: false
       - name: Install Nomad
         if: steps.changes.outputs.changed == 'true'
         run: |
@@ -121,6 +150,8 @@ jobs:
       - name: Submit and wait for a run
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/05-run.sh
+      # 06 and 07 skip, with 02's notice, when 02's plugin protocol check finds no protocol the previous release and the
+      # checkout both serve; any failure of the check fails 02.
       - name: Upgrade from the previous release with a run in flight
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/06-upgrade.sh

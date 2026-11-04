@@ -1,5 +1,5 @@
-# 03-provision.sh appends plugin_sha256, the SHA-256 of the plugin binary in wherry-receiver:e2e. The receiver reaches
-# Kafka at the internal bootstrap address, which Strimzi's broker certificates name.
+# pin in common.sh appends plugin_sha256, the SHA-256 of the plugin binary in the image the receiver runs. The receiver
+# reaches Kafka at the internal bootstrap address, which Strimzi's broker certificates name.
 pool: e2e
 broker: wherry-kafka-kafka-bootstrap.kafka.svc:9093
 capacity: 4

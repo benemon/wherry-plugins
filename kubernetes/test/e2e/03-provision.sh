@@ -18,11 +18,7 @@ wherry operator pool apply e2e --dir "$operator" -f "$e2e/pool.yaml"
 wherry operator tenant add e2e --dir "$operator"
 wherry operator tenant pool add e2e e2e --dir "$operator"
 wherry operator tenant host add e2e runner --dir "$operator"
-plugin_sha256=$(docker run --rm --entrypoint sha256sum wherry-receiver:e2e \
-	/usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes | cut -d' ' -f1)
-cp -R "$e2e/receiver" "$work/receiver"
-printf 'plugin_sha256:\n  kubernetes: %s\n' "$plugin_sha256" >>"$work/receiver/receiver.yaml"
-wherry operator receiver apply kind-1 --dir "$operator" -f "$work/receiver"
+pin wherry-receiver:e2e
 wherry operator check --dir "$operator"
 for bundle in "$operator/bundles/hosts/e2e/runner.bundle" "$operator/bundles/receivers/kind-1.bundle"; do
 	mask "$(sed -n 's/^password: *//p' "$bundle" | tr -d "\"'")"

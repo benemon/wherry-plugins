@@ -811,3 +811,90 @@ They include the protocol's conformance suite,
 plugin binary, and under the receiver unit's capability bounding set. CI
 builds both binaries and runs them on the GitHub runner's systemd, 255
 on Ubuntu 24.04.
+
+### End to end on the runner's systemd
+
+[`test/e2e`](test/e2e) then runs
+[Run the receiver as a systemd service](#run-the-receiver-as-a-systemd-service)
+on the same runner, as the `systemd-host` job of the `ci` workflow does for
+every change to `systemd/`, `examples/systemd/`, the root `Makefile`,
+`.github/changed.sh`, `.github/plugin-protocol.sh` or the workflow. Each
+step is a script, run as a user with root through `sudo`: the README's host
+commands run as root, and the operator and host commands as the user. With
+systemd 252 or later, Docker, cosign, Go, jq and the repository's
+`systemd/v*` tags on a disposable Linux machine with no receiver installed,
+and the wherry release the workflow pins:
+
+```sh
+export WHERRY_VERSION=$(sed -n 's/^  WHERRY_VERSION: //p' .github/workflows/ci.yml)
+for step in systemd/test/e2e/0*.sh; do "$step" || { systemd/test/e2e/collect.sh; break; }; done
+```
+
+1. `01-broker.sh`, harness, starts a single-broker Kafka with TLS and SCRAM
+   on `127.0.0.1:9093` through `test/kafka/up.sh` of `WHERRY_VERSION`,
+   pinned by SHA-256.
+2. `02-fetch.sh` first runs the plugin protocol check below. It then
+   downloads and verifies, each in an empty directory, wherry of
+   `WHERRY_VERSION` with step 1's commands, and the plugin of the previous
+   release, the latest `systemd/v*` tag before `HEAD`, with the
+   [Install plugins](https://benemon.github.io/wherry/operations-receivers#install-plugins)
+   commands. The plugin's version is the tag less `systemd/`, with its `v`,
+   as the identity line and the release's archive name carry it; the full
+   tag selects the release's download route alone. It builds the
+   checkout's plugin with version `e2e`, as both Containerfiles do. It
+   fails when there is no such tag.
+3. `03-provision.sh`, harness, provisions what the procedure starts with:
+   `wherry operator init`, the pool `e2e` and the tenant `e2e` entitled to
+   it with the host `runner`, then `wherry host init` with the broker's CA
+   as `ca.pem` in the host's configuration directory.
+4. `04-install.sh` runs steps 1 to 6 with the previous release's plugin:
+   it installs the version directory and the `current` and
+   `/usr/local/bin/wherry` links, checks the pin against the release's
+   checksums, writes `receivers/systemd-1.yaml` from
+   [`test/e2e/receiver.yaml`](test/e2e/receiver.yaml), whose plugin profile
+   runs `/bin/true`, with
+   [`examples/systemd/config.yaml`](../examples/systemd/config.yaml)'s
+   `ca_file` set to `/etc/wherry/kafka-ca.pem`, applies it, installs the
+   units, the bundle, the configuration and the broker's CA, and starts the
+   receiver. The lane submits no run.
+5. `05-upgrade.sh` runs [Upgrade](#upgrade)'s steps 1 to 4 to the
+   checkout's plugin.
+6. `06-rollback.sh` runs Upgrade's rollback sentence: it applies the
+   previous release's pin, repoints `current` to its version and restarts.
+
+Immediately before each deliberate start or restart, after the pin and the
+repoint, a step records a boundary: the unit's invocation, from
+`systemctl show -p InvocationID --value wherry-receiver`, and the cursor of
+the journal's newest entry. Within 120 seconds it then reads
+`journalctl -u wherry-receiver --after-cursor=<cursor>`, every invocation
+after the boundary, failed starts and restarts included, and fails on a
+journal it cannot read, on a line ending `and the pin is <pin>` in any of
+them, or on any identity line other than
+`plugin systemd: version <version> protocol <n>` of the version and
+protocol the step installed. It needs a fresh invocation, not the one the
+boundary saw, with that identity line. It then waits for
+`wherry host receivers` to show `systemd-1` `live`, and checks the same
+again and that the unit has not begun another invocation since. A refusal
+before the boundary, which Upgrade's order allows between the new pin and
+the repoint, does not fail the step.
+
+`02-fetch.sh` runs
+[`.github/plugin-protocol.sh`](../.github/plugin-protocol.sh), which reads
+the plugin protocols the previous release and the checkout serve: the
+pluginsdk each `go.mod` requires, fetched and verified by
+`go mod download -json` against the checksum database and that side's
+`go.sum`, serves `handshake`'s `ProtocolVersion` from `link.go`, or the
+keys of `versionedPlugins` if its `serve.go` sets `VersionedPlugins`. Any
+failure fails the step: no tag, a fetch or checksum error, a `replace`,
+`go.work` or vendored copy of pluginsdk, or a form the script does not
+know. The sides are compatible when they serve a protocol in common. When
+they serve none, a 0.x clean break, `04-install.sh` installs the checkout's
+plugin, and `05-upgrade.sh` and `06-rollback.sh` skip with a notice naming
+both, since the release notes then say to upgrade the receiver and its
+plugins together, or to reset.
+
+`collect.sh` writes the receiver unit's journal and status, the agent
+slice's status, the last boundary, the protocol check's output and the
+broker container's log, but no bundle, credential or configuration, to
+`artifacts` in the state directory, `$E2E_WORK`, by default
+`$TMPDIR/wherry-systemd-e2e`.

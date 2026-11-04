@@ -1,0 +1,16 @@
+# The receiver's file, receivers/systemd-1.yaml in the operator working directory, as Run the receiver as a systemd
+# service's step 3 creates it: 04-install.sh appends plugin_sha256 with the pin of the plugin binary it installs. The
+# lane submits no run, so the plugin profile's command is /bin/true; the plugin checks the profile when the receiver
+# configures it, before the identity line.
+pool: e2e
+capacity: 2
+plugins:
+  systemd:
+    profiles:
+      - name: noop
+        agent: noop
+        labels:
+          e2e: noop
+        config:
+          runtime:
+            command: [/bin/true]
