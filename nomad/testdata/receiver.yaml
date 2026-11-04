@@ -20,7 +20,7 @@ plugins:
     profiles:
       # A container agent that writes its reply to a file.
       - name: container
-        agent: coder
+        agent: claude
         labels:
           isolation: container
         config:

@@ -269,8 +269,9 @@ func (profile *Nomad) Ready(ctx context.Context) (bool, error) {
 // which the templates decode, so binary files arrive intact.
 func (profile *Nomad) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
 	began := time.Now()
-	path := profile.variablePath(run.ID)
-	job, err := profile.buildJob(run, path)
+	jobID := profile.jobID(run.ID)
+	path := jobVariablePrefix + jobID
+	job, err := profile.buildJob(run, jobID, path)
 	if err != nil {
 		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, err
 	}
@@ -281,7 +282,6 @@ func (profile *Nomad) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsd
 			return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, &pluginsdk.InputTooLargeError{Name: input.Name}
 		}
 	}
-	jobID := *job.ID
 	items := map[string]string{"prompt": string(run.Prompt)}
 	for _, secret := range run.Credentials {
 		items[credentialItem(secret)] = base64.StdEncoding.EncodeToString(secret.Value)
@@ -410,9 +410,8 @@ func jobState(alloc *api.AllocationListStub) pluginsdk.JobState {
 }
 
 // buildJob builds the run's batch job, whose templates read the run's material from the variables at path.
-func (profile *Nomad) buildJob(run pluginsdk.Run, path string) (*api.Job, error) {
+func (profile *Nomad) buildJob(run pluginsdk.Run, jobID, path string) (*api.Job, error) {
 	runtime := profile.runtime
-	jobID := profile.jobID(run.ID)
 	env := pluginsdk.AgentEnv(runtime.Env)
 	// A task on a driver that does not isolate its filesystem keeps the user's HOME, so an agent CLI finds its login.
 	if slices.Contains(isolated, runtime.Driver) {
@@ -510,10 +509,6 @@ func nodePool(name string) *string {
 
 func (profile *Nomad) jobID(runID string) string {
 	return profile.prefix + runID
-}
-
-func (profile *Nomad) variablePath(runID string) string {
-	return jobVariablePrefix + profile.jobID(runID)
 }
 
 func notFound(err error) bool {

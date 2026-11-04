@@ -193,7 +193,7 @@ plugins:
       credential: nomad-token
     profiles:
       - name: container
-        agent: coder
+        agent: claude
         labels:
           isolation: container
         config:
@@ -244,7 +244,7 @@ plugins:
     profiles:
       # A container agent that writes its reply to a file.
       - name: container
-        agent: coder
+        agent: claude
         labels:
           isolation: container
         config:
@@ -596,20 +596,30 @@ Run these steps from that checkout unless a step names your operator working dir
    pool: build
    plugin_sha256:
      nomad: <the image's plugin pin>
+   capacity: 2
    plugins:
      nomad:
-       profiles:
-         - name: coder
-           agent: coder
+       config:
+         namespace: agents
+         runtime:
+           driver: docker
            config:
-             runtime:
-               driver: docker
-               user: "1001"
-               config:
-                 image: registry.example.com/agent:1.0
-                 command: /bin/sh
-                 args: [-c, 'exec agent-run < "$NOMAD_TASK_DIR/prompt.txt"']
+             image: registry.example.com/claude-agent:1.0
+             command: /bin/sh
+             args:
+               - -c
+               - cd "$NOMAD_TASK_DIR" && exec claude -p --output-format stream-json --verbose < prompt.txt
+           resources:
+             cpu: 1000
+             memory_mb: 2048
+       profiles:
+         - name: container
+           agent: claude
+           labels:
+             isolation: container
    ```
+
+   Create the Nomad namespace `agents` before running the job; the record and the ACL policy name it.
 
    Use the [receiver configuration reference](https://github.com/benemon/wherry-plugins/blob/main/nomad/README.md#receiver-configuration) for the plugin settings.
    Leave `address` unset to use the job's task API socket.

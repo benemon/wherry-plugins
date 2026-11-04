@@ -243,11 +243,11 @@ config:
 ```
 
 and each file in `plugins/kubernetes/profiles` holds one plugin profile,
-such as `plugins/kubernetes/profiles/10-coder.yaml`:
+such as `plugins/kubernetes/profiles/10-container.yaml`:
 
 ```yaml
-name: coder
-agent: coder
+name: container
+agent: claude
 config:
   runtime:
     image: registry.example.com/agent:1.0
@@ -306,7 +306,7 @@ plugins:
     profiles:
       # An agent on dedicated nodes that writes its reply to a file.
       - name: dedicated
-        agent: coder
+        agent: claude
         labels:
           nodes: dedicated
         config:
@@ -744,12 +744,17 @@ Run the repository commands from that checkout and the operator commands from yo
          runtime:
            user: "1001"
        profiles:
-         - name: coder
-           agent: coder
+         - name: container
+           agent: claude
            config:
              runtime:
-               image: registry.example.com/agent:1.0
+               image: registry.example.com/claude-agent:1.0
                group: "1001"
+               command: [/bin/sh, -c]
+               args:
+                 - test -n "$WHERRY_MODEL" || WHERRY_MODEL=claude-haiku-5-5; mkdir -p "$WHERRY_INPUT_DIR" "$WHERRY_OUTPUT_DIR" && cd /wherry && exec /usr/local/bin/claude -p --output-format stream-json --verbose --model "$WHERRY_MODEL" --allowedTools "Read,Write,Edit,Glob,Grep,Bash" --add-dir "$WHERRY_INPUT_DIR" --add-dir "$WHERRY_OUTPUT_DIR" < /wherry/prompt.txt
+               env:
+                 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
    ```
 
    Set your pool, broker and agent image.

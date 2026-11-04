@@ -64,7 +64,7 @@ func TestBuildJobFetchesEachInputAsAnArtifact(t *testing.T) {
 	}
 	run := testRun("fetches")
 	run.Fetches = []pluginsdk.Fetch{{Name: "data.tar.gz", URL: "https://store.example.test/b/k?X-Amz-Signature=1", Size: 3, SHA256: strings.Repeat("a", 64)}}
-	job, err := profile.buildJob(run, profile.variablePath(run.ID))
+	job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}

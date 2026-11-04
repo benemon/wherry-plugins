@@ -137,7 +137,7 @@ A plugin profile file in a receiver configuration directory, such as
 
 ```yaml
 name: host
-agent: coder
+agent: claude
 labels:
   platform: systemd
 config:
@@ -181,7 +181,7 @@ plugins:
     profiles:
       # Claude Code, each run as a dynamic user of its own.
       - name: host
-        agent: coder
+        agent: claude
         config:
           runtime:
             command: [/bin/sh, -c]
@@ -561,11 +561,21 @@ Run host installation commands as root from that checkout.
    plugins:
      systemd:
        profiles:
-         - name: coder
-           agent: coder
+         - name: host
+           agent: claude
            config:
              runtime:
-               command: [/usr/local/bin/agent-run, --prompt-file, /wherry/prompt.txt]
+               command: [/bin/sh, -c]
+               args:
+                 - >-
+                   test -n "$WHERRY_MODEL" || WHERRY_MODEL=claude-haiku-5-5;
+                   mkdir -p "$WHERRY_INPUT_DIR" "$WHERRY_OUTPUT_DIR" &&
+                   exec /usr/local/bin/claude -p --output-format stream-json --verbose --model "$WHERRY_MODEL"
+                   --allowedTools "Read,Write,Edit,Glob,Grep,Bash" --add-dir "$WHERRY_INPUT_DIR" --add-dir "$WHERRY_OUTPUT_DIR"
+                   < /wherry/prompt.txt
+               env:
+                 SHELL: /bin/bash
+                 DISABLE_AUTOUPDATER: "1"
    ```
 
    Use the [receiver configuration reference](https://github.com/benemon/wherry-plugins/blob/main/systemd/README.md#receiver-configuration) for agent commands and limits.
