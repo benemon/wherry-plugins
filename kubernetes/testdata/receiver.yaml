@@ -30,7 +30,7 @@ plugins:
     profiles:
       # An agent on dedicated nodes that writes its reply to a file.
       - name: dedicated
-        agent: coder
+        agent: claude
         labels:
           nodes: dedicated
         config:
