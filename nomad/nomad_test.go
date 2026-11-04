@@ -174,7 +174,7 @@ func TestBuildJobFromRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("build")
-	job, err := profile.buildJob(run, profile.variablePath(run.ID))
+	job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestBuildJobFromRuntime(t *testing.T) {
 		t.Fatalf("templates %#v", templates)
 	}
 	run.Credentials = nil
-	job, err = profile.buildJob(run, profile.variablePath(run.ID))
+	job, err = profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestBuildJobHomeFollowsDriver(t *testing.T) {
 			t.Fatal(err)
 		}
 		run := testRun("home")
-		job, err := profile.buildJob(run, profile.variablePath(run.ID))
+		job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -244,7 +244,7 @@ func TestJobIDIsTheRunID(t *testing.T) {
 	run := testRun("ids")
 	run.ID = "run-ids"
 	path := profile.variablePath(run.ID)
-	job, err := profile.buildJob(run, path)
+	job, err := profile.buildJob(run, profile.jobID(run.ID), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestBuildJobRunsAsTheRuntimeUser(t *testing.T) {
 			run := testRun("user")
 			run.Inputs = []pluginsdk.File{{Name: "data.csv"}}
 			run.Credentials = []pluginsdk.Secret{{Name: "deploy-key", File: "id_ed25519"}, {Name: "token", File: "token"}}
-			job, err := profile.buildJob(run, profile.variablePath(run.ID))
+			job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -392,7 +392,7 @@ func TestBuildJobCarriesTheRuntimeGroups(t *testing.T) {
 			}
 			run := testRun("groups")
 			run.Credentials = []pluginsdk.Secret{{Name: "token", File: "token"}}
-			job, err := profile.buildJob(run, profile.variablePath(run.ID))
+			job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -540,7 +540,7 @@ func TestLookupWaitsForUnplacedJob(t *testing.T) {
 	run := testRun("lookup-unplaced")
 	profile.datacenters = []string{"wherry-no-such-datacenter"}
 	cleanupRun(t, profile, run)
-	job, err := profile.buildJob(run, profile.variablePath(run.ID))
+	job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1128,7 +1128,7 @@ func TestBuildJobDeliversCredentialsAtTheirTargets(t *testing.T) {
 			run := testRun("targets")
 			run.Credentials = credentials
 			path := profile.variablePath(run.ID)
-			job, err := profile.buildJob(run, path)
+			job, err := profile.buildJob(run, profile.jobID(run.ID), path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1212,7 +1212,7 @@ func TestBuildJobOmitsPlaintext(t *testing.T) {
 	run := testRun("plaintext")
 	run.Inputs = []pluginsdk.File{{Name: "data.csv", Data: []byte("input-content-never-in-the-job")}}
 	run.Credentials = twoOfEachTarget
-	job, err := profile.buildJob(run, profile.variablePath(run.ID))
+	job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1343,7 +1343,7 @@ func TestJobHoldsOnlyTheAgentTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("one-task")
-	job, err := profile.buildJob(run, profile.variablePath(run.ID))
+	job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1381,7 +1381,7 @@ func TestBuildJobLeavesUnsetPlacementToNomad(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("defaults")
-	job, err := profile.buildJob(run, profile.variablePath(run.ID))
+	job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2175,7 +2175,7 @@ func TestDirectoriesFollowTheDriver(t *testing.T) {
 			t.Errorf("%s directories %+v, want %+v", driver, got, want)
 		}
 		run := testRun("directories")
-		job, err := profile.buildJob(run, profile.variablePath(run.ID))
+		job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2210,7 +2210,7 @@ func TestBuildJobDeliversFilesThroughTemplates(t *testing.T) {
 	run.Inputs = []pluginsdk.File{{Name: "data.csv"}}
 	run.Credentials = []pluginsdk.Secret{{Name: "deploy-key", File: "id_ed25519"}}
 	path := profile.variablePath(run.ID)
-	job, err := profile.buildJob(run, path)
+	job, err := profile.buildJob(run, profile.jobID(run.ID), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2236,7 +2236,7 @@ func TestBuildJobIsolatesTheAgentsGit(t *testing.T) {
 	profile.runtime.Env = map[string]string{"GIT_SSH_COMMAND": "ssh -o StrictHostKeyChecking=no", "GIT_SSH": "ssh", "GIT_CURL_VERBOSE": "1",
 		"GIT_CONFIG_GLOBAL": "/etc/agent-gitconfig", "GIT_TRACE": "/tmp/trace", "KEPT": "yes"}
 	run := testRun("isolated")
-	job, err := profile.buildJob(run, profile.variablePath(run.ID))
+	job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2417,7 +2417,7 @@ func TestJobEnvCarriesTheModelOnlyWhenSet(t *testing.T) {
 	for model, want := range map[string]bool{"": false, "sonnet": true} {
 		run := testRun("model")
 		run.Model = model
-		job, err := profile.buildJob(run, profile.variablePath(run.ID))
+		job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2691,7 +2691,7 @@ func TestBuildJobDefaultsResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("resources")
-	job, err := profile.buildJob(run, profile.variablePath(run.ID))
+	job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2948,4 +2948,8 @@ func TestWaitsBlockOnTheAllocation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (profile *Nomad) variablePath(runID string) string {
+	return jobVariablePrefix + profile.jobID(runID)
 }
