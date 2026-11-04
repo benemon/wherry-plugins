@@ -11,7 +11,7 @@ nomad var put -out none nomad/jobs/wherry-receiver bundle=@"$operator/bundles/re
 	config=@"$work/config.yaml" ca=@"$work/kafka/ca.crt" >/dev/null
 nomad volume create "$repo/examples/nomad/wherry-receiver.volume.hcl"
 nomad job validate -var image=wherry-receiver:e2e "$job"
-nomad job validate -var version=e2e -var uid=1001 -var gid=1001 "$host_job"
+nomad job validate -var uid=1001 -var gid=1001 "$host_job"
 roll wherry-receiver:e2e
 nomad alloc logs -job wherry-receiver receiver | grep -F 'plugin nomad: version e2e ' >/dev/null ||
 	fail "the receiver did not log plugin nomad: version e2e"
