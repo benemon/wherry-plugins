@@ -1233,15 +1233,25 @@ as the new pod's receiver refuses its plugin's pin, waits for the receiver
 to be ready, and checks the new pod's log, with `kubectl logs` and not
 `--previous`, for no refusal and for the identity line
 `plugin kubernetes: version <version> protocol <n>` of the version it
-rolled to, and that the receiver has not restarted.
+rolled to, and no other, and that the receiver has not restarted: `e2e` for
+the checkout's image, and for the previous release's the tag less
+`kubernetes/`, with its `v`, which is also the image's `VERSION`.
 
-`06-upgrade.sh` and `07-rollback.sh` first run
-[`.github/plugin-protocol.sh`](../.github/plugin-protocol.sh), which
-compares the plugin protocol the previous release and the checkout serve,
-from `pluginsdk/link.go` at the version each `go.mod` requires. When they
-differ, a 0.x clean break, each step skips its rolls with a notice naming
-both protocols, since the release notes then say to upgrade the receiver
-and its plugins together, or to reset. Steps 1 to 5 still run.
+`02-wherry.sh` first runs
+[`.github/plugin-protocol.sh`](../.github/plugin-protocol.sh), which reads
+the plugin protocols the previous release and the checkout serve: the
+pluginsdk each `go.mod` requires, fetched and verified by
+`go mod download -json` against the checksum database and that side's
+`go.sum`, serves `handshake`'s `ProtocolVersion` from `link.go`, or the
+keys of `versionedPlugins` if its `serve.go` sets `VersionedPlugins`. Any
+failure fails the step: no tag, a fetch or checksum error, a `replace`,
+`go.work` or vendored copy of pluginsdk, or a form the script does not
+know. The sides are compatible when they serve a protocol in common, and
+each roll expects the newest protocol its side serves in the identity line.
+When they serve none, a 0.x clean break, `06-upgrade.sh` and
+`07-rollback.sh` skip their rolls with a notice naming both, since the
+release notes then say to upgrade the receiver and its plugins together, or
+to reset. Steps 1 to 5 still run.
 
 `collect.sh` writes the receiver's log and the cluster's state, but no
 Secret, to `artifacts` in the state directory, `$E2E_WORK`, by default

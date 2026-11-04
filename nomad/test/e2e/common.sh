@@ -102,16 +102,27 @@ rolled() {
 	deployed && ready
 }
 
+# identified fails the step unless the receiver log on standard input, named $3 in errors, logs the identity line of the
+# plugin version $1 and protocol $2, and no other identity line.
+identified() {
+	local want="plugin nomad: version $1 protocol $2" lines
+	lines=$(grep -o -E '(^|[[:space:]])plugin nomad: version [^[:space:]]+ protocol [0-9]+$' | sed 's/^[[:space:]]//' || true)
+	[ -n "$lines" ] || fail "$3 logged no identity line; want '$want'"
+	if grep -v -x -F "$want" <<<"$lines" >/dev/null; then
+		fail "$3 logged '$(grep -v -x -F -m 1 "$want" <<<"$lines")', not '$want'"
+	fi
+}
+
 # roll upgrades or rolls back the receiver as nomad/README.md orders it: it pins the image $1's plugin, then, once the
 # record holds that pin, runs the receiver job with the image and waits for it to deploy. The new allocation's receiver
-# must log the identity line of the plugin version $2, and must never have run under another pin; the step reads that
-# allocation's log alone.
+# must log the identity line of the plugin version $2 and protocol $3, and must never have run under another pin; the
+# step reads that allocation's log alone.
 roll() {
 	local alloc log
 	pin "$1"
 	pinned "$1"
 	nomad job run -detach -var image="$1" "$job" >/dev/null
-	wait_for 300 rolled "$1"
+	wait_for 300 rolled "$1" || fail "the receiver job did not deploy $1 with a ready receiver"
 	alloc=$(newest)
 	[ -n "$alloc" ] || fail "the receiver job has no running allocation"
 	[ "$alloc" = "$(current)" ] || fail "allocation $alloc does not run the receiver job's current version"
@@ -119,25 +130,50 @@ roll() {
 	if grep -F ' and the pin is ' <<<"$log" >/dev/null; then
 		fail "allocation $alloc's receiver ran $1's plugin under another pin"
 	fi
-	grep -F "plugin nomad: version $2 protocol " <<<"$log" >/dev/null ||
-		fail "allocation $alloc's receiver did not log plugin nomad: version $2"
-	echo "allocation $alloc: $(grep -F -m 1 'plugin nomad: version ' <<<"$log")"
+	identified "$2" "$3" "allocation $alloc's receiver" <<<"$log"
+	echo "allocation $alloc: plugin nomad: version $2 protocol $3"
 }
 
 # previous_version prints the plugin version of the previous release, which 02-wherry.sh builds as
 # wherry-receiver:previous.
 previous_version() { cat "$work/previous-version"; }
 
-# same_protocol succeeds when the previous release and the checkout serve the same plugin protocol. When they differ it
-# fails after .github/plugin-protocol.sh's notice, and the step skips its roll to the previous release. It fails the
-# step on any other error, such as no previous release.
+# protocol_check runs .github/plugin-protocol.sh for the nomad plugin and keeps its result lines in $work/protocol.env:
+# the previous release's tag, the protocols each side serves, and result=run or result=skip. Any failure of the check
+# fails the step; a skip is only ever the check's result=skip, never an error.
+protocol_check() {
+	"$repo/.github/plugin-protocol.sh" nomad | tee "$work/protocol.out"
+	grep -E '^(previous|previous_protocols|current_protocols|result)=' "$work/protocol.out" >"$work/protocol.env"
+}
+
+# checked prints the value of the key $1 that protocol_check kept, and fails the step when it has none.
+checked() {
+	local value
+	value=$(sed -n "s/^$1=//p" "$work/protocol.env" 2>/dev/null || true)
+	[ -n "$value" ] || fail "02-wherry.sh's protocol check kept no $1"
+	echo "$value"
+}
+
+# protocol prints the plugin protocol the receiver runs with the side $1, previous or current: the newest it serves.
+protocol() {
+	local protocols
+	protocols=$(checked "$1_protocols") || exit 1
+	tr ' ' '\n' <<<"$protocols" | sort -n | tail -n 1
+}
+
+# same_protocol succeeds when protocol_check found protocols both sides serve. When it found none it repeats the check's
+# notice and fails, and the step skips its roll to the previous release. Any other value fails the step.
 same_protocol() {
-	local code=0
-	"$repo/.github/plugin-protocol.sh" nomad || code=$?
-	case $code in
-	0) return 0 ;;
-	2) echo "SKIP: $(basename "$0"): the previous release serves another plugin protocol" && return 1 ;;
-	*) fail "the plugin protocol check exited $code" ;;
+	local result
+	result=$(checked result) || exit 1
+	case $result in
+	run) return 0 ;;
+	skip)
+		grep '^::notice ' "$work/protocol.out" || true
+		echo "SKIP: $(basename "$0"): the previous release and the checkout serve no plugin protocol in common"
+		return 1
+		;;
+	*) fail "the plugin protocol check's result is '$result'" ;;
 	esac
 }
 

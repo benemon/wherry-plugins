@@ -955,17 +955,26 @@ applies the receiver's configuration with the SHA-256 of the plugin binary
 in the image it runs, then runs the job with the image. It fails as soon as
 the new allocation's receiver refuses its plugin's pin, and checks that
 allocation's log alone for the identity line
-`plugin nomad: version <version> protocol <n>` of the version it rolled to:
-`e2e` for the checkout's image, the tag's version for the previous
-release's.
+`plugin nomad: version <version> protocol <n>` of the version it rolled to,
+and no other: `e2e` for the checkout's image, and for the previous
+release's the tag less `nomad/`, with its `v`, which is also the image's
+`VERSION`.
 
-`06-upgrade.sh` and `07-rollback.sh` first run
-[`.github/plugin-protocol.sh`](../.github/plugin-protocol.sh), which
-compares the plugin protocol the previous release and the checkout serve,
-from `pluginsdk/link.go` at the version each `go.mod` requires. When they
-differ, a 0.x clean break, each step skips its rolls with a notice naming
-both protocols, since the release notes then say to upgrade the receiver
-and its plugins together, or to reset. Steps 1 to 5 still run.
+`02-wherry.sh` first runs
+[`.github/plugin-protocol.sh`](../.github/plugin-protocol.sh), which reads
+the plugin protocols the previous release and the checkout serve: the
+pluginsdk each `go.mod` requires, fetched and verified by
+`go mod download -json` against the checksum database and that side's
+`go.sum`, serves `handshake`'s `ProtocolVersion` from `link.go`, or the
+keys of `versionedPlugins` if its `serve.go` sets `VersionedPlugins`. Any
+failure fails the step: no tag, a fetch or checksum error, a `replace`,
+`go.work` or vendored copy of pluginsdk, or a form the script does not
+know. The sides are compatible when they serve a protocol in common, and
+each roll expects the newest protocol its side serves in the identity line.
+When they serve none, a 0.x clean break, `06-upgrade.sh` and
+`07-rollback.sh` skip their rolls with a notice naming both, since the
+release notes then say to upgrade the receiver and its plugins together, or
+to reset. Steps 1 to 5 still run.
 
 `collect.sh` writes the Nomad agent's and the receiver's logs and the jobs'
 state to `artifacts` in the state directory, `$E2E_WORK`, by default

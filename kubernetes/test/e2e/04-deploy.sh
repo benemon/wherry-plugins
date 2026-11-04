@@ -4,7 +4,8 @@
 # wherry, which enforces Pod Security restricted: a copy of examples/kubernetes holding the receiver's bundle and the
 # Strimzi cluster CA, with ca_file, the fsGroup patch and the image set, applied with kubectl apply -k. The state
 # volume's root is root's, so the kubelet's ownership pass gives it the fsGroup on its first mount. The receiver is then
-# restarted, and must start with its signing key still 0600.
+# restarted, and must start with its signing key still 0600. Each start must log the identity line of version e2e and
+# the checkout's protocol.
 . "$(dirname "$0")/common.sh"
 kind load docker-image --name "$cluster" wherry-receiver:e2e wherry-receiver:previous wherry-e2e-agent:e2e
 
@@ -30,9 +31,10 @@ kubectl apply -k "$deploy"
 kubectl rollout status -n "$namespace" deployment/wherry-receiver --timeout=5m
 
 receiver() { kubectl exec -n "$namespace" deployment/wherry-receiver -c receiver -- "$@"; }
+protocol=$(protocol current)
 started() {
 	kubectl logs -n "$namespace" deployment/wherry-receiver -c receiver 2>/dev/null |
-		grep -F 'plugin kubernetes: version e2e ' >/dev/null
+		grep -E "(^|[[:space:]])plugin kubernetes: version e2e protocol $protocol\$" >/dev/null
 }
 wait_for 120 started
 receiver test -f /var/lib/wherry/state/signing.key || fail "the receiver wrote no signing key"

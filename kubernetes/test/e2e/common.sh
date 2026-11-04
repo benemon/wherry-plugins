@@ -107,10 +107,21 @@ rolled() {
 	kubectl rollout status -n "$namespace" deployment/wherry-receiver --timeout=10s >/dev/null && ready
 }
 
+# identified fails the step unless the receiver log on standard input, named $3 in errors, logs the identity line of the
+# plugin version $1 and protocol $2, and no other identity line.
+identified() {
+	local want="plugin kubernetes: version $1 protocol $2" lines
+	lines=$(grep -o -E '(^|[[:space:]])plugin kubernetes: version [^[:space:]]+ protocol [0-9]+$' | sed 's/^[[:space:]]//' || true)
+	[ -n "$lines" ] || fail "$3 logged no identity line; want '$want'"
+	if grep -v -x -F "$want" <<<"$lines" >/dev/null; then
+		fail "$3 logged '$(grep -v -x -F -m 1 "$want" <<<"$lines")', not '$want'"
+	fi
+}
+
 # roll upgrades or rolls back the receiver as kubernetes/README.md orders it: it pins the image $1's plugin, then, once
 # the record holds that pin, sets the image's tag in the Kustomize copy, applies it and waits for the rollout. The new
-# pod's receiver must log the identity line of the plugin version $2, must never have refused its pin, and must not
-# have restarted; the step reads that pod's log alone.
+# pod's receiver must log the identity line of the plugin version $2 and protocol $3, must never have refused its pin,
+# and must not have restarted; the step reads that pod's log alone.
 roll() {
 	local name log restarts
 	pin "$1"
@@ -119,32 +130,57 @@ roll() {
 	grep -F "newName: wherry-receiver, newTag: ${1#*:}}" "$deploy/kustomization.yaml" >/dev/null ||
 		fail "kustomization.yaml does not set the image $1"
 	kubectl apply -k "$deploy" >/dev/null
-	wait_for 300 rolled "$1"
+	wait_for 300 rolled "$1" || fail "the receiver Deployment did not roll out $1 with a ready receiver"
 	name=$(pod "$1")
 	log=$(kubectl logs -n "$namespace" "$name" -c receiver)
 	if grep -F ' and the pin is ' <<<"$log" >/dev/null; then
 		fail "pod $name's receiver ran $1's plugin under another pin"
 	fi
-	grep -F "plugin kubernetes: version $2 protocol " <<<"$log" >/dev/null ||
-		fail "pod $name's receiver did not log plugin kubernetes: version $2"
+	identified "$2" "$3" "pod $name's receiver" <<<"$log"
 	restarts=$(kubectl get pod -n "$namespace" "$name" -o jsonpath='{.status.containerStatuses[?(@.name=="receiver")].restartCount}')
 	[ "$restarts" = 0 ] || fail "pod $name's receiver restarted $restarts times"
-	echo "pod $name: $(grep -F -m 1 'plugin kubernetes: version ' <<<"$log")"
+	echo "pod $name: plugin kubernetes: version $2 protocol $3"
 }
 
 # previous_version prints the plugin version of the previous release, which 02-wherry.sh builds as
 # wherry-receiver:previous.
 previous_version() { cat "$work/previous-version"; }
 
-# same_protocol succeeds when the previous release and the checkout serve the same plugin protocol. When they differ it
-# fails after .github/plugin-protocol.sh's notice, and the step skips its roll to the previous release. It fails the
-# step on any other error, such as no previous release.
+# protocol_check runs .github/plugin-protocol.sh for the kubernetes plugin and keeps its result lines in
+# $work/protocol.env: the previous release's tag, the protocols each side serves, and result=run or result=skip. Any failure of the check
+# fails the step; a skip is only ever the check's result=skip, never an error.
+protocol_check() {
+	"$repo/.github/plugin-protocol.sh" kubernetes | tee "$work/protocol.out"
+	grep -E '^(previous|previous_protocols|current_protocols|result)=' "$work/protocol.out" >"$work/protocol.env"
+}
+
+# checked prints the value of the key $1 that protocol_check kept, and fails the step when it has none.
+checked() {
+	local value
+	value=$(sed -n "s/^$1=//p" "$work/protocol.env" 2>/dev/null || true)
+	[ -n "$value" ] || fail "02-wherry.sh's protocol check kept no $1"
+	echo "$value"
+}
+
+# protocol prints the plugin protocol the receiver runs with the side $1, previous or current: the newest it serves.
+protocol() {
+	local protocols
+	protocols=$(checked "$1_protocols") || exit 1
+	tr ' ' '\n' <<<"$protocols" | sort -n | tail -n 1
+}
+
+# same_protocol succeeds when protocol_check found protocols both sides serve. When it found none it repeats the check's
+# notice and fails, and the step skips its roll to the previous release. Any other value fails the step.
 same_protocol() {
-	local code=0
-	"$repo/.github/plugin-protocol.sh" kubernetes || code=$?
-	case $code in
-	0) return 0 ;;
-	2) echo "SKIP: $(basename "$0"): the previous release serves another plugin protocol" && return 1 ;;
-	*) fail "the plugin protocol check exited $code" ;;
+	local result
+	result=$(checked result) || exit 1
+	case $result in
+	run) return 0 ;;
+	skip)
+		grep '^::notice ' "$work/protocol.out" || true
+		echo "SKIP: $(basename "$0"): the previous release and the checkout serve no plugin protocol in common"
+		return 1
+		;;
+	*) fail "the plugin protocol check's result is '$result'" ;;
 	esac
 }
