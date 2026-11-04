@@ -5,7 +5,7 @@ plugin for one kind of platform. A receiver ships with no plugins; it runs
 `wherry-plugin-<type>` from its plugin directory for each plugin type in its
 configuration, and configures each of that plugin's profiles in it. See
 [Plugins](https://benemon.github.io/wherry/commands#plugins) for the
-protocol and [Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
+protocol and [Install plugins](https://benemon.github.io/wherry/operations-receivers#install-plugins)
 for their installation.
 
 | Directory | Plugin | Plugin type |

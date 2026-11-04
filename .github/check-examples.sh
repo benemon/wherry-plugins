@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Checks the receiver examples of the plugins named as arguments: each drain_timeout stays at least 10 seconds below
-# its platform's stop window, since a stop takes up to drain_timeout plus 5 seconds, the Kubernetes receiver limits the
-# volume ownership pass and its fsGroup patch sets fsGroup, and the Nomad jobs render the bundle and the local
-# configuration from their Nomad variable. Then fails on a shell script
-# in examples/, and on any tracked file outside a changelog that names a command or variable wherry removed; the
-# pattern is assembled from fragments so this file is scanned like every other.
+# Checks the receiver examples and READMEs of the plugins named as arguments, or of every plugin without arguments.
+# Each README holds exactly one install region, which the wherry documentation site includes. Inside it, outside fenced
+# code opened by ``` or ~~~, every link is absolute (http, https or mailto) and no heading is above ##. Then each
+# drain_timeout stays at least 10 seconds below its platform's stop window, since a stop takes up to drain_timeout plus
+# 5 seconds, the Kubernetes receiver limits the volume ownership pass and its fsGroup patch sets fsGroup, and the Nomad
+# jobs render the bundle and the local configuration from their Nomad variable. Then fails on a shell script in
+# examples/, and on any tracked file outside a changelog that names a command or variable wherry removed; the pattern is
+# assembled from fragments so this file is scanned like every other.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 status=0
@@ -47,6 +49,46 @@ templates() {
 
 plugins=("$@")
 [ $# -gt 0 ] || plugins=(nomad kubernetes systemd)
+# Each procedure is included as a page section by the wherry documentation site.
+# Check both boundaries so a missing closing marker cannot silently include the reference.
+for plugin in "${plugins[@]}"; do
+	file="$plugin/README.md"
+	if ! awk '
+		function fail(message) { printf "FAIL: %s:%d: %s\n", FILENAME, FNR, message; bad = 1 }
+		$0 == "<!-- #region install -->" {
+			starts++; if (inside || ends) fail("misplaced install region start")
+			inside = 1; next
+		}
+		$0 == "<!-- #endregion install -->" {
+			ends++; if (!inside) fail("install region end without start")
+			inside = 0; next
+		}
+		inside {
+			# A fence opens with three or more backticks or tildes and closes with the same character.
+			if (match($0, /^[[:space:]]*(```|~~~)/)) {
+				char = substr($0, RSTART + RLENGTH - 1, 1)
+				if (fence == "") fence = char
+				else if (fence == char) fence = ""
+				next
+			}
+			if (fence != "") next
+			rest = $0
+			while (match(rest, /\]\(/)) {
+				rest = substr(rest, RSTART + RLENGTH)
+				if (rest !~ /^(https?:\/\/|mailto:)/) fail("relative link inside install region")
+			}
+			if ($0 ~ /^ {0,3}#[[:space:]]/) fail("install region heading must start at ##")
+		}
+		END {
+			if (starts != 1 || ends != 1 || inside)
+				fail("expected exactly one complete install region")
+			exit bad
+		}
+	' "$file"; then
+		status=1
+	fi
+done
+
 drain='^drain_timeout: *\([^ #]*\).*$'
 for plugin in "${plugins[@]}"; do
 	case $plugin in

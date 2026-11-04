@@ -2,13 +2,13 @@
 
 A receiver deploys from two files. `wherry operator receiver apply` writes its
 bundle to `bundles/receivers/<name>.bundle` in the operator's working
-directory. The operator writes its local configuration, `config.yaml`
-([Receiver local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration)).
+directory. You provide its local configuration, `config.yaml`, before applying it
+([Receiver local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration)).
 Each example here holds the `config.yaml` for its platform and shows how
 the platform takes the two files, with the platform's own tools. Each
 example sets its platform's stop window and keeps `drain_timeout` at least
 10 seconds below it
-([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)).
+([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration-receiver#drain-timeout-and-the-stop-window)).
 `make check-examples` checks it.
 
 These examples show ways to run a receiver and its plugins. Adapt them to
@@ -18,7 +18,9 @@ your environment. They are not published images or packages.
 
 This example installs a receiver service, its [local
 configuration](systemd/config.yaml), an agent slice, and a tmpfiles entry.
-The [unit file](systemd/wherry-receiver.service) loads the bundle as a
+The host layout uses `/usr/local/libexec/wherry/<version>/` for `wherry` and
+`plugins/`, with `current` selecting the live version and `/usr/local/bin/wherry`
+pointing at `current/wherry`. The [unit file](systemd/wherry-receiver.service) loads the bundle as a
 systemd credential. See the [systemd plugin's full run instructions](../systemd/README.md#run-the-receiver-as-a-systemd-service).
 
 ## Kubernetes
@@ -44,4 +46,8 @@ keeps its signing key across a job stop and run; see
 [Run the receiver in Nomad](../nomad/README.md#run-the-receiver-in-nomad).
 [A job under the exec driver](nomad/wherry-receiver-host.nomad.hcl) is an
 example only; its [local configuration](nomad/config-host.yaml) names the
-plugin directory of the version it runs.
+plugin directory `/usr/local/libexec/wherry/current/plugins`.
+On hosts, `/usr/local/libexec/wherry/<version>/` holds `wherry` and `plugins/`.
+The `current` symlink selects the live version, and `/usr/local/bin/wherry`
+points at `current/wherry`. Install upgrades beside the old version, apply
+the new plugin pin, repoint `current` and restart. Roll back with the previous pin and symlink target.

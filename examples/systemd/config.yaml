@@ -7,7 +7,7 @@ bundle: /run/credentials/wherry-receiver.service/bundle
 # For a broker under a private CA, a file of its certificates. Unset, the system roots.
 # ca_file: /etc/wherry/kafka-ca.pem
 state_dir: /var/lib/wherry/state
-plugin_dir: /usr/local/libexec/wherry/plugins
+plugin_dir: /usr/local/libexec/wherry/current/plugins
 metrics_addr: ":9464"
 # A stop takes up to drain_timeout plus 5 seconds, so drain_timeout stays at least 10 seconds below the unit's
 # TimeoutStopSec, 30 seconds.
