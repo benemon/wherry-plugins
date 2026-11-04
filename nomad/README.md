@@ -32,7 +32,10 @@ Keep the directories writable only by root.
 Point `/usr/local/libexec/wherry/current` at the version directory and
 `/usr/local/bin/wherry` at `/usr/local/libexec/wherry/current/wherry`.
 Set `plugin_dir: /usr/local/libexec/wherry/current/plugins` in the receiver's local configuration.
-The receiver verifies the binary against `plugin_sha256.nomad` before running it.
+Its default, `/usr/local/libexec/wherry/plugins`, does not follow the versioned layout.
+The receiver runs the plugin only from a binary whose SHA-256 is the pin its record holds for the type:
+`plugin_sha256: {nomad: HEX}` in the receiver's file, which `wherry operator receiver apply` records.
+The plugin is not run by hand.
 [Run the receiver in Nomad](#run-the-receiver-in-nomad) covers pinning and deployment.
 
 ## Credentials

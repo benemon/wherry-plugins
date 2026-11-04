@@ -30,7 +30,9 @@ Download and verify the release binary using
 with `plugin=systemd`, or use [Build](#build).
 Install it as `/usr/local/libexec/wherry/<version>/plugins/wherry-plugin-systemd`
 beside the version's `wherry`, with root ownership and mode 0755.
-The receiver verifies it against `plugin_sha256.systemd`.
+The receiver runs the plugin only from a binary whose SHA-256 is the pin its record holds for the type:
+`plugin_sha256: {systemd: HEX}` in the receiver's file, which `wherry operator receiver apply` records.
+The plugin is not run by hand.
 [Run the receiver as a systemd service](#run-the-receiver-as-a-systemd-service)
 covers the version symlinks, local configuration and pin.
 
