@@ -2,8 +2,9 @@
 # Fetches the wherry release WHERRY_VERSION for this machine into $E2E_WORK/bin, through the receiver image's own
 # fetch stage, which verifies the checksums' cosign signature and the archive's SHA-256. Builds the receiver image from
 # this checkout as wherry-receiver:e2e with plugin version e2e, from the latest nomad/v* tag before HEAD as
-# wherry-receiver:previous with that tag's version, both with WHERRY_VERSION, and the fake agent's image: provisioning
-# pins the plugin binary of the image the receiver runs.
+# wherry-receiver:previous with that tag's version, which it keeps in $E2E_WORK/previous-version, both with
+# WHERRY_VERSION, and the fake agent's image: provisioning pins the plugin binary of the image the receiver runs. With
+# no nomad/v* tag before HEAD it fails, as the upgrade has no release to start from.
 . "$(dirname "$0")/common.sh"
 : "${WHERRY_VERSION:?}"
 case $(uname -m) in
@@ -14,8 +15,10 @@ esac
 docker build -f "$repo/examples/nomad/Containerfile" --target wherry --build-arg WHERRY_VERSION="$WHERRY_VERSION" \
 	--build-arg WHERRY_ARCH="$arch" --output "type=local,dest=$work/bin" "$repo"
 
-previous=$(git -C "$repo" describe --tags --abbrev=0 --match 'nomad/v*' HEAD^)
+previous=$(git -C "$repo" describe --tags --abbrev=0 --match 'nomad/v*' HEAD^) ||
+	fail "no nomad/v* tag before HEAD; fetch the tags"
 echo "previous release: $previous"
+echo "${previous#nomad/}" >"$work/previous-version"
 docker build -f "$repo/examples/nomad/Containerfile" --build-arg VERSION=e2e --build-arg WHERRY_VERSION="$WHERRY_VERSION" \
 	-t wherry-receiver:e2e "$repo"
 git -C "$repo" archive "$previous" |

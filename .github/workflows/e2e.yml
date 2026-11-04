@@ -86,7 +86,17 @@ jobs:
         id: changes
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: .github/changed.sh "$BASE" '^(nomad/|examples/nomad/|kubernetes/test/e2e/agent/|\.github/workflows/e2e\.yml$|\.github/changed\.sh$)'
+        run: >-
+          .github/changed.sh "$BASE"
+          '^(nomad/|examples/nomad/|kubernetes/test/e2e/agent/|\.github/workflows/e2e\.yml$|\.github/(changed|plugin-protocol)\.sh$)'
+      # .github/plugin-protocol.sh downloads the pluginsdk module each side requires, to compare their protocols.
+      - name: Set up Go
+        if: steps.changes.outputs.changed == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: nomad/go.mod
+          check-latest: true
+          cache: false
       - name: Install Nomad
         if: steps.changes.outputs.changed == 'true'
         run: |
@@ -121,6 +131,7 @@ jobs:
       - name: Submit and wait for a run
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/05-run.sh
+      # 06 and 07 skip, with a notice, when the previous release serves another plugin protocol.
       - name: Upgrade from the previous release with a run in flight
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/06-upgrade.sh

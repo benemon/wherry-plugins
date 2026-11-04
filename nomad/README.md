@@ -900,7 +900,7 @@ every change to `nomad/`, `examples/nomad/`, the fake agent or the
 workflow. Each step is a script; with systemd, root through sudo, Docker,
 Nomad, the
 [CNI reference plugins](https://github.com/containernetworking/plugins/releases)
-in `/opt/cni/bin` at the version the workflow pins, the repository's
+in `/opt/cni/bin` at the version the workflow pins, Go, the repository's
 `nomad/v*` tags on a Linux machine, and the wherry release the workflow
 pins:
 
@@ -918,7 +918,8 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
 2. `02-wherry.sh` fetches the wherry CLI of `WHERRY_VERSION` through the
    receiver image's verifying fetch stage, and builds the receiver image
    from the checkout and from the latest `nomad/v*` tag before `HEAD`, both
-   with `WHERRY_VERSION`, and the fake agent's image.
+   with `WHERRY_VERSION`, and the fake agent's image. It fails when there is
+   no such tag.
 3. `03-provision.sh` provisions as the operator guide does, in an operator
    working directory: `wherry operator init` with the broker's Kafka super
    user, `operator pool apply -f`, `tenant add`, `tenant pool add`, `tenant host add`, and
@@ -951,8 +952,20 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
 
 Each roll follows [Upgrade](#upgrade)'s order: it first
 applies the receiver's configuration with the SHA-256 of the plugin binary
-in the image it runs, then runs the job with the image, and checks that the
-new allocation's receiver never refused its plugin's pin.
+in the image it runs, then runs the job with the image. It fails as soon as
+the new allocation's receiver refuses its plugin's pin, and checks that
+allocation's log alone for the identity line
+`plugin nomad: version <version> protocol <n>` of the version it rolled to:
+`e2e` for the checkout's image, the tag's version for the previous
+release's.
+
+`06-upgrade.sh` and `07-rollback.sh` first run
+[`.github/plugin-protocol.sh`](../.github/plugin-protocol.sh), which
+compares the plugin protocol the previous release and the checkout serve,
+from `pluginsdk/link.go` at the version each `go.mod` requires. When they
+differ, a 0.x clean break, each step skips its rolls with a notice naming
+both protocols, since the release notes then say to upgrade the receiver
+and its plugins together, or to reset. Steps 1 to 5 still run.
 
 `collect.sh` writes the Nomad agent's and the receiver's logs and the jobs'
 state to `artifacts` in the state directory, `$E2E_WORK`, by default

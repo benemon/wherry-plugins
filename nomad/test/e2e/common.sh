@@ -76,22 +76,69 @@ newest() {
 		'map(select(.DesiredStatus == "run" and .ClientStatus == "running")) | sort_by(.CreateIndex) | last | .ID // empty'
 }
 
+# current prints the ID of the newest allocation of the receiver job's current version, running or not.
+current() {
+	local version
+	version=$(api job/wherry-receiver | jq .Version)
+	api job/wherry-receiver/allocations | jq -r --argjson v "$version" \
+		'map(select(.JobVersion == $v)) | sort_by(.CreateIndex) | last | .ID // empty'
+}
+
+# receiver_log prints the receiver task's standard output and standard error in the allocation $1, and nothing for an
+# allocation whose task has not started.
+receiver_log() {
+	nomad alloc logs "$1" receiver 2>/dev/null || true
+	nomad alloc logs -stderr "$1" receiver 2>/dev/null || true
+}
+
+# rolled succeeds once the receiver job's current version has deployed and its receiver is ready, and fails the step as
+# soon as that version's allocation refuses the plugin of the image $1 for its pin.
+rolled() {
+	local alloc
+	alloc=$(current)
+	if [ -n "$alloc" ] && receiver_log "$alloc" | grep -F ' and the pin is ' >/dev/null; then
+		fail "allocation $alloc's receiver refused $1's plugin: the record does not pin it"
+	fi
+	deployed && ready
+}
+
 # roll upgrades or rolls back the receiver as nomad/README.md orders it: it pins the image $1's plugin, then, once the
 # record holds that pin, runs the receiver job with the image and waits for it to deploy. The new allocation's receiver
-# must never have run under another pin.
+# must log the identity line of the plugin version $2, and must never have run under another pin; the step reads that
+# allocation's log alone.
 roll() {
-	local alloc
+	local alloc log
 	pin "$1"
 	pinned "$1"
 	nomad job run -detach -var image="$1" "$job" >/dev/null
-	wait_for 300 deployed
-	wait_for 300 ready
+	wait_for 300 rolled "$1"
 	alloc=$(newest)
 	[ -n "$alloc" ] || fail "the receiver job has no running allocation"
-	if { nomad alloc logs "$alloc" receiver && nomad alloc logs -stderr "$alloc" receiver; } |
-		grep -F ' and the pin is ' >/dev/null; then
+	[ "$alloc" = "$(current)" ] || fail "allocation $alloc does not run the receiver job's current version"
+	log=$(receiver_log "$alloc")
+	if grep -F ' and the pin is ' <<<"$log" >/dev/null; then
 		fail "allocation $alloc's receiver ran $1's plugin under another pin"
 	fi
+	grep -F "plugin nomad: version $2 protocol " <<<"$log" >/dev/null ||
+		fail "allocation $alloc's receiver did not log plugin nomad: version $2"
+	echo "allocation $alloc: $(grep -F -m 1 'plugin nomad: version ' <<<"$log")"
+}
+
+# previous_version prints the plugin version of the previous release, which 02-wherry.sh builds as
+# wherry-receiver:previous.
+previous_version() { cat "$work/previous-version"; }
+
+# same_protocol succeeds when the previous release and the checkout serve the same plugin protocol. When they differ it
+# fails after .github/plugin-protocol.sh's notice, and the step skips its roll to the previous release. It fails the
+# step on any other error, such as no previous release.
+same_protocol() {
+	local code=0
+	"$repo/.github/plugin-protocol.sh" nomad || code=$?
+	case $code in
+	0) return 0 ;;
+	2) echo "SKIP: $(basename "$0"): the previous release serves another plugin protocol" && return 1 ;;
+	*) fail "the plugin protocol check exited $code" ;;
+	esac
 }
 
 # metrics_address prints the client address and port of the running receiver allocation's metrics port, which the
