@@ -57,7 +57,7 @@ such as the claim's NFS export, at `runs_dir`, and runs as the agents' UID
 The receiver runs the plugin only from a binary whose SHA-256 is the pin
 its record holds for the type: `plugin_sha256: {kubernetes: HEX}` in the
 receiver's file, which `wherry operator receiver apply` records.
-[The plugin pin](#the-plugin-pin) says where `HEX` comes from. The plugin
+[Run the receiver in the cluster](#run-the-receiver-in-the-cluster) says where `HEX` comes from. The plugin
 is not run by hand.
 
 ## Credentials
@@ -679,119 +679,55 @@ podSelector:
   matchExpressions: [{key: wherry.io/pool, operator: Exists}]
 ```
 
+<!-- #region install -->
 ## Run the receiver in the cluster
 
-The receiver runs as a one-replica Deployment with its own service account,
-and its agent pods run beside it in the same namespace.
-[`examples/kubernetes`](../examples/kubernetes) is a Kustomize directory
-that `kubectl apply -k` applies.
-[`receiver.yaml`](../examples/kubernetes/receiver.yaml) holds the
-manifests: the ServiceAccount, the Role and its RoleBinding ([RBAC](#rbac)),
-the state PersistentVolumeClaim, the runs claim `wherry-runs`, the
-Deployment and the metrics Service.
-[`kustomization.yaml`](../examples/kubernetes/kustomization.yaml) sets
-their namespace and image and generates the Secret `wherry-receiver-bundle`
-from the receiver's bundle and the ConfigMap `wherry-receiver-config` from
-its local configuration,
-[`config.yaml`](../examples/kubernetes/config.yaml). `wherry operator
-receiver apply` writes the bundle and the operator writes `config.yaml`;
-the Secret and the ConfigMap are how the cluster takes them. Kubernetes and
-OpenShift take the same manifests; only the namespace, the image and the
-Kafka bootstrap address differ.
+Start with your operator working directory, pool and entitled tenant ready.
+Use one receiver identity per Deployment.
+Keep the receiver and its agent pods in the same namespace.
+Run the repository commands from your checkout and the operator commands from your operator working directory.
 
-### Image
-
-[`examples/kubernetes/Containerfile`](../examples/kubernetes/Containerfile) builds the receiver image from the repository root. From a checkout of
-the tag `kubernetes/<version>`, where `<version>` carries its `v`, such as
-`v0.1.0`:
-
-```sh
-make image VERSION=<version> WHERRY_VERSION=<wherry version>
-```
-
-`make image` runs Podman; `CONTAINER=docker` runs Docker instead. The
-build compiles the plugin from the checkout, downloads the
-wherry release archive for the target architecture with its
-`checksums.txt` and `checksums.txt.sigstore.json`, and verifies the
-checksums' signature, then the archive's SHA-256 against them:
-
-```sh
-cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
-  --certificate-identity-regexp '^https://github\.com/benemon/wherry/\.github/workflows/release\.yml@refs/tags/v' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-```
-
-The image is based on `registry.access.redhat.com/ubi9/ubi-minimal`, whose
-CA bundle the receiver's S3 uploads and the plugin's S3 fetches trust. It
-holds `/usr/local/bin/wherry` and
-`/usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes`, each mode
-0755 and owned by root. It
-runs as UID 1001 and group 0, with the entrypoint `wherry`; its writable
-paths are volumes whose mount points, `/var/lib/wherry` and `/tmp`, group 0
-can write. It holds no Nomad plugin. Agent pods run the agent's image
-alone, so an upgrade of the plugin is a change of the receiver image.
-
-For a storage endpoint under a private CA, the receiver reads the system
-bundle `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, which takes no
-configuration. Supply it one of two ways:
-
-- On OpenShift, mount the cluster's
-  [injected trusted CA bundle](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/networking/enable-cluster-wide-proxy#certificate-injection-using-operators_config-cluster-wide-proxy),
-  which holds the system roots and the cluster proxy's `trustedCA`, so the
-  private CA goes in the proxy's `trustedCA`. A ConfigMap with the inject
-  label gets the bundle under the key `ca-bundle.crt`:
-
-  ```yaml
-  apiVersion: v1
-  kind: ConfigMap
-  metadata:
-    name: wherry-receiver-ca
-    labels: {config.openshift.io/inject-trusted-cabundle: "true"}
-  ```
-
-  Mount it read-only over the image's bundle directory:
-
-  ```yaml
-  volumeMounts:
-    - {name: ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true}
-  volumes:
-    - {name: ca, configMap: {name: wherry-receiver-ca, items: [{key: ca-bundle.crt, path: tls-ca-bundle.pem}]}}
-  ```
-
-- On other Kubernetes, put the full bundle, the system roots and the
-  private CA, in a ConfigMap under the key `ca-bundle.crt` and mount it the
-  same way; the mount replaces the image's bundle, so a ConfigMap holding
-  the private CA alone leaves the receiver trusting nothing else. Or build
-  a derived image that adds the CA with `update-ca-trust`.
-
-[`examples/kubernetes/receiver.yaml`](../examples/kubernetes/receiver.yaml) holds these lines commented
-out; a storage endpoint under a public CA needs none of them.
-
-No image is published, since an image couples a wherry release and a
-plugins release. Push the image you build to a registry the cluster pulls
-from.
-
-### Deploy
-
-Prerequisites: the operator's working directory
-([Set up `wherry operator`](https://benemon.github.io/wherry/operations#set-up-wherry-operator))
-and the pool, and the image pushed where the cluster pulls from.
-
-1. Create the receiver's namespace, enforcing Pod Security `restricted`:
+1. Build the image from the plugin release checkout and push it to a registry your cluster can pull from:
 
    ```sh
-   kubectl create namespace wherry
-   kubectl label namespace wherry pod-security.kubernetes.io/enforce=restricted
+   make image VERSION=<plugin version> WHERRY_VERSION=<wherry version> IMAGE=registry.example.com/wherry-receiver
+   podman push registry.example.com/wherry-receiver:<plugin version>
    ```
 
-2. In the operator's working directory, write the receiver's file,
-   `receivers/kubernetes-1.yaml`, and apply it:
+   Set `CONTAINER=docker` to use Docker instead of Podman.
+   The [Containerfile](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/Containerfile) builds the plugin and verifies the wherry release.
+   The image runs as UID 1001 with group 0 on Kubernetes.
+   Use [OpenShift's registry documentation](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/registry/accessing-the-registry) when pushing to its internal registry.
+   Set the deployment's image reference to the registry Service name when using that registry.
+
+2. Obtain the pin from the image you pushed:
+
+   ```sh
+   podman run --rm --entrypoint sha256sum registry.example.com/wherry-receiver:<plugin version> \
+     /usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes
+   ```
+
+   Use this SHA-256 as `plugin_sha256.kubernetes`.
+
+3. Copy [the Kustomize example](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes) outside any git working tree:
+
+   ```sh
+   cp -R examples/kubernetes ~/wherry-receiver-kubernetes-1
+   ```
+
+   Edit its [kustomization.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/kustomization.yaml) to set your namespace and pushed image.
+   Set the runs claim's storage class to one that supplies ReadWriteMany volumes.
+   Follow the [runs claim reference](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#runs-claim) for storage requirements.
+   For a private broker CA, copy the certificates into `kafka-ca.crt`, enable the CA ConfigMap generator and set `ca_file` in the copy's [config.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/config.yaml).
+   For a private storage CA, enable the CA mount in [receiver.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/receiver.yaml) and supply a full system trust bundle.
+   On OpenShift, use the [injected trusted CA bundle](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/networking/enable-cluster-wide-proxy#certificate-injection-using-operators_config-cluster-wide-proxy).
+
+4. In your operator working directory, write `receivers/kubernetes-1.yaml`:
 
    ```yaml
    pool: build
    plugin_sha256:
-     kubernetes: <the plugin pin>
-   # The internal bootstrap address, which Strimzi's broker certificates name.
+     kubernetes: <the image's plugin pin>
    broker: wherry-kafka-kafka-bootstrap.kafka.svc:9093
    plugins:
      kubernetes:
@@ -809,113 +745,92 @@ and the pool, and the image pushed where the cluster pulls from.
                group: "1001"
    ```
 
+   Set your pool, broker and agent image.
+   The service account supplies the API credential.
+   Leave platform credentials unset for this deployment.
+   On OpenShift, omit `runtime.user` and `runtime.group` so restricted-v2 assigns them.
+   See the [plugin configuration reference](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#settings).
+   Copy your edited local configuration into `receivers/kubernetes-1.config.yaml` before applying:
+
    ```sh
+   cp ~/wherry-receiver-kubernetes-1/config.yaml receivers/kubernetes-1.config.yaml
    wherry operator receiver apply kubernetes-1
+   cp bundles/receivers/kubernetes-1.bundle ~/wherry-receiver-kubernetes-1/receiver.bundle
    ```
 
-   It records the configuration and writes the receiver's bundle,
-   `bundles/receivers/kubernetes-1.bundle`, naming `broker`
-   ([Bundle and Kafka](#bundle-and-kafka)). The cluster fixes the rest of
-   the plugin's `config`: `namespace` defaults to the receiver's own, from
-   its service account; `runs_claim` and `runs_dir` are the claim and the
-   mount `receiver.yaml` makes; `runtime.user` is the receiver's UID, 1001
-   in the image, and is left unset on [OpenShift](#openshift). The service
-   account supplies the token, so no profile names a platform credential.
-   [The plugin pin](#the-plugin-pin) gives the pin.
+   You can instead provide `config.yaml` in the configuration directory passed with `-f DIR`.
+   See [receiver local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration).
+   Keep the bundle and local configuration outside version control.
 
-3. Copy the example directory to a directory outside any git working tree,
-   and the bundle into it as `receiver.bundle`:
+5. Create the namespace on Kubernetes:
 
    ```sh
-   cp -R examples/kubernetes ~/wherry-receiver-kubernetes-1
-   cp <working directory>/bundles/receivers/kubernetes-1.bundle ~/wherry-receiver-kubernetes-1/receiver.bundle
+   kubectl create namespace wherry
+   kubectl label namespace wherry pod-security.kubernetes.io/enforce=restricted
    ```
 
-   Kustomize reads only files inside the kustomization's directory, so the
-   bundle sits beside `kustomization.yaml`. It holds the receiver's Kafka
-   password: keep the directory out of version control, as the copy's
-   `.gitignore`, which names `receiver.bundle`, does in a working tree.
+   On OpenShift, use `oc new-project wherry` and let OpenShift set its Pod Security labels.
+   Keep the receiver service account limited to [restricted-v2](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/authentication_and_authorization/managing-pod-security-policies).
+   On Kubernetes, enable the example's [fsgroup.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/fsgroup.yaml) patch if UID 1001 and group 0 cannot write the state volume root.
+   On OpenShift, leave that patch disabled so the SCC assigns fsGroup.
+   Keep `fsGroupChangePolicy: OnRootMismatch` to preserve the signing key's mode across mounts.
+   Follow [Kubernetes volume ownership](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#configure-volume-permission-and-ownership-change-policy-for-pods) for ownership changes.
 
-4. Edit the copy. `kustomize edit` is not part of kubectl, so edit the files:
-   - In `kustomization.yaml`, set `images` to the image as pushed, and
-     `namespace` when it is not `wherry`.
-   - For a broker under a private CA, such as Strimzi's cluster CA, copy the
-     CA in as `kafka-ca.crt`, and uncomment the `wherry-receiver-kafka-ca`
-     line of `kustomization.yaml` and `ca_file` in `config.yaml`:
-
-     ```sh
-     kubectl get secret -n kafka wherry-kafka-cluster-ca-cert -o jsonpath='{.data.ca\.crt}' |
-       base64 -d >~/wherry-receiver-kubernetes-1/kafka-ca.crt
-     ```
-
-   - On Kubernetes, for a state claim whose volume root neither UID 1001 nor
-     group 0 can write, uncomment `- path: fsgroup.yaml`
-     ([`fsgroup.yaml`](../examples/kubernetes/fsgroup.yaml)).
-
-5. Apply it:
+6. Apply the example with [Kustomize](https://kubernetes.io/docs/tasks/manage-kubernetes-objects/kustomization/):
 
    ```sh
    kubectl apply -k ~/wherry-receiver-kubernetes-1
    kubectl rollout status deployment/wherry-receiver -n wherry
    ```
 
-The generated Secret's and ConfigMap's names carry a hash of their
-content, so `kubectl apply -k` with a new bundle or local configuration
-rolls the Deployment; the ones they replace stay until deleted.
+   The [manifest](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/receiver.yaml) creates the service account, RBAC, state claim, runs claim, Deployment and metrics Service.
+   Keep its single replica and Recreate strategy.
+   Preserve the state claim because it holds the receiver's signing key.
+   Restrict metrics access to your scraper.
+   Allow the receiver's egress to Kafka, DNS, the API server and storage.
 
-The receiver runs as
-`wherry receiver run --config-file /etc/wherry/config/config.yaml`, with
-the ConfigMap mounted read-only at `/etc/wherry/config`.
+7. Read the receiver logs:
 
-- One replica with the `Recreate` strategy: a receiver is one principal
-  with one key pair, and a rolling update would briefly run two.
-- `terminationGracePeriodSeconds: 30`, with `drain_timeout: 20s` in the
-  local configuration
-  ([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)).
-- The receiver's service account token is mounted, and the plugin, a child
-  process of the receiver, uses it.
-- The pod sets no `runAsUser`, so it runs as the image's UID 1001 with
-  group 0.
-- `/tmp` is a writable memory volume, and `TMPDIR` and `HOME` point at it.
-  The root filesystem is read-only, and the plugin creates its socket for
-  the receiver in `$TMPDIR`; without it the plugin cannot start, and the
-  receiver exits with `profile <name>: plugin ...` and restarts in a loop.
-- State lives on the PVC, in the `state` subdirectory, which the receiver
-  creates at 0700 with its signing key at 0600; it refuses to start with
-  a key its group or others can read. The volume's root must be writable
-  by the receiver: by UID 1001 or group 0, as kind's local-path volumes,
-  mode 0777, are, or by the fsGroup 1001 that `fsgroup.yaml` adds. With
-  an fsGroup, the kubelet's ownership pass adds group read and write to
-  every file on the volume; `fsGroupChangePolicy: OnRootMismatch` runs it
-  only on a volume whose root lacks the group, the empty volume on its
-  first mount, so the key keeps its mode across restarts. If the fsGroup
-  ever changes, the pass runs again and the receiver stops with
-  `chmod 600 it`; fix the modes. A restarted pod mounts the same volume
-  and is the same receiver. Losing the PVC loses the receiver's identity;
-  provision it again under a new name, as
-  [Replace a lost key](https://benemon.github.io/wherry/operations#replace-a-lost-key)
-  says for a lost state directory.
-- The runs claim `wherry-runs` is `ReadWriteMany` and mounted at
-  `/var/lib/wherry/runs`. Its storage class's default applies; set one that
-  provisions `ReadWriteMany` volumes ([Runs claim](#runs-claim)). The
-  volume's root must be writable by the receiver's UID, as for the state
-  volume.
-- The bundle Secret is mounted at 0440, owned by group 0, the receiver's
-  group, or by the fsGroup.
-- The receiver has no health endpoint, so the pod has no probes.
-- The metrics address, `metrics_addr` in the local configuration, binds
-  the pod's own addresses, with no TLS or
-  authentication. Scrape the Service `wherry-receiver-metrics`, port
-  `metrics`, path `/metrics`. Whoever reads the scrape sees every tenant of
-  the pool; where the CNI enforces NetworkPolicy, admit only the scraper to
-  port 9464.
-- Under a default-deny egress policy, allow the receiver's pod
-  (`app: wherry-receiver`) the Kafka brokers (TCP 9093), the cluster's DNS,
-  the API server and the storage endpoint. The API server usually runs on
-  the host network, where a namespace selector does not reach it; allow the
-  addresses of the `default/kubernetes` Endpoints.
+   ```sh
+   kubectl logs -n wherry deployment/wherry-receiver
+   ```
 
-### Bundle and Kafka
+   Check for `plugin kubernetes: version <version> protocol <n>` with the expected version.
+   From your entitled tenant's host, run `wherry host receivers` and wait for `kubernetes-1` to show `live`.
+
+### Upgrade
+
+1. Build and push the new image and obtain its plugin pin.
+2. Update `plugin_sha256.kubernetes` and run `wherry operator receiver apply kubernetes-1` in your operator working directory.
+3. Immediately set the new image in your Kustomize copy and run `kubectl apply -k ~/wherry-receiver-kubernetes-1`.
+   Copy any changed bundle or local configuration into the Kustomize directory before applying.
+   Keep the state and runs claims.
+4. Wait for rollout completion, check the identity line and wait for the receiver to show `live`.
+   To roll back, apply the previous pin, restore the previous image reference and apply the Kustomize directory again.
+
+### Uninstall
+
+1. Revoke the receiver in your operator working directory:
+
+   ```sh
+   wherry operator receiver remove kubernetes-1
+   ```
+
+2. Review retained runs and state before deleting their claims.
+   Remove the example's platform objects:
+
+   ```sh
+   kubectl delete -k ~/wherry-receiver-kubernetes-1
+   ```
+
+3. Remove obsolete generated Secrets and ConfigMaps from earlier applies using [Kubernetes deletion tools](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_delete/).
+   Remove remaining agent pods and run material when they are no longer needed.
+   Follow your storage provider's retention policy for the underlying volumes.
+   Remove the local Kustomize directory and the receiver's bundle and configuration copies.
+   Delete the namespace only when no other workloads use it.
+<!-- #endregion install -->
+
+## Bundle and Kafka
 
 The pool's Kafka runs in the same cluster under Strimzi, with Kafka 4.3, share groups enabled, and a
 `tls` internal listener with `authentication: scram-sha-512` and
@@ -943,33 +858,7 @@ and nothing renews the receiver's copy:
 2. Once Strimzi has removed the old certificate, remove it from
    `kafka-ca.crt` and apply again.
 
-### The plugin pin
-
-The image builds the plugin from the checkout, so the pin is the SHA-256
-of the plugin binary inside the image as pushed, the reference
-`kustomization.yaml`'s `images` names:
-
-```sh
-podman run --rm --entrypoint sha256sum registry.example.com/wherry-receiver:<version> \
-  /usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes
-```
-
-`docker` takes the place of `podman` alike. A receiver outside the cluster
-runs the release binary, whose pin is its line in the release's verified
-`checksums.txt`, as
-[Install plugins](https://benemon.github.io/wherry/operations#install-plugins)
-prints it.
-
-An upgrade or a rollback records the new pin, then rolls the image at
-once:
-
-1. Set the new image's pin as `plugin_sha256.kubernetes` in the receiver's
-   file and run `wherry operator receiver apply kubernetes-1`
-   ([Change a receiver's configuration](https://benemon.github.io/wherry/operations#change-a-receiver-s-configuration)).
-   Until the new image runs, the receiver's restarts refuse the old binary.
-2. Set `images` to the new image and run `kubectl apply -k`.
-
-### Kubernetes and Nomad together
+## Kubernetes and Nomad together
 
 Put the in-cluster receiver in a pool of its own, and Nomad-hosted receivers in
 another, and entitle the tenant to both. A submit places the task in a pool
@@ -985,54 +874,8 @@ same state volume, is the same principal, and finds the run's pod.
 
 ## OpenShift
 
-The image and the Kustomize directory are the same on OpenShift, which
-ships `kubectl` beside `oc`. What differs:
-
-- Create the namespace with `oc new-project wherry`. OpenShift sets the
-  namespace's
-  [Pod Security labels](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/authentication_and_authorization/understanding-and-managing-pod-security-admission)
-  itself and admits pods by
-  [SCC](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/authentication_and_authorization/managing-pod-security-policies):
-  the receiver's pod and agent pods run under restricted-v2. Do not allow the
-  receiver's service account any SCC beyond restricted-v2; OpenShift admits
-  a pod against the SCCs its creator may use as well as its service
-  account's, so `anyuid` or `privileged` would admit agent pods running as
-  root.
-- restricted-v2 gives every container of a pod the namespace's first UID,
-  with group 0, so the receiver and its agents share a UID. Leave
-  `runtime.user` and `runtime.group` unset; a `user` or a `group` outside
-  the namespace's ranges is refused at admission.
-- restricted-v2 also sets the pod's fsGroup, which the bundle file, the
-  state volume and an agent's prompt and credential files take, so leave
-  `fsgroup.yaml` out. `fsGroupChangePolicy: OnRootMismatch` keeps the
-  kubelet from adding group access to the receiver's signing key on every
-  mount, which would stop the receiver. If the namespace's fsGroup ever
-  changes, the receiver stops with `chmod 600 it`; fix the modes.
-- For a storage endpoint under a private CA, mount the injected trusted CA
-  bundle in the receiver ([Image](#image)).
-- Streams for Apache Kafka serves as Strimzi.
-- Push the receiver and agent images to the internal registry, into the
-  receiver's namespace, through the registry's route, since the Service
-  name resolves only inside the cluster. Pods in the namespace pull its
-  images by the Service name with no further grant, such as
-  `newName: image-registry.openshift-image-registry.svc:5000/wherry/wherry-receiver` in `images`:
-
-  ```sh
-  registry=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
-  oc whoami -t | podman login -u "$(oc whoami)" --password-stdin "$registry"
-  podman push wherry-receiver:<version> "$registry/wherry/wherry-receiver:<version>"
-  ```
-
-- With user workload monitoring enabled, a ServiceMonitor selecting
-  `app: wherry-receiver`, port `metrics`, scheme `http`, scrapes the
-  receiver.
-- An `EgressFirewall` with `dnsName` rules restricts egress by host name.
-  It applies to every pod of the namespace, the receiver's included, so its
-  rules also allow the receiver's storage endpoint.
-- Some items need a cluster administrator: enabling user workload
-  monitoring, an `EgressFirewall` (OVN-Kubernetes only), and raising
-  `containerLogMaxSize`, a `KubeletConfig` that rolls every node of its
-  MachineConfigPool.
+[Run the receiver in the cluster](#run-the-receiver-in-the-cluster) covers installation on OpenShift.
+Use the platform documentation for monitoring, networking and cluster administration.
 
 | Concern | Kubernetes | OpenShift |
 | --- | --- | --- |
