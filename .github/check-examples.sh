@@ -47,6 +47,35 @@ templates() {
 
 plugins=("$@")
 [ $# -gt 0 ] || plugins=(nomad kubernetes systemd)
+# Each procedure is included as a page section by the wherry documentation site.
+# Check both boundaries so a missing closing marker cannot silently include the reference.
+for plugin in nomad kubernetes systemd; do
+	file="$plugin/README.md"
+	if ! awk '
+		function fail(message) { printf "FAIL: %s:%d: %s\n", FILENAME, FNR, message; bad = 1 }
+		$0 == "<!-- #region install -->" {
+			starts++; if (inside || ends) fail("misplaced install region start")
+			inside = 1; next
+		}
+		$0 == "<!-- #endregion install -->" {
+			ends++; if (!inside) fail("install region end without start")
+			inside = 0; next
+		}
+		inside {
+			if ($0 ~ /\]\((\.\.\/|\.\/|#)/) fail("relative link inside install region")
+			if ($0 ~ /^[[:space:]]*```/) fenced = !fenced
+			if (!fenced && $0 ~ /^ {0,3}#[[:space:]]/) fail("install region heading must start at ##")
+		}
+		END {
+			if (starts != 1 || ends != 1 || inside)
+				fail("expected exactly one complete install region")
+			exit bad
+		}
+	' "$file"; then
+		status=1
+	fi
+done
+
 drain='^drain_timeout: *\([^ #]*\).*$'
 for plugin in "${plugins[@]}"; do
 	case $plugin in
