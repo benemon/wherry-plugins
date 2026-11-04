@@ -507,17 +507,30 @@ Start with your operator working directory, pool and entitled tenant ready.
 Use a Linux host with systemd 252 or later and unified cgroup v2.
 Run the receiver as root.
 Give each systemd receiver a pool of its own so a restarted receiver adopts runs on the same host.
-Run host installation commands as root from this repository's checkout.
+Clone `https://github.com/benemon/wherry-plugins` and check out the plugin's tag `systemd/<version>`, such as `systemd/v0.1.0-rc.7`.
+Run host installation commands as root from that checkout.
 
-1. Download and verify the wherry release and the systemd plugin release using [Install plugins](https://benemon.github.io/wherry/operations-receivers#install-plugins) with `plugin=systemd`.
-   You can instead build the plugin with `make build PLUGINS=systemd` from the plugin checkout.
-   Install the binaries in a directory for this deployment version:
+1. In an empty directory, download `wherry_<wherry version>_linux_<arch>.tar.gz`, `checksums.txt` and `checksums.txt.sigstore.json` from `https://github.com/benemon/wherry/releases/tag/<wherry version>`.
+   `<wherry version>` carries its `v`, such as `v0.1.0-rc.28`.
+   `<arch>` is `amd64` or `arm64`.
+   Verify the signature of `checksums.txt` with the [cosign command](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image).
+   Check the archive against the checksums and extract `wherry`:
+
+   ```sh
+   sha256sum --ignore-missing -c checksums.txt
+   tar -xzf wherry_<wherry version>_linux_<arch>.tar.gz --strip-components=1 wherry_<wherry version>_linux_<arch>/wherry
+   ```
+
+   In another empty directory, download and verify the systemd plugin using [Install plugins](https://benemon.github.io/wherry/operations-receivers#install-plugins) with `plugin=systemd`.
+   You can instead build the plugin with `make build PLUGINS=systemd` from the checkout.
+   Install the binaries in a directory for this deployment version.
+   Replace `<wherry directory>` and `<plugin directory>` with the directories that hold the extracted binaries:
 
    ```sh
    version=<deployment version>
    install -d -m 0755 /usr/local/libexec/wherry/"$version"/plugins
-   install -m 0755 wherry /usr/local/libexec/wherry/"$version"/wherry
-   install -m 0755 wherry-plugin-systemd /usr/local/libexec/wherry/"$version"/plugins/
+   install -m 0755 <wherry directory>/wherry /usr/local/libexec/wherry/"$version"/wherry
+   install -m 0755 <plugin directory>/wherry-plugin-systemd /usr/local/libexec/wherry/"$version"/plugins/
    ln -s "$version" /usr/local/libexec/wherry/current
    ln -s /usr/local/libexec/wherry/current/wherry /usr/local/bin/wherry
    ```
@@ -579,6 +592,7 @@ Run host installation commands as root from this repository's checkout.
    The [receiver unit](https://github.com/benemon/wherry-plugins/blob/main/examples/systemd/wherry-receiver.service) starts `/usr/local/bin/wherry`.
    Its [agent slice](https://github.com/benemon/wherry-plugins/blob/main/examples/systemd/wherry.slice) keeps agent units outside the receiver's cgroup.
    Follow [systemd service documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) for service administration.
+   The [receiver service reference](https://github.com/benemon/wherry-plugins/blob/main/systemd/README.md#receiver-service) describes the unit, the credential and the metrics port.
 
 5. Install the bundle and the local configuration you supplied to `receiver apply`:
 
@@ -603,7 +617,8 @@ Run host installation commands as root from this repository's checkout.
    journalctl -u wherry-receiver
    ```
 
-   Check for `plugin systemd: version <version> protocol <n>` with the expected version.
+   Check for `plugin systemd: version <plugin version> protocol <n>`.
+   `<plugin version>` is the version of the plugin tag, such as `v0.1.0-rc.7`.
    A source build without version metadata reports `unreported`.
    From your entitled tenant's host, run `wherry host receivers` and wait for `systemd-1` to show `live`.
 
@@ -612,6 +627,8 @@ Run host installation commands as root from this repository's checkout.
 1. Verify and install the new binaries in `/usr/local/libexec/wherry/<new version>/` beside the old version.
    Obtain the new plugin pin.
 2. Update `plugin_sha256.systemd` and run `wherry operator receiver apply systemd-1` in your operator working directory.
+   [Change a receiver's configuration](https://benemon.github.io/wherry/operations-operator#change-a-receiver-s-configuration) describes this command.
+   Until the new version runs, the receiver's restarts refuse the old plugin binary.
 3. Immediately repoint `current` and restart:
 
    ```sh
@@ -647,6 +664,52 @@ Run host installation commands as root from this repository's checkout.
    Remove the version directories, `current` and `/usr/local/bin/wherry` when no receiver uses them.
    Remove the operator's local bundle and configuration copies.
 <!-- #endregion install -->
+
+## Receiver service
+
+The receiver runs as root under its own unit,
+[`examples/systemd/wherry-receiver.service`](../examples/systemd/wherry-receiver.service).
+The unit runs `wherry receiver run --config-file /etc/wherry/config.yaml`.
+`/usr/local/bin/wherry` points at `/usr/local/libexec/wherry/current/wherry`.
+`current` selects the version directory `/usr/local/libexec/wherry/<version>/`.
+Its agent units run in [`examples/systemd/wherry.slice`](../examples/systemd/wherry.slice), outside the receiver's cgroup.
+Restarting or stopping the receiver never touches them.
+The receiver exits without stopping its jobs.
+The restarted receiver adopts them.
+The local configuration's `drain_timeout` is 20 seconds.
+The unit's `TimeoutStopSec=` is 30
+([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration-receiver#drain-timeout-and-the-stop-window)).
+Only a receiver with the same plugin profile on the same host adopts a run.
+
+On a host with SELinux enabled, a binary copied from a home directory keeps the `user_home_t` label.
+That is why the install restores the labels of `/usr/local/bin` and `/usr/local/libexec/wherry`.
+`/var/lib/private` is systemd's directory, owned by root with mode 0700.
+`/run/wherry/credentials` is the mount point agent units bind their credential store on.
+Every boot recreates it from the tmpfiles.d line.
+`kernel.core_pattern` says whether a core dump pipes to systemd-coredump, abrt or neither.
+
+[`examples/systemd/config.yaml`](../examples/systemd/config.yaml) is the receiver's local configuration.
+It names the bundle, the state directory, the plugin directory and the metrics address.
+Its `plugin_dir` is `/usr/local/libexec/wherry/current/plugins`.
+For a broker under a private CA, its `ca_file` names `/etc/wherry/kafka-ca.pem`.
+
+The unit takes the bundle as a systemd
+[credential](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Credentials),
+with `LoadCredential=bundle:/etc/wherry/receiver.bundle`.
+`config.yaml` names the bundle at the credential directory's path, `/run/credentials/wherry-receiver.service/bundle`.
+A YAML file cannot expand `$CREDENTIALS_DIRECTORY`, so the configuration names the full path.
+A unit of another name has another credential path.
+To keep the bundle encrypted on disk, encrypt it with
+[`systemd-creds encrypt`](https://www.freedesktop.org/software/systemd/man/latest/systemd-creds.html).
+Then load it with `LoadCredentialEncrypted=` in place of `LoadCredential=`.
+A new bundle takes effect at the next `systemctl restart wherry-receiver`.
+
+The receiver's metrics listen on port 9464, the configuration's `metrics_addr`.
+The endpoint has no authentication.
+Admit only Prometheus to it with a `firewalld` rule.
+
+The plugin pin is the SHA-256 of the release binary.
+It is the binary's line in the release's verified `checksums.txt`.
 
 ## SELinux
 
