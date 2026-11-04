@@ -1166,9 +1166,10 @@ the same.
 [`test/e2e`](test/e2e) runs a receiver from the receiver image and the
 plugin together on a kind cluster, as the `e2e` workflow does for every
 change to `kubernetes/`, `examples/kubernetes/`, the root `Makefile`,
-`.github/changed.sh` or the workflow. Each step is
-a script; with Docker, kind and kubectl on a Linux machine, and the wherry
-release the workflow pins:
+`.github/changed.sh`, `.github/plugin-protocol.sh` or the workflow. Each step is
+a script; with Docker, kind, kubectl, jq and Go, the repository's
+`kubernetes/v*` tags on a Linux machine, and the wherry release the workflow
+pins:
 
 ```sh
 export WHERRY_VERSION=$(sed -n 's/^  WHERRY_VERSION: //p' .github/workflows/e2e.yml)
@@ -1182,7 +1183,10 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    and maps its external listener to `localhost`.
 2. `02-wherry.sh` fetches the wherry CLI of `WHERRY_VERSION` through the
    receiver image's verifying fetch stage, and builds the receiver image
-   with `make image` and the fake agent's image.
+   with `make image` from the checkout as `wherry-receiver:e2e`, and from
+   the latest `kubernetes/v*` tag before `HEAD`, through `git archive`, as
+   `wherry-receiver:previous`, both with `WHERRY_VERSION`, and the fake
+   agent's image. It fails when there is no such tag.
 3. `03-provision.sh` provisions as the operator guide does, in an operator
    working directory: `wherry operator init` with `kafka-admin`,
    `operator pool apply -f`, `tenant add`, `tenant pool add`, `tenant host add`, and
@@ -1195,8 +1199,8 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    `operator check`, then `wherry host init` with the host's bundle, the
    Strimzi cluster CA as `ca.pem`, and a configuration giving sources for
    a generated dummy credential and SSH private key.
-4. `04-deploy.sh` loads the receiver image and the fake agent's image into
-   kind, creates the runs claim's volume,
+4. `04-deploy.sh` loads both receiver images and the fake agent's image
+   into kind, creates the runs claim's volume,
    [`runs.yaml`](test/e2e/runs.yaml), a hostPath directory on the single
    node marked `ReadWriteMany` and owned by UID 1001, and the state claim's,
    [`state.yaml`](test/e2e/state.yaml), a local volume whose root is
@@ -1215,6 +1219,29 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    input's mode 0600 and SHA-256, the start failure's reason in the
    receiver's log, the credentials' absence from the log, pods and events,
    and the sweep's removal of the cancelled run's Secret and pod.
+6. `06-upgrade.sh` rolls the receiver to the previous release's image, then
+   upgrades it to the checkout's, and completes a run. Both images hold
+   `WHERRY_VERSION`, so the step upgrades the plugin.
+7. `07-rollback.sh` rolls the receiver back to the previous release's image
+   and completes a run on it.
+
+Each roll follows [Upgrade](#upgrade)'s order: it applies the receiver's
+configuration with the SHA-256 of the plugin binary in the image it rolls
+to, checks the record holds it, sets the image's tag in the Kustomize copy,
+and runs `kubectl apply -k` and `kubectl rollout status`. It fails as soon
+as the new pod's receiver refuses its plugin's pin, waits for the receiver
+to be ready, and checks the new pod's log, with `kubectl logs` and not
+`--previous`, for no refusal and for the identity line
+`plugin kubernetes: version <version> protocol <n>` of the version it
+rolled to, and that the receiver has not restarted.
+
+`06-upgrade.sh` and `07-rollback.sh` first run
+[`.github/plugin-protocol.sh`](../.github/plugin-protocol.sh), which
+compares the plugin protocol the previous release and the checkout serve,
+from `pluginsdk/link.go` at the version each `go.mod` requires. When they
+differ, a 0.x clean break, each step skips its rolls with a notice naming
+both protocols, since the release notes then say to upgrade the receiver
+and its plugins together, or to reset. Steps 1 to 5 still run.
 
 `collect.sh` writes the receiver's log and the cluster's state, but no
 Secret, to `artifacts` in the state directory, `$E2E_WORK`, by default

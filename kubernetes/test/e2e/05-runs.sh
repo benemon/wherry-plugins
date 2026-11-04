@@ -3,32 +3,7 @@
 # SSH private key, a run with an input file and a run that never starts, and checks what each brings back. Ends once
 # the sweep has removed the cancelled run's pod.
 . "$(dirname "$0")/common.sh"
-host() { wherry host "$@"; }
-# A pool takes submits once a receiver has taken custody and published the pool key, a few seconds after it starts.
-submit() {
-	local out run i
-	for i in $(seq 60); do
-		out=$(host submit --selector "$@" 2>&1) && break
-		[[ $out == *"has no custodian yet"* ]] || break
-		sleep 2
-	done
-	run=$(sed -n 's/^run_id=\([^ ]*\) .*/\1/p' <<<"$out")
-	[ -n "$run" ] || fail "submit printed no run ID: $out"
-	echo "$run"
-}
-# wait's exit code for each state a run ends in; 6 is its timeout.
-declare -A codes=([TASK_STATE_COMPLETED]=0 [TASK_STATE_FAILED]=2 [TASK_STATE_CANCELED]=3 [TASK_STATE_REJECTED]=4)
-# finish waits for a run, with its reply in $work/<run>.reply, its outputs in $work/outputs/<run> and its log in
-# $work/<run>.log, and checks that it ended in the state $2 by wait's exit code.
-finish() {
-	local code=0
-	host wait "$1" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.reply" || code=$?
-	host logs "$1" >"$work/$1.log"
-	[ "$code" = "${codes[$2]}" ] || fail "run $1: wait exited $code; want ${codes[$2]}, $2"
-}
-replied() { grep -x -F "$2" "$work/$1.reply" >/dev/null || fail "run $1 did not reply '$2'"; }
 sha256() { sha256sum <"$1" | cut -d' ' -f1; }
-ready() { host receivers | grep 'profile=fake plugin=kubernetes agent=fake ready=true' >/dev/null; }
 running() {
 	kubectl get pod -n "$namespace" -l "wherry.io/run=$cancelled" 2>/dev/null \
 		-o jsonpath='{.items[*].status.containerStatuses[?(@.name=="agent")].state.running.startedAt}' | grep . >/dev/null

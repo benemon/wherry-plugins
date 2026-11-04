@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Loads the receiver image and the fake agent's image into kind, creates the runs claim's volume and the state claim's,
-# and deploys the receiver with the README's steps into the namespace wherry, which enforces Pod Security restricted:
-# a copy of examples/kubernetes holding the receiver's bundle and the Strimzi cluster CA, with ca_file, the fsGroup
-# patch and the image set, applied with kubectl apply -k. The state volume's root is root's, so the kubelet's ownership
-# pass gives it the fsGroup on its first mount. The receiver is then restarted, and must start with its signing key
-# still 0600.
+# Loads the receiver images, the checkout's and the previous release's, and the fake agent's image into kind, creates
+# the runs claim's volume and the state claim's, and deploys the receiver with the README's steps into the namespace
+# wherry, which enforces Pod Security restricted: a copy of examples/kubernetes holding the receiver's bundle and the
+# Strimzi cluster CA, with ca_file, the fsGroup patch and the image set, applied with kubectl apply -k. The state
+# volume's root is root's, so the kubelet's ownership pass gives it the fsGroup on its first mount. The receiver is then
+# restarted, and must start with its signing key still 0600.
 . "$(dirname "$0")/common.sh"
-kind load docker-image --name "$cluster" wherry-receiver:e2e wherry-e2e-agent:e2e
+kind load docker-image --name "$cluster" wherry-receiver:e2e wherry-receiver:previous wherry-e2e-agent:e2e
 
 # hostPath takes no fsGroup, so the receiver's UID owns the directory.
 docker exec "$cluster-control-plane" install -d -o 1001 -g 0 -m 0700 /var/lib/wherry-runs
@@ -15,7 +15,6 @@ kubectl apply -f "$e2e/runs.yaml" -f "$e2e/state.yaml"
 kubectl create namespace "$namespace"
 kubectl label namespace "$namespace" pod-security.kubernetes.io/enforce=restricted
 
-deploy=$work/deploy
 cp -R "$repo/examples/kubernetes" "$deploy"
 cp "$operator/bundles/receivers/kind-1.bundle" "$deploy/receiver.bundle"
 cp "$work/ca.crt" "$deploy/kafka-ca.crt"
