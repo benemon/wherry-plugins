@@ -144,10 +144,14 @@ evidence() {
 	before=$(sed -n 1p "$work/boundary")
 	entries=$(post_boundary) || fail "could not read wherry-receiver's journal after the boundary"
 	target=$(invocation) || fail "systemctl show failed for wherry-receiver"
+	[ -n "$target" ] || return 1
 	while IFS=$'\t' read -r id message; do
 		[ -n "$id$message" ] || continue
 		# The invocation the boundary saw began before it; the README's order lets it refuse the old binary.
 		if [ -n "$before" ] && [ "$id" = "$before" ]; then continue; fi
+		# The documented order leaves nothing for a second start to fix, so a retry after the boundary is a failure.
+		[ -z "$id" ] || [ "$id" = "$target" ] ||
+			fail "wherry-receiver invocation $id began after the boundary besides $target"
 		if [[ $message == *" and the pin is "* ]]; then
 			fail "wherry-receiver invocation ${id:-(none)} refused its plugin after the boundary: $message"
 		fi

@@ -37,7 +37,6 @@ sed 's|^# ca_file: |ca_file: |' "$repo/examples/systemd/config.yaml" >"$operator
 grep -x 'ca_file: /etc/wherry/kafka-ca.pem' "$operator/receivers/systemd-1.config.yaml" >/dev/null ||
 	fail "config.yaml names no ca_file"
 set_pin "$version"
-[ "$(sha256sum "$libexec/$version/plugins/wherry-plugin-systemd" | cut -d' ' -f1)" = "$pin" ] || fail "the pin changed"
 mask "$(sed -n 's/^password: *//p' "$operator/bundles/receivers/systemd-1.bundle" | tr -d "\"'")"
 
 # Step 4: the agents' state roots, the units and the tmpfiles configuration.

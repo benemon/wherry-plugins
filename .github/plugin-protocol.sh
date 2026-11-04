@@ -21,7 +21,6 @@
 # workspace override of pluginsdk, a vendored module, or a serve.go or link.go in a form it does not know. Needs git
 # with the tags, jq, and go unless both directories are given.
 set -euo pipefail
-shopt -s inherit_errexit
 module=github.com/benemon/wherry/pluginsdk
 
 fail() {
@@ -147,7 +146,7 @@ protocols() {
 [ $# = 1 ] || [ $# = 3 ] || fail "usage: plugin-protocol.sh PLUGIN [PREVIOUS_SDK_DIR CURRENT_SDK_DIR]"
 plugin=$1
 cd "$(dirname "$0")/.."
-previous=$(git describe --tags --abbrev=0 --match "$plugin/v*" HEAD^ 2>/dev/null) ||
+previous=$(git describe --tags --abbrev=0 --match "$plugin/v*" HEAD^) ||
 	fail "no $plugin/v* tag before HEAD; fetch the tags, as fetch-depth: 0 does"
 
 if [ $# = 3 ]; then

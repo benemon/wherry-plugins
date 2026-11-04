@@ -95,8 +95,9 @@ pod() {
 		sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty'
 }
 
-# rolled succeeds once the receiver Deployment has rolled out a pod of the image $1 and the receiver is ready, and fails
-# the step as soon as that pod's receiver refuses the image's plugin for its pin.
+# rolled succeeds once the receiver Deployment has rolled out a pod of the image $1 that has logged its plugin identity
+# line and the receiver is ready, and fails the step as soon as that pod's receiver refuses the image's plugin for its
+# pin.
 rolled() {
 	local name
 	name=$(pod "$1")
@@ -104,6 +105,7 @@ rolled() {
 	if kubectl logs -n "$namespace" "$name" -c receiver 2>/dev/null | grep -F ' and the pin is ' >/dev/null; then
 		fail "pod $name's receiver refused $1's plugin: the record does not pin it"
 	fi
+	kubectl logs -n "$namespace" "$name" -c receiver 2>/dev/null | grep -F 'plugin kubernetes: version ' >/dev/null || return 1
 	kubectl rollout status -n "$namespace" deployment/wherry-receiver --timeout=10s >/dev/null && ready
 }
 

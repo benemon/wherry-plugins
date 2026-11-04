@@ -129,5 +129,5 @@ scratch p 'git checkout -q -- p/go.mod && printf "replace (\n\tgithub.com/benemo
 scratch p 'git checkout -q -- p/go.mod && printf "go 1.24\n\nuse ./p\n" >go.work' 'has go.work'
 scratch p 'rm go.work && mkdir -p p/vendor && : >p/vendor/modules.txt' 'has p/vendor/modules.txt'
 scratch p 'rm -r p/vendor && : >p/go.sum' "but the checkout's p/go.sum records ''"
-scratch p 'git checkout -q -- p/go.sum && sed -i "s/v0.8.0-rc.2/v0.0.1-nosuch/" p/go.mod' 'go mod download .*v0.0.1-nosuch failed'
+scratch p 'git checkout -q -- p/go.sum && sed -i.bak "s/v0.8.0-rc.2/v0.0.1-nosuch/" p/go.mod && rm p/go.mod.bak' 'go mod download .*v0.0.1-nosuch failed'
 exit "$status"
