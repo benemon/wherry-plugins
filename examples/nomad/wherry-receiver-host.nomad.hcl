@@ -1,28 +1,20 @@
-# An example only: the wherry receiver as a Nomad service job under the exec driver, from binaries installed on the
-# client: the wherry binary /usr/local/libexec/wherry/<version>/wherry and the plugin directory
-# /usr/local/libexec/wherry/<version>/plugins, root's and writable by no group or other user. /usr is in the exec
-# driver's default chroot, so the client needs no chroot_env. CI validates this job but does not run it.
-# The receiver's bundle and its local configuration, examples/nomad/config-host.yaml with the version's plugin_dir, are
-# the items bundle and config of the Nomad variable nomad/jobs/wherry-receiver, which the job's workload identity reads.
-# Its state directory is on a dynamic host volume like examples/nomad/wherry-receiver.volume.hcl, owned by the wherry
-# user. Each receiver has its own bundle, so run one job, of count 1, per receiver. With a wherry system user and group
-# on every client that can run the job, and the binaries installed and verified as nomad/README.md's Install says:
+# Example only: a receiver under the exec driver, from root-owned binaries installed on every eligible client.
+# /usr/local/libexec/wherry/<version>/ holds wherry and plugins/. current points at the live version, and
+# /usr/local/bin/wherry points at /usr/local/libexec/wherry/current/wherry. Keep directories writable only by root.
+# config-host.yaml sets plugin_dir to /usr/local/libexec/wherry/current/plugins. /usr is in exec's default chroot.
+# Create a dedicated wherry user and group on every eligible client. The client must run as root to set ownership.
+# Each receiver has its own bundle and persistent state volume. Run one job with count 1 per receiver.
+# First record the verified plugin pin and provide config-host.yaml to wherry operator receiver apply.
+# Then, from the repository checkout:
 #   sed -e 's/^  uid  = 1001$/  uid  = <UID>/' -e 's/^  gid  = 0$/  gid  = <GID>/' examples/nomad/wherry-receiver.volume.hcl |
 #     nomad volume create -
-#   version=<version>
-#   sed "s|/<version>/|/$version/|" examples/nomad/config-host.yaml >config.yaml
 #   nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle config=@config.yaml
 #   nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl   # with ACLs enabled
-#   nomad job run -var version="$version" -var uid=<UID> -var gid=<GID> examples/nomad/wherry-receiver-host.nomad.hcl
-# policy.hcl is the plugin's ACL policy, as for the docker job. Upgrade or roll back by installing the version on every client, recording its pin as for the docker job, then at once putting
-# the item config with the version's plugin_dir and running the job again with the version. Release archives fetched
-# with artifact blocks, each pinned by options.checksum from its release's verified checksums.txt, can take the place
-# of the installed binaries.
-variable "version" {
-  type        = string
-  description = "The directory under /usr/local/libexec/wherry that holds the wherry binary and its plugin directory."
-}
-
+#   nomad job run -var uid=<UID> -var gid=<GID> examples/nomad/wherry-receiver-host.nomad.hcl
+# policy.hcl is the plugin ACL policy. config.yaml is the local configuration provided to receiver apply.
+# Upgrade: install a new version beside the old on every client, apply its pin, repoint current, then restart the job.
+# Rollback: apply the previous pin, repoint current to the previous version and restart. Preserve the state volume.
+# CI validates this job but does not run it.
 variable "uid" {
   type        = number
   description = "The user ID of the wherry user on the clients, which owns the rendered bundle."
@@ -66,7 +58,7 @@ job "wherry-receiver" {
       # The task shares the client's network, so the plugin reaches the Nomad API at the receiver configuration's
       # address, else NOMAD_ADDR, else the client's own 127.0.0.1:4646.
       config {
-        command = "/usr/local/libexec/wherry/${var.version}/wherry"
+        command = "/usr/local/bin/wherry"
         args    = ["receiver", "run", "--config-file", "/local/config.yaml"]
       }
 
@@ -100,7 +92,7 @@ job "wherry-receiver" {
         EOT
       }
 
-      # examples/nomad/config-host.yaml, its plugin_dir the version's.
+      # examples/nomad/config-host.yaml, its plugin_dir follows current.
       template {
         destination = "local/config.yaml"
         data        = <<-EOT
