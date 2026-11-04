@@ -3,12 +3,12 @@
 A receiver deploys from two files. `wherry operator receiver apply` writes its
 bundle to `bundles/receivers/<name>.bundle` in the operator's working
 directory. You provide its local configuration, `config.yaml`, before applying it
-([Receiver local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration)).
+([Receiver local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration)).
 Each example here holds the `config.yaml` for its platform and shows how
 the platform takes the two files, with the platform's own tools. Each
 example sets its platform's stop window and keeps `drain_timeout` at least
 10 seconds below it
-([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration#drain-timeout-and-the-stop-window)).
+([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration-receiver#drain-timeout-and-the-stop-window)).
 `make check-examples` checks it.
 
 These examples show ways to run a receiver and its plugins. Adapt them to

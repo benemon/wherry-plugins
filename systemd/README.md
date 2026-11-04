@@ -76,7 +76,7 @@ file-write bug, with these settings:
 The `config` keys below are set on the `systemd` plugin's `config`, which
 every plugin profile inherits, or on a plugin profile's `config`, and wherry
 merges the two as
-[Plugin profile merge](https://benemon.github.io/wherry/configuration#plugin-profile-merge)
+[Plugin profile merge](https://benemon.github.io/wherry/configuration-receiver#plugin-profile-merge)
 describes. The `credential` key names a [platform credential](#credentials),
 which this plugin refuses. The plugin reads the merged `config`:
 
@@ -324,7 +324,7 @@ more entries than the receiver's limit. It reads only regular files of the
 listed size within the limits, through an `os.Root` over the outputs
 directory; links, FIFOs and devices are listed with their type and never
 read. An output the receiver streams, an S3 output or the agent's
-[outcome file](https://benemon.github.io/wherry/configuration#agent-contract), it streams as the receiver reads it. Outputs stay on disk after any agent death, an OOM kill included.
+[outcome file](https://benemon.github.io/wherry/configuration-receiver#agent-contract), it streams as the receiver reads it. Outputs stay on disk after any agent death, an OOM kill included.
 
 When a run ends, the plugin records how it ended in the marker, stops and
 resets the unit, which drops its credential store, its dynamic user and
@@ -480,7 +480,7 @@ under `profile`, the operation and the class; the line holds no error text.
 ## Agent network reach
 
 The operator guide's
-[Agent network reach](https://benemon.github.io/wherry/operations#agent-network-reach)
+[Agent network reach](https://benemon.github.io/wherry/operations-hosts#agent-network-reach)
 says what an agent job's egress policy denies and allows.
 
 Agents have the host's network: everything the host reaches. On loopback

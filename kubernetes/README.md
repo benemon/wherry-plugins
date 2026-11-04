@@ -65,9 +65,9 @@ You do not run the plugin by hand.
 The plugin takes a plugin profile's API token as its platform credential:
 the value of the credential the profile's merged `config` names with
 `credential: <name>`, which the receiver resolves from the `credentials` of
-its [local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration)
+its [local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration)
 and passes when it configures the profile
-([Platform credentials](https://benemon.github.io/wherry/configuration#platform-credentials)).
+([Platform credentials](https://benemon.github.io/wherry/configuration-receiver#platform-credentials)).
 The token never reaches `wherry.operator` or the bundle.
 
 With `address` empty, the plugin reaches the API server of the cluster the
@@ -93,7 +93,7 @@ credentials:
 The receiver checks the file's mode as
 [Credential sources](https://benemon.github.io/wherry/security#credential-sources)
 describes, and reads a rotated token at its next start
-([Platform credentials](https://benemon.github.io/wherry/configuration#platform-credentials)).
+([Platform credentials](https://benemon.github.io/wherry/configuration-receiver#platform-credentials)).
 
 | Variable | Effect |
 | --- | --- |
@@ -154,7 +154,7 @@ admitted by the namespace's Pod Security level, so with the namespace at
 The `config` keys below are set on the `kubernetes` plugin's `config`,
 which every plugin profile inherits, or on a plugin profile's `config`, and
 wherry merges the two as
-[Plugin profile merge](https://benemon.github.io/wherry/configuration#plugin-profile-merge)
+[Plugin profile merge](https://benemon.github.io/wherry/configuration-receiver#plugin-profile-merge)
 describes. The `credential` key names a [platform credential](#credentials),
 which the receiver resolves from its local configuration and removes from
 the `config` before the plugin sees it. The plugin reads the merged
@@ -229,7 +229,7 @@ withdraws its offer and takes no new work. Readiness checks nothing else:
 - Images. An agent image that cannot be pulled shows only at dispatch, as a
   pod that never started with class `image`.
 
-In a [receiver configuration directory](https://benemon.github.io/wherry/configuration#receiver-configuration-directory),
+In a [receiver configuration directory](https://benemon.github.io/wherry/configuration-receiver#receiver-configuration-directory),
 `plugins/kubernetes/plugin.yaml` holds the plugin's settings, here for a
 receiver in the cluster, whose service account supplies the token and
 names the namespace, its own:
@@ -491,7 +491,7 @@ reading nothing, when it holds more entries than the receiver's limit. It
 reads only regular files the listing shows within the limits, refused when
 they are anything but a regular file of the listed size; links, FIFOs and
 devices are listed with their type and never read. An output the receiver
-streams, an S3 output or the agent's [outcome file](https://benemon.github.io/wherry/configuration#agent-contract), it streams as the receiver reads it. The agent creates the outputs directory;
+streams, an S3 output or the agent's [outcome file](https://benemon.github.io/wherry/configuration-receiver#agent-contract), it streams as the receiver reads it. The agent creates the outputs directory;
 without one there are no outputs. The agent's own mount reaches no other
 run, since it is the run's directory alone and a link resolves inside the
 agent's mount namespace.
@@ -660,7 +660,7 @@ sweep; the API server's priority and fairness protects the server.
 ## Agent network reach
 
 The operator guide's
-[Agent network reach](https://benemon.github.io/wherry/operations#agent-network-reach)
+[Agent network reach](https://benemon.github.io/wherry/operations-hosts#agent-network-reach)
 says what an agent job's egress policy denies and allows.
 
 Agent pods carry no API token and no Service variables, and need no
@@ -1014,7 +1014,7 @@ The ConfigMap is mounted read-only at `/etc/wherry/config`.
 The pool's Kafka runs in the same cluster under Strimzi, with Kafka 4.3, share groups enabled, and a
 `tls` internal listener with `authentication: scram-sha-512` and
 `authorization: simple`. The operator guide's
-[Strimzi](https://benemon.github.io/wherry/operations#strimzi) notes apply. Where
+[Strimzi](https://benemon.github.io/wherry/operations-operator#strimzi) notes apply. Where
 the listener sets `networkPolicyPeers`, they admit the receiver's
 namespace.
 

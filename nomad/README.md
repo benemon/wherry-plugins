@@ -38,10 +38,10 @@ The receiver verifies the binary against `plugin_sha256.nomad` before running it
 ## Credentials
 
 A plugin profile's Nomad token is the
-[platform credential](https://benemon.github.io/wherry/configuration#platform-credentials)
+[platform credential](https://benemon.github.io/wherry/configuration-receiver#platform-credentials)
 its merged `config` names with `credential: <name>`. The receiver resolves
 the name from the `credentials` of its
-[local configuration](https://benemon.github.io/wherry/configuration#receiver-local-configuration),
+[local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration),
 a `file`, `env` or `command` source, and passes the value to the plugin
 when it configures the plugin profile:
 
@@ -115,7 +115,7 @@ node_pool "default" {
 The `config` keys below are set on the `nomad` plugin's `config`, which
 every plugin profile inherits, or on a plugin profile's `config`, and wherry
 merges the two as
-[Plugin profile merge](https://benemon.github.io/wherry/configuration#plugin-profile-merge)
+[Plugin profile merge](https://benemon.github.io/wherry/configuration-receiver#plugin-profile-merge)
 describes. The `credential` key names a [platform credential](#credentials),
 which the receiver resolves from its local configuration and removes from
 the `config` before the plugin sees it. The plugin reads the merged
@@ -395,7 +395,7 @@ read whose length differs from the listing, since the API answers some
 failed reads with status 200 and the error as the body. An output the
 receiver streams, an S3 output, it streams as the receiver reads it, at
 most the size the listing shows; the receiver's upload fails when the
-length differs. The receiver streams the agent's [outcome file](https://benemon.github.io/wherry/configuration#agent-contract) the same
+length differs. The receiver streams the agent's [outcome file](https://benemon.github.io/wherry/configuration-receiver#agent-contract) the same
 way. The agent creates the outputs directory; without one there are no
 outputs. The listing shows no link count, so a hard link to a
 credential file reads as a regular file; the receiver's redaction of
@@ -513,7 +513,7 @@ every 2 seconds, which bounds the precision of placement times.
 ## Agent network reach
 
 The operator guide's
-[Agent network reach](https://benemon.github.io/wherry/operations#agent-network-reach)
+[Agent network reach](https://benemon.github.io/wherry/operations-hosts#agent-network-reach)
 says what an agent job's egress policy denies and allows.
 
 The plugin's agent jobs carry no `network` block, so the driver decides
