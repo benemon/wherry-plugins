@@ -6,7 +6,7 @@ repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 e2e=$repo/systemd/test/e2e
 work=${E2E_WORK:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/wherry-systemd-e2e}
 # The operator's working directory, and the host's own paths under $E2E_WORK/host. $E2E_WORK/bin holds the verified
-# wherry CLI that provisions and submits.
+# wherry CLI that provisions and lists the host's receivers.
 operator=$work/operator
 libexec=/usr/local/libexec/wherry
 export PATH=$work/bin:$PATH XDG_CONFIG_HOME=$work/host/config XDG_STATE_HOME=$work/host/state
@@ -46,16 +46,42 @@ arch() {
 # previous_version prints the plugin version of the previous release, which 02-fetch.sh downloads.
 previous_version() { cat "$work/previous-version"; }
 
-# same_protocol succeeds when the previous release and the checkout serve the same plugin protocol. When they differ it
-# fails after .github/plugin-protocol.sh's notice, and the lane skips its roll to and from the previous release. It
-# fails the step on any other error, such as no previous release.
+# protocol_check runs .github/plugin-protocol.sh for the systemd plugin and keeps its result lines in
+# $work/protocol.env: the previous release's tag, the protocols each side serves, and result=run or result=skip. Any
+# failure of the check fails the step; a skip is only ever the check's result=skip, never an error.
+protocol_check() {
+	"$repo/.github/plugin-protocol.sh" systemd | tee "$work/protocol.out"
+	grep -E '^(previous|previous_protocols|current_protocols|result)=' "$work/protocol.out" >"$work/protocol.env"
+}
+
+# checked prints the value of the key $1 that protocol_check kept, and fails the step when it has none.
+checked() {
+	local value
+	value=$(sed -n "s/^$1=//p" "$work/protocol.env" 2>/dev/null || true)
+	[ -n "$value" ] || fail "02-fetch.sh's protocol check kept no $1"
+	echo "$value"
+}
+
+# protocol prints the plugin protocol the receiver runs with the side $1, previous or current: the newest it serves.
+protocol() {
+	local protocols
+	protocols=$(checked "$1_protocols") || exit 1
+	tr ' ' '\n' <<<"$protocols" | sort -n | tail -n 1
+}
+
+# same_protocol succeeds when protocol_check found protocols both sides serve. When it found none it repeats the check's
+# notice and fails, and the lane skips its roll to and from the previous release. Any other value fails the step.
 same_protocol() {
-	local code=0
-	"$repo/.github/plugin-protocol.sh" systemd || code=$?
-	case $code in
-	0) return 0 ;;
-	2) echo "SKIP: $(basename "$0"): the previous release serves another plugin protocol" && return 1 ;;
-	*) fail "the plugin protocol check exited $code" ;;
+	local result
+	result=$(checked result) || exit 1
+	case $result in
+	run) return 0 ;;
+	skip)
+		grep '^::notice ' "$work/protocol.out" || true
+		echo "SKIP: $(basename "$0"): the previous release and the checkout serve no plugin protocol in common"
+		return 1
+		;;
+	*) fail "the plugin protocol check's result is '$result'" ;;
 	esac
 }
 
@@ -78,58 +104,76 @@ pinned() {
 	[ "$recorded" = "$1" ] || fail "the receiver's record pins '$recorded', not $1"
 }
 
-# invocation prints the receiver unit's current invocation ID.
+# invocation prints the receiver unit's current invocation ID, empty before its first start.
 invocation() { systemctl show -p InvocationID --value wherry-receiver; }
 
-# journal prints the receiver unit's journal for its invocation $1 alone.
-journal() { sudo journalctl -u wherry-receiver _SYSTEMD_INVOCATION_ID="$1" --no-pager -o cat; }
+# boundary records a deliberate restart boundary in $work/boundary, immediately before the step starts or restarts the
+# receiver: the unit's invocation then, and the cursor of the journal's newest entry. evidence reads the receiver's
+# journal after that cursor alone, so a refusal before the boundary, which the README's order allows between the new
+# pin and the repoint, is not the step's to judge.
+boundary() {
+	local before cursor
+	before=$(invocation) || fail "systemctl show failed for wherry-receiver"
+	cursor=$(sudo journalctl -q -n 1 -o json --no-pager | jq -r '.__CURSOR // empty') ||
+		fail "journalctl could not print the journal's newest entry"
+	[ -n "$cursor" ] || fail "the journal's newest entry has no cursor"
+	printf '%s\n%s\n' "$before" "$cursor" >"$work/boundary"
+	echo "boundary: invocation '$before', cursor $cursor"
+}
 
-# identified succeeds once the receiver's invocation $1 has logged its plugin's identity line, and fails the step when
-# that invocation refused its plugin for its pin.
-identified() {
-	local log
-	log=$(journal "$1")
-	if grep -F ' and the pin is ' <<<"$log" >/dev/null; then
-		fail "wherry-receiver invocation $1 refused its plugin: $(grep -F -m 1 ' and the pin is ' <<<"$log")"
-	fi
-	grep -E '(^|[^[:alnum:]])plugin systemd: version [^ ]+ protocol [0-9]+' <<<"$log" >/dev/null
+# post_boundary prints every entry of the receiver unit's journal after the boundary's cursor, one per line as its
+# invocation ID, a tab and its message: the receiver's own lines carry _SYSTEMD_INVOCATION_ID, and systemd's lines
+# about the unit INVOCATION_ID, so a start that failed before the receiver logged anything still names its invocation.
+# It fails when journalctl or jq does.
+post_boundary() {
+	local cursor
+	cursor=$(sed -n 2p "$work/boundary")
+	[ -n "$cursor" ] || fail "the step recorded no boundary"
+	sudo journalctl -u wherry-receiver --after-cursor="$cursor" -o json --no-pager |
+		jq -r '[._SYSTEMD_INVOCATION_ID // .INVOCATION_ID // "",
+			(.MESSAGE // "" | if type == "array" then implode else tostring end)] | @tsv'
+}
+
+# evidence checks every invocation of the receiver after the boundary, failed starts and restarts included, as step 6
+# and the Upgrade's step 4 check the identity line. It fails the step when the journal cannot be read, when any of
+# them logged a line ending "and the pin is <pin>", or when any logged an identity line other than
+# "plugin systemd: version $1 protocol $2". It succeeds, setting fresh, once the unit's current invocation is non-empty,
+# is not the one the boundary saw, and has logged that identity line; until then it fails, for wait_for to retry.
+evidence() {
+	local want="plugin systemd: version $1 protocol $2" before entries target id message line seen=
+	before=$(sed -n 1p "$work/boundary")
+	entries=$(post_boundary) || fail "could not read wherry-receiver's journal after the boundary"
+	target=$(invocation) || fail "systemctl show failed for wherry-receiver"
+	while IFS=$'\t' read -r id message; do
+		[ -n "$id$message" ] || continue
+		# The invocation the boundary saw began before it; the README's order lets it refuse the old binary.
+		if [ -n "$before" ] && [ "$id" = "$before" ]; then continue; fi
+		if [[ $message == *" and the pin is "* ]]; then
+			fail "wherry-receiver invocation ${id:-(none)} refused its plugin after the boundary: $message"
+		fi
+		line=$(grep -o -E '(^|[[:space:]])plugin systemd: version [^[:space:]]+ protocol [0-9]+$' <<<"$message" | sed 's/^[[:space:]]//' || true)
+		[ -n "$line" ] || continue
+		[ "$line" = "$want" ] || fail "wherry-receiver invocation ${id:-(none)} logged '$line', not '$want'"
+		[ "$id" != "$target" ] || seen=1
+	done <<<"$entries"
+	[ -n "$target" ] && [ "$target" != "$before" ] && [ -n "$seen" ] || return 1
+	fresh=$target
 }
 
 live() { host receivers | grep -E '^receiver=systemd-1 .* status=live$' >/dev/null; }
 
-# started checks the receiver's invocation $1, which the step's start or restart began, as step 6 and the Upgrade's
-# step 4 do: it logs the identity line of the plugin version $2 and no pin refusal, the receiver shows live, and $1 is
-# still the unit's invocation, so the receiver has not exited and restarted since.
+# started checks the start or restart that followed the boundary, as step 6 and the Upgrade's step 4 do: within 120
+# seconds a fresh invocation logs the identity line of the plugin version $1 and protocol $2, with no pin refusal or
+# other identity line in any invocation after the boundary; then the receiver shows live; then the same checks hold
+# again and that invocation is still the unit's, so the receiver has not exited and restarted since.
 started() {
-	local log
-	[ -n "$1" ] || fail "wherry-receiver has no invocation"
-	wait_for 120 identified "$1"
-	log=$(journal "$1")
-	grep -F "plugin systemd: version $2 protocol " <<<"$log" >/dev/null ||
-		fail "wherry-receiver invocation $1 logged $(grep -E -o -m 1 'plugin systemd: version [^ ]+' <<<"$log"), not plugin systemd: version $2"
-	wait_for 300 live
-	[ "$(invocation)" = "$1" ] || fail "wherry-receiver restarted after invocation $1"
-	if journal "$1" | grep -F ' and the pin is ' >/dev/null; then fail "wherry-receiver invocation $1 refused its plugin"; fi
-	echo "invocation $1: $(grep -F -m 1 'plugin systemd: version ' <<<"$log")"
-}
-
-# complete submits a run with the prompt $1 as the host and waits for it, with its reply in $work/<run>.reply, its
-# outputs in $work/outputs/<run> and its log in $work/<run>.log. It checks that the run completed, that the fake agent
-# replied with its UID, and that the run returned the prompt as echo.txt. A pool takes submits once a receiver has
-# taken custody and published the pool key.
-complete() {
-	local out run i code=0
-	for i in $(seq 60); do
-		out=$(host submit --selector e2e=fake --output echo.txt:required --prompt "$1" 2>&1) && break
-		[[ $out == *"has no custodian yet"* ]] || break
-		sleep 2
-	done
-	run=$(sed -n 's/^run_id=\([^ ]*\) .*/\1/p' <<<"$out")
-	[ -n "$run" ] || fail "submit printed no run ID: $out"
-	host wait "$run" --timeout 5m --outputs-dir "$work/outputs/$run" >"$work/$run.reply" || code=$?
-	host logs "$run" >"$work/$run.log"
-	[ "$code" = 0 ] || fail "run $run: wait exited $code; want 0, completed"
-	grep -E -x 'uid [0-9]+' "$work/$run.reply" >/dev/null || fail "run $run did not reply with its UID"
-	grep -F "$1" "$work/outputs/$run/echo.txt" >/dev/null || fail "run $run returned no echo.txt"
-	echo "run $run completed"
+	local first
+	fresh=
+	wait_for 120 evidence "$1" "$2" ||
+		fail "no fresh wherry-receiver invocation logged 'plugin systemd: version $1 protocol $2' within 120 seconds"
+	first=$fresh
+	wait_for 300 live || fail "systemd-1 did not show live within 300 seconds"
+	[ "$(invocation)" = "$first" ] || fail "wherry-receiver began another invocation after $first"
+	evidence "$1" "$2" && [ "$fresh" = "$first" ] || fail "wherry-receiver invocation $first no longer holds its identity line"
+	echo "invocation $first: plugin systemd: version $1 protocol $2; systemd-1 live"
 }

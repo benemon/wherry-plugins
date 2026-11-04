@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Runs steps 1 to 6 of systemd/README.md's Run the receiver as a systemd service, as root through sudo, with the
-# previous release's plugin, so 05-upgrade.sh upgrades from it; when the previous release serves another plugin
-# protocol, with the checkout's. Then completes a run on the receiver. It installs on a host with no receiver yet, as
-# the disposable CI runner is: step 1's links fail where they exist.
+# previous release's plugin, so 05-upgrade.sh upgrades from it; when 02-fetch.sh's protocol check found no plugin
+# protocol that the previous release and the checkout both serve, with the checkout's. It installs on a host with no
+# receiver yet, as the disposable CI runner is: step 1's links fail where they exist.
 . "$(dirname "$0")/common.sh"
 if same_protocol; then
-	version=$(previous_version) from=$work/previous
+	version=$(previous_version)
+	protocol=$(protocol previous)
+	from=$work/previous
 else
-	version=e2e from=$work/current
+	version=e2e
+	protocol=$(protocol current)
+	from=$work/current
 fi
-echo "installing plugin version $version"
-
-# Harness: the fake agent, where an agent unit's dynamic user can execute it, for the plugin profile's command.
-sudo install -D -m 0755 "$repo/kubernetes/test/e2e/agent/agent.sh" /usr/local/libexec/wherry-e2e/agent.sh
+echo "installing plugin version $version, protocol $protocol"
 
 # Step 1: install the binaries in a directory for this deployment version. Ubuntu has no SELinux, so no restorecon.
 sudo install -d -m 0755 "$libexec/$version/plugins"
@@ -52,11 +53,10 @@ sudo install -m 0600 "$operator/receivers/systemd-1.config.yaml" /etc/wherry/con
 sudo install -m 0644 "$work/kafka/ca.crt" /etc/wherry/kafka-ca.pem
 sysctl kernel.core_pattern
 
-# Step 6: start the receiver, check its identity line, and wait for it to show live.
+# Step 6: start the receiver, check its identity line in every invocation since the boundary, and wait for it to show
+# live.
 sudo systemctl daemon-reload
+boundary
 sudo systemctl enable --now wherry-receiver
-started "$(invocation)" "$version"
-
-# Harness: a run on the installed receiver.
-complete 'e2e: install'
+started "$version" "$protocol"
 echo "PASS"

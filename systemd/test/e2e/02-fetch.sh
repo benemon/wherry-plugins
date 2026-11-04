@@ -3,13 +3,16 @@
 # - wherry of the release WHERRY_VERSION, with step 1's commands of systemd/README.md's Run the receiver as a systemd
 #   service, into $E2E_WORK/wherry, and, as the harness's CLI, into $E2E_WORK/bin;
 # - the systemd plugin of the previous release, the latest systemd/v* tag before HEAD, with the commands of Install
-#   plugins that step 1 names, into $E2E_WORK/previous, keeping its version in $E2E_WORK/previous-version;
+#   plugins that step 1 names, into $E2E_WORK/previous, keeping its version, the tag less its systemd/ prefix, in
+#   $E2E_WORK/previous-version; the full tag selects the release's download route alone;
 # - the plugin built from the checkout with version e2e, as step 1 allows and both Containerfiles build, into
 #   $E2E_WORK/current.
-# Needs cosign and Go. With no systemd/v* tag before HEAD it fails, as the upgrade has no release to start from.
+# First it runs the plugin protocol check, which finds the tag and keeps its result for the later steps. Needs cosign,
+# Go and jq. With no systemd/v* tag before HEAD, or any other failure of the check, it fails.
 . "$(dirname "$0")/common.sh"
 : "${WHERRY_VERSION:?}"
 arch=$(arch)
+protocol_check
 
 # Step 1: wherry.
 mkdir "$work/wherry"
@@ -28,16 +31,16 @@ install -m 0755 "$work/wherry/wherry" "$work/bin/wherry"
 wherry version
 
 # Step 1, Install plugins: the previous release's plugin. Step 2 checks its pin against these checksums.
-previous=$(git -C "$repo" describe --tags --abbrev=0 --match 'systemd/v*' HEAD^) ||
-	fail "no systemd/v* tag before HEAD; fetch the tags"
-echo "previous release: $previous"
-echo "${previous#systemd/}" >"$work/previous-version"
+previous=$(checked previous)
+previous_version=${previous#systemd/}
+echo "previous release: $previous, plugin version $previous_version"
+echo "$previous_version" >"$work/previous-version"
 mkdir "$work/previous"
 (
 	cd "$work/previous"
-	plugin=systemd version=${previous#systemd/} os=linux
-	base=https://github.com/benemon/wherry-plugins/releases/download/$plugin/$version
-	archive=wherry-plugin-${plugin}_${version}_${os}_${arch}.tar.gz
+	plugin=systemd os=linux
+	base=https://github.com/benemon/wherry-plugins/releases/download/$previous
+	archive=wherry-plugin-${plugin}_${previous_version}_${os}_${arch}.tar.gz
 	curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
 	cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
 		--certificate-identity-regexp "^https://github\.com/benemon/wherry-plugins/\.github/workflows/release\.yml@refs/tags/$plugin/v" \

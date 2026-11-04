@@ -12,12 +12,14 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # The wherry release the nomad-image job builds with and the systemd-host job installs; e2e.yml pins the same
+  # release, so change both together.
+  WHERRY_VERSION: v0.1.0-rc.28
+
 jobs:
   nomad-image:
     runs-on: ubuntu-latest
-    env:
-      # The wherry release e2e.yml pins; change it with e2e.yml's and the systemd-host job's.
-      WHERRY_VERSION: v0.1.0-rc.28
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -122,8 +124,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      # The wherry release e2e.yml pins; change it with e2e.yml's and the nomad-image job's.
-      WHERRY_VERSION: v0.1.0-rc.28
+      # cosign alone, at the version and SHA-256 of the linux-amd64 binary .github/release-tools.sh pins; change both
+      # together.
+      COSIGN_VERSION: 3.1.4
+      COSIGN_SHA256: 424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -136,7 +140,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: >-
           .github/changed.sh "$BASE"
-          "^(systemd/|examples/systemd/|kubernetes/test/e2e/agent/|Makefile\$|\.github/workflows/ci\.yml\$|\.github/(changed|plugin-protocol|release-tools)\.sh\$)"
+          "^(systemd/|examples/systemd/|Makefile\$|\.github/workflows/ci\.yml\$|\.github/changed\.sh\$|\.github/plugin-protocol\.sh\$)"
       - name: Set up Go
         if: steps.changes.outputs.changed == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -164,13 +168,16 @@ jobs:
         run: >-
           sudo env WHERRY_SYSTEMD_DEV=1 WHERRY_SYSTEMD_PLUGIN="$RUNNER_TEMP/wherry-plugin-systemd"
           "$RUNNER_TEMP/systemd.test" -test.count=1 -test.v -test.run 'OnSystemd|Conformance|Transient|DaemonReload|TwoRuns|UnitPropertiesOn'
-      # The steps below need the tags for the previous release, which fetch-depth: 0 fetched, and cosign, which verifies
-      # the wherry and plugin releases as the README's commands do. 05 and 06 skip, with a notice, and 04 installs the
-      # checkout's plugin, when the previous release serves another plugin protocol.
-      - name: Install cosign, with the release build's other pinned tools
+      # The steps below need the tags for the previous release, which fetch-depth: 0 fetched, Go, for the plugin
+      # protocol check's download of pluginsdk, and cosign, which verifies the wherry and plugin releases as the
+      # README's commands do. 05 and 06 skip, with the check's notice, and 04 installs the checkout's plugin, when the
+      # previous release and the checkout serve no plugin protocol in common; any failure of the check fails 02.
+      - name: Install cosign
         if: steps.changes.outputs.changed == 'true'
         run: |
-          .github/release-tools.sh "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/cosign" "https://github.com/sigstore/cosign/releases/download/v$COSIGN_VERSION/cosign-linux-amd64"
+          echo "$COSIGN_SHA256  $RUNNER_TEMP/cosign" | sha256sum -c -
+          install -D -m 0755 "$RUNNER_TEMP/cosign" "$RUNNER_TEMP/bin/cosign"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Start Kafka
         if: steps.changes.outputs.changed == 'true'

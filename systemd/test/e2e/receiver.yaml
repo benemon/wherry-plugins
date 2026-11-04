@@ -1,16 +1,16 @@
 # The receiver's file, receivers/systemd-1.yaml in the operator working directory, as Run the receiver as a systemd
 # service's step 3 creates it: 04-install.sh appends plugin_sha256 with the pin of the plugin binary it installs. The
-# plugin profile runs the fake agent, which 04-install.sh installs where an agent unit's dynamic user can execute it.
+# lane submits no run, so the plugin profile's command is /bin/true; the plugin checks the profile when the receiver
+# configures it, before the identity line.
 pool: e2e
 capacity: 2
 plugins:
   systemd:
     profiles:
-      - name: fake
-        agent: fake
+      - name: noop
+        agent: noop
         labels:
-          e2e: fake
+          e2e: noop
         config:
           runtime:
-            command: [/bin/sh, /usr/local/libexec/wherry-e2e/agent.sh]
-            resources: {cpu_quota: 50, memory_mb: 256}
+            command: [/bin/true]

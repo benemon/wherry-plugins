@@ -2,7 +2,7 @@
 # Harness: makes ready what Run the receiver as a systemd service starts with, as the operator guide does, from the
 # runner in the operator working directory $E2E_WORK/operator: operator init with the Kafka super user wherry-admin,
 # the pool e2e, and the tenant e2e entitled to it with the host runner. Then sets the host up from its bundle with
-# wherry host init, trusting the broker's CA through ca.pem.
+# wherry host init, trusting the broker's CA through $XDG_CONFIG_HOME/wherry/ca.pem, as the Nomad lane does.
 . "$(dirname "$0")/common.sh"
 umask 077
 kafka=$work/kafka
