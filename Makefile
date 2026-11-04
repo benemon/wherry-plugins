@@ -79,8 +79,14 @@ check-markers: ## Fail on tool-attribution markers in tracked files
 check-examples: ## Fail on a receiver example whose drain_timeout is not 10s below its stop window, or a removed command
 	@.github/check-examples.sh $(PLUGINS)
 
+.PHONY: check-protocol
+# The e2e lanes skip the previous-release roll when .github/plugin-protocol.sh finds the plugin's previous release and
+# the checkout serving different plugin protocols; this tests that comparison. It needs the repository's tags.
+check-protocol: ## Fail on a plugin protocol comparison that skips the wrong roll
+	@.github/plugin-protocol-test.sh $(PLUGINS)
+
 .PHONY: check
-check: check-fmt vet test check-cross check-licenses check-markers check-examples ## Run every CI gate
+check: check-fmt vet test check-cross check-licenses check-markers check-examples check-protocol ## Run every CI gate
 
 .PHONY: image
 image: ## Build the receiver image (VERSION, WHERRY_VERSION, CONTAINER)
