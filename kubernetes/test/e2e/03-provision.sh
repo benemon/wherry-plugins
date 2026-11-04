@@ -15,8 +15,9 @@ wherry operator init --dir "$operator" --broker localhost:31092 --ca-file "$work
 	--super-user kafka-admin --super-user-password-file "$work/kafka-admin.password"
 mask "$(cat "$operator/operator.password")"
 wherry operator pool apply e2e --dir "$operator" -f "$e2e/pool.yaml"
-wherry operator pool entitle e2e --tenant e2e --dir "$operator"
-wherry operator host add runner --tenant e2e --dir "$operator"
+wherry operator tenant add e2e --dir "$operator"
+wherry operator tenant pool add e2e e2e --dir "$operator"
+wherry operator tenant host add e2e runner --dir "$operator"
 plugin_sha256=$(docker run --rm --entrypoint sha256sum wherry-receiver:e2e \
 	/usr/local/libexec/wherry/plugins/wherry-plugin-kubernetes | cut -d' ' -f1)
 cp -R "$e2e/receiver" "$work/receiver"

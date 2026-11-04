@@ -806,7 +806,7 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
    with `WHERRY_VERSION`, and the fake agent's image.
 3. `03-provision.sh` provisions as the operator guide does, in an operator
    working directory: `wherry operator init` with the broker's Kafka super
-   user, `operator pool apply -f`, `pool entitle`, `host add`, and
+   user, `operator pool apply -f`, `tenant add`, `tenant pool add`, `tenant host add`, and
    `receiver apply -f` of the receiver configuration directory
    `test/e2e/receiver`, whose plugin profile
    `plugins/nomad/profiles/10-fake.yaml` runs a fake agent, with the pin of

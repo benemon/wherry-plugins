@@ -1111,7 +1111,7 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    with `make image` and the fake agent's image.
 3. `03-provision.sh` provisions as the operator guide does, in an operator
    working directory: `wherry operator init` with `kafka-admin`,
-   `operator pool apply -f`, `pool entitle`, `host add`, and
+   `operator pool apply -f`, `tenant add`, `tenant pool add`, `tenant host add`, and
    `receiver apply -f` of the receiver configuration directory
    `test/e2e/receiver`: `receiver.yaml`, which names the internal bootstrap
    address and to which the step appends the pin of the plugin binary in
