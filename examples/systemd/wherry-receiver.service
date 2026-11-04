@@ -2,6 +2,8 @@
 # wherry.slice, so restarting or stopping the receiver leaves every agent running for the restarted receiver to adopt.
 # A compromised receiver is host root: any uid-0 process starts root units through systemd's private socket, whatever
 # its capabilities. The settings below bound accidents and partial exploits.
+# /usr/local/bin/wherry points to /usr/local/libexec/wherry/current/wherry.
+# current selects /usr/local/libexec/wherry/<version>/ with wherry and plugins/.
 [Unit]
 Description=wherry receiver
 Wants=network-online.target
