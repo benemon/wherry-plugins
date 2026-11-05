@@ -104,7 +104,8 @@ func lookupOnce(t *testing.T, profile *Nomad) (pluginsdk.Job, lookupOutcome) {
 
 // TestLookupDecisionOrder walks mch5's Nomad rows: allocations decide first, then a stopped job, then the current
 // evaluation's queue or blocked status, then the blocked evaluation it names; anything else waits, and an essential read
-// that fails is an observation error.
+// that fails is an observation error. Of two evaluations of the job's version, the one created last is current, in
+// either list order.
 func TestLookupDecisionOrder(t *testing.T) {
 	none := serve([]byte(`[]`))
 	pending := func(reason string) lookupOutcome { return lookupOutcome{state: pluginsdk.JobPending, reason: reason} }
@@ -126,6 +127,8 @@ func TestLookupDecisionOrder(t *testing.T) {
 		{"no allocation, queued, canceled", nil, none, evals(eval("e1", 20, 21, api.EvalStatusCancelled, 1, metricA)), nil, pending(reasonA)},
 		{"no allocation, queued and blocked", nil, none, evals(eval("e1", 20, 21, api.EvalStatusBlocked, 1, metricA)), nil, pending(reasonA)},
 		{"no allocation, blocked, none queued", nil, none, evals(eval("e1", 20, 21, api.EvalStatusBlocked, 0, metricA)), nil, pending(reasonA)},
+		{"two current evaluations, newest last", nil, none, evals(eval("e1", 20, 21, api.EvalStatusComplete, 1, metricA), eval("e2", 20, 22, api.EvalStatusBlocked, 0, metricB)), nil, pending(reasonB)},
+		{"two current evaluations, newest first", nil, none, evals(eval("e2", 20, 22, api.EvalStatusBlocked, 0, metricB), eval("e1", 20, 21, api.EvalStatusComplete, 1, metricA)), nil, pending(reasonB)},
 		{"no evaluation", nil, none, evals(), nil, wait},
 		{"stale evaluation only", nil, none, evals(eval("e0", 19, 19, api.EvalStatusBlocked, 1, metricA)), nil, wait},
 		{"current pending evaluation", nil, none, evals(eval("e1", 20, 21, api.EvalStatusPending, 0, nil)), nil, wait},
