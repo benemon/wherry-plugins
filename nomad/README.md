@@ -96,11 +96,13 @@ node_pool "default" {
 }
 ```
 
-- `submit-job`: register a run's job, deregister one that is stopped or
-  outlives its dispatch wait, and purge one that never started or
-  has been dead for 10 minutes.
+- `submit-job`: register a run's job, deregister one the receiver stops,
+  placed or not, and purge one that never started or has been dead for
+  10 minutes.
 - `list-jobs`: find dead agent jobs to purge.
-- `read-job`: read a job and its allocations.
+- `read-job`: read a job, its allocations and its evaluations, and the
+  blocked evaluation one of them names, which say why Nomad has not placed
+  the job.
 - `read-logs`: stream the agent task's standard output.
 - `read-fs`: list and read the agent task's outputs directory once the job
   has stopped.
@@ -210,6 +212,9 @@ plugins:
               memory_mb: 2048
 ```
 
+Two receivers meant to share a queue carry identical labels for the profile;
+one differing label is a different signature.
+
 ### Receiver configuration
 
 This receiver configuration file holds the `nomad` plugin and two plugin
@@ -305,17 +310,38 @@ task group `agent` holds the task `agent`, built from the plugin profile's
 `profile` and `agent`, which the receiver reads to decide whether to adopt
 the job.
 
+Dispatch returns once Nomad has registered the job, placed or not, with a
+handle that names the job and no allocation; a dispatch that finds the job
+already registered returns its handle at once. That handle serves Stop and
+Purge. Lookup then observes the job once:
+
+- with no allocation and the job's current evaluation queueing the agent
+  group or blocked, or naming a blocked evaluation, the job is pending, and
+  the reason is the failed placement's metric, such as
+  `1 nodes evaluated, 0 filtered, 1 exhausted; memory exhausted on 1 nodes`;
+- with a placed allocation whose task has started, or a terminal one, the
+  job is running, ended or never started, and the handle names the
+  allocation; Follow and Collect take that handle, and refuse one with no
+  allocation as `read allocation`;
+- with a placed allocation whose task is starting, or no decision from
+  Nomad yet, Lookup waits, polling every 2 seconds, until one of those or
+  the receiver cancels it. A Lookup cut short removes nothing.
+
 An agent task in a terminal allocation with neither a `Started` event nor a
 start time never started, and the plugin reports the job as never started.
 The message of the task event that kept it from starting goes to the receiver
-as the terminal's reason.
+as the terminal's reason, and Lookup carries its class and reason. A job
+stopped before Nomad placed it never started with class `stopped`.
 
 A plugin profile is ready when some ready, eligible node in its node pool and
 datacenters has the runtime's driver detected and healthy.
 
 A stop of an allocation that has finished, or that Nomad has purged or
 garbage-collected, succeeds at once. The plugin stops any other job by
-deregistering it. The agent task carries
+deregistering it. A stop with Dispatch's handle, which names no allocation,
+deregisters the job by its ID, a job already gone counting as stopped, and
+returns once the job lists no allocation that has not finished; a queued
+job lists none. The agent task carries
 [`kill_signal`](https://developer.hashicorp.com/nomad/docs/job-specification/task#kill_signal)
 `SIGTERM` and a 15-second
 [`kill_timeout`](https://developer.hashicorp.com/nomad/docs/job-specification/task#kill_timeout),
@@ -481,19 +507,20 @@ agent runs can set the variables again.
 
 ## Metrics
 
-The plugin speaks plugin protocol version 10, and a receiver of another
-protocol version refuses it at its start, as
+The plugin speaks plugin protocol version 11, in which Dispatch returns at
+registration and Lookup reports a job Nomad has not placed as pending. A
+receiver of another protocol version refuses it at its start, as
 [Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
-upgrade it with the receiver. For each plugin profile it reports these
-families, which the receiver serves on its `/metrics` with the plugin
-profile's name as `profile`:
+the receiver and its plugins upgrade together: protocol 11 needs wherry
+v0.1.0-rc.29 or later. The receiver times placement itself. For each plugin
+profile the plugin reports these families, which the receiver serves on its
+`/metrics` with the plugin profile's name as `profile`:
 
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
 | `wherry_plugin_platform_errors_total` | counter | `class` | failed Nomad API calls |
 | `wherry_plugin_cleanup_pending` | gauge | none | the plugin profile's dead agent jobs the latest sweep left |
 | `wherry_plugin_sweep_deletions_total` | counter | `kind` | the plugin profile's jobs a sweep purged (`job`) and variables it deleted (`variable`) |
-| `wherry_plugin_placement_seconds` | histogram | none | time from a Dispatch that registers the job to the plugin seeing its agent task started |
 
 An API call's class comes from its status code: 401 and 403 are `denied`,
 409 `conflict`, 408 and 504 `timeout`, and other 5xx codes `unavailable`. A
@@ -510,8 +537,7 @@ failed`, naming the plugin profile as `profile`, the operation and the class; th
 URL, token or response body.
 
 A dead job counts as pending while it is inside the 10-minute
-[sweep](#sweep) grace or its purge fails. Dispatch polls the allocation
-every 2 seconds, which bounds the precision of placement times.
+[sweep](#sweep) grace or its purge fails.
 
 ## Agent network reach
 
@@ -574,7 +600,7 @@ Run these steps from that checkout unless a step names your operator working dir
    ```
 
    `<plugin version>` is the version of the tag you checked out, such as `v0.1.0-rc.18`.
-   `<wherry version>` is the wherry release the image holds, such as `v0.1.0-rc.28`.
+   `<wherry version>` is the wherry release the image holds, such as `v0.1.0-rc.29`.
    `<image tag>` is the tag you give the image in your registry, such as `v0.1.0-rc.18`.
    The [Containerfile](https://github.com/benemon/wherry-plugins/blob/main/examples/nomad/Containerfile) builds the plugin and verifies the downloaded wherry release.
    It runs as UID 1001 with group 0.
@@ -685,7 +711,7 @@ Run these steps from that checkout unless a step names your operator working dir
 ### The exec driver (example only)
 
 1. In an empty directory, download `wherry_<wherry version>_linux_<arch>.tar.gz`, `checksums.txt` and `checksums.txt.sigstore.json` from `https://github.com/benemon/wherry/releases/tag/<wherry version>`.
-   `<wherry version>` carries its `v`, such as `v0.1.0-rc.28`.
+   `<wherry version>` carries its `v`, such as `v0.1.0-rc.29`.
    `<arch>` is `amd64` or `arm64`.
    Verify the signature of `checksums.txt` with the [cosign command](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image).
    Check the archive against the checksums and extract `wherry`:
