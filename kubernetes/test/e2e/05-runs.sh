@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Submits and waits for, as the host runner, a cancelled run, a plain run, a credentialed run with an input file and an
-# SSH private key, a run with an input file and a run that never starts, and checks what each brings back. Ends once
-# the sweep has removed the cancelled run's pod.
+# SSH private key, a run with an input file, a run that never starts and a run with no selector, and checks what each
+# brings back. Ends once the sweep has removed the cancelled run's pod.
 . "$(dirname "$0")/common.sh"
 sha256() { sha256sum <"$1" | cut -d' ' -f1; }
 running() {
@@ -45,6 +45,17 @@ finish "$broken" TASK_STATE_FAILED
 kubectl logs -n "$namespace" deployment/wherry-receiver >"$work/receiver.log"
 grep -F "run $broken: job never started (image): " "$work/receiver.log" >/dev/null ||
 	fail "the receiver logged no image start failure for run $broken"
+
+# A run with no selector. 10-fake.yaml and 20-broken.yaml both serve agent fake on this one receiver, so their
+# signatures have equal spare capacity and the host takes the lowest topic name: either profile may run it, and the
+# winner is fixed by the two signatures' digests, so it is the same profile on every run. It is accepted and ends
+# terminal within the budget, completed on 10-fake.yaml or failed on 20-broken.yaml.
+unselected=$(submit '' --prompt 'e2e: no selector')
+code=0
+host wait "$unselected" --timeout 5m --outputs-dir "$work/outputs/$unselected" >"$work/$unselected.reply" || code=$?
+host logs "$unselected" >"$work/$unselected.log"
+[ "$code" = "${codes[TASK_STATE_COMPLETED]}" ] || [ "$code" = "${codes[TASK_STATE_FAILED]}" ] ||
+	fail "run $unselected: wait exited $code; want ${codes[TASK_STATE_COMPLETED]} or ${codes[TASK_STATE_FAILED]}, a terminal state"
 
 # The dummy credential appears in no log, pod or event.
 kubectl get pods,events -n "$namespace" -o yaml >"$work/objects.yaml"

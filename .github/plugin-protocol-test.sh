@@ -5,9 +5,14 @@
 # ones result=skip with a notice naming both, and every unknown or ambiguous form fails with no result line. Then, in a
 # scratch repository and offline, a plugin with no tag, a replace of pluginsdk, a workspace, a vendored module and a
 # go.sum without the module's sum and a failed download must each fail with no result line. Needs git with the tags, jq,
-# go, and pluginsdk v0.8.0-rc.2 in the module cache, as make check's test leaves it.
+# go, and pluginsdk at the version systemd/go.mod requires in the module cache, as make check's test leaves it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# sdk_version is the pluginsdk version the plugins require, read from systemd/go.mod; sdk_pattern matches it in sed.
+sdk_version=$(go mod edit -json systemd/go.mod | jq -r '[.Require[]? | select(.Path == "github.com/benemon/wherry/pluginsdk") | .Version] |
+	if length == 1 then .[0] else "" end')
+[ -n "$sdk_version" ] || { echo "FAIL: systemd/go.mod does not require github.com/benemon/wherry/pluginsdk exactly once"; exit 1; }
+sdk_pattern=${sdk_version//./\\.}
 script=$PWD/.github/plugin-protocol.sh
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -102,8 +107,9 @@ done
 repo=$tmp/repo
 mkdir -p "$repo/.github" "$repo/p"
 cp "$script" "$repo/.github/"
-printf 'module example.com/p\n\ngo 1.24\n\nrequire github.com/benemon/wherry/pluginsdk v0.8.0-rc.2\n' >"$repo/p/go.mod"
-grep '^github.com/benemon/wherry/pluginsdk v0.8.0-rc.2 ' systemd/go.sum >"$repo/p/go.sum"
+printf 'module example.com/p\n\ngo 1.24\n\nrequire github.com/benemon/wherry/pluginsdk %s\n' "$sdk_version" >"$repo/p/go.mod"
+awk -v v="$sdk_version" '$1 == "github.com/benemon/wherry/pluginsdk" && $2 == v' systemd/go.sum >"$repo/p/go.sum"
+[ -s "$repo/p/go.sum" ] || { echo "FAIL: systemd/go.sum records no sum for pluginsdk $sdk_version"; exit 1; }
 git -C "$repo" init -q
 git -C "$repo" -c user.name=t -c user.email=t@invalid commit -q --allow-empty -m first
 git -C "$repo" add -A
@@ -124,10 +130,12 @@ git -C "$repo" tag p/v0.0.1 HEAD
 git -C "$repo" -c user.name=t -c user.email=t@invalid commit -q --allow-empty -m later
 scratch no-such-plugin : 'no no-such-plugin/v\* tag'
 scratch p 'printf "replace github.com/benemon/wherry/pluginsdk => ../sdk\n" >>p/go.mod' 'replaces github.com/benemon/wherry/pluginsdk'
-scratch p 'git checkout -q -- p/go.mod && printf "replace (\n\tgithub.com/benemon/wherry/pluginsdk v0.8.0-rc.2 => github.com/other/sdk v1.0.0\n)\n" >>p/go.mod' \
+scratch p 'git checkout -q -- p/go.mod && printf "replace (\n\tgithub.com/benemon/wherry/pluginsdk $sdk_version => github.com/other/sdk v1.0.0\n)\n" >>p/go.mod' \
 	'replaces github.com/benemon/wherry/pluginsdk'
 scratch p 'git checkout -q -- p/go.mod && printf "go 1.24\n\nuse ./p\n" >go.work' 'has go.work'
 scratch p 'rm go.work && mkdir -p p/vendor && : >p/vendor/modules.txt' 'has p/vendor/modules.txt'
 scratch p 'rm -r p/vendor && : >p/go.sum' "but the checkout's p/go.sum records ''"
-scratch p 'git checkout -q -- p/go.sum && sed -i.bak "s/v0.8.0-rc.2/v0.0.1-nosuch/" p/go.mod && rm p/go.mod.bak' 'go mod download .*v0.0.1-nosuch failed'
+# The mutation must rewrite the requirement, or the download would succeed from the cache and the case prove nothing.
+scratch p 'git checkout -q -- p/go.sum && sed -i.bak "s/ $sdk_pattern\$/ v0.0.1-nosuch/" p/go.mod && rm p/go.mod.bak &&
+	grep -q "pluginsdk v0.0.1-nosuch\$" p/go.mod' 'go mod download .*v0.0.1-nosuch failed'
 exit "$status"

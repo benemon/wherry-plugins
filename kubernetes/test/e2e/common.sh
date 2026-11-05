@@ -37,11 +37,15 @@ wait_for() {
 host() { wherry host "$@"; }
 ready() { host receivers | grep 'profile=fake plugin=kubernetes agent=fake ready=true' >/dev/null; }
 
-# A pool takes submits once a receiver has taken custody and published the pool key, a few seconds after it starts.
+# submit submits a run with the selector $1, or with none when $1 is empty, and the submit arguments after it, and
+# prints its run ID. A pool takes submits once a receiver has taken custody and published the pool key, a few seconds
+# after it starts.
 submit() {
-	local out run i
+	local out run i selector=()
+	[ -z "$1" ] || selector=(--selector "$1")
+	shift
 	for i in $(seq 60); do
-		out=$(host submit --selector "$@" 2>&1) && break
+		out=$(host submit "${selector[@]}" "$@" 2>&1) && break
 		[[ $out == *"has no custodian yet"* ]] || break
 		sleep 2
 	done

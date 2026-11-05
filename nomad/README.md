@@ -500,7 +500,7 @@ system, global or environment `git` configuration reaches the agent's
 clones. It removes them from the runtime's `env` only. A `raw_exec` task
 also inherits the Nomad client's environment, a container keeps its
 image's `ENV`, and Nomad offers no way to unset either. Add the variables
-of [`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.8.0-rc.2/pluginsdk/pluginsdk.go#L249)
+of [`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.9.0-rc.1/pluginsdk/pluginsdk.go#L264)
 to the client's `env.denylist`, and keep them out of agent images. CA and
 proxy variables pass through as the operator sets them. A command the
 agent runs can set the variables again.
@@ -915,7 +915,11 @@ agent with `raw_exec` enabled, such as `http://127.0.0.1:4646` or a task
 API socket, and skip otherwise. They send `NOMAD_TOKEN`, as the plugin
 does, which an agent with ACLs or the task API needs. They include the
 protocol's conformance suite,
-`github.com/benemon/wherry/pluginsdk/pluginsdktest`.
+`github.com/benemon/wherry/pluginsdk/pluginsdktest`, in process and against
+the built plugin, with a pending profile whose `memory_mb` no dev node has.
+The `nomad` lane of the `e2e` workflow runs those two against its dev agent
+once the agent is up, and fails unless each ran and passed its pending
+profile.
 
 ### End to end on Nomad
 
@@ -966,7 +970,8 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
    checks that the new allocation's receiver starts with the key on the
    volume.
 5. `05-run.sh` submits a run as the host, waits for it with `wherry wait`,
-   and checks its exit code, reply and output.
+   and checks its exit code, reply and output, then does the same for a run
+   with no selector, which the one profile's signature takes.
 6. `06-upgrade.sh` rolls the job to the previous release's image, submits a
    slow run, and rolls the job to the checkout's image once the run's agent
    task runs. The new receiver adopts the agent job and completes the run,

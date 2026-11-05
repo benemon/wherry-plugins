@@ -13,8 +13,9 @@ kind load docker-image --name "$cluster" wherry-receiver:e2e wherry-receiver:pre
 docker exec "$cluster-control-plane" install -d -o 1001 -g 0 -m 0700 /var/lib/wherry-runs
 docker exec "$cluster-control-plane" install -d -o 0 -g 0 -m 0755 /var/lib/wherry-state
 kubectl apply -f "$e2e/runs.yaml" -f "$e2e/state.yaml"
-kubectl create namespace "$namespace"
-kubectl label namespace "$namespace" pod-security.kubernetes.io/enforce=restricted
+# The conformance step may have made the namespace already.
+kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
+kubectl label --overwrite namespace "$namespace" pod-security.kubernetes.io/enforce=restricted
 
 cp -R "$repo/examples/kubernetes" "$deploy"
 cp "$operator/bundles/receivers/kind-1.bundle" "$deploy/receiver.bundle"

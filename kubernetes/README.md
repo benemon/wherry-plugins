@@ -1223,21 +1223,42 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    Strimzi cluster CA and `fsgroup.yaml`, into a namespace enforcing Pod
    Security `restricted`. The kubelet's ownership pass gives the state
    volume the fsGroup on its first mount; the step checks it, restarts the
-   receiver, and checks that it starts with its signing key still 0600.
+   receiver, and checks that it starts with its signing key still 0600. The namespace
+   may exist already, from the conformance step.
 5. `05-runs.sh` submits, as the host, a run it cancels, a plain run, a
    credentialed run with an input file and an SSH private key, a run with
-   an input file and a run whose image is missing, and waits for each with
+   an input file, a run whose image is missing and a run with no selector,
+   and waits for each with
    `wherry wait`, keeping its `wherry logs`. It checks each state by
    `wait`'s exit code, the result and output, the credentials' mode 0440
    and root owner, `ssh-keygen -y` accepting the key as the agent, the
    input's mode 0600 and SHA-256, the start failure's reason in the
    receiver's log, the credentials' absence from the log, pods and events,
-   and the sweep's removal of the cancelled run's Secret and pod.
+   and the sweep's removal of the cancelled run's Secret and pod. Both
+   profiles serve agent `fake` on the one receiver, so the run with no
+   selector goes to the signature with the lowest topic name, the same
+   profile on every run, and ends completed or failed.
 6. `06-upgrade.sh` rolls the receiver to the previous release's image, then
    upgrades it to the checkout's, and completes a run. Both images hold
    `WHERRY_VERSION`, so the step upgrades the plugin.
 7. `07-rollback.sh` rolls the receiver back to the previous release's image
    and completes a run on it.
+
+The workflow runs [`conformance.sh`](test/e2e/conformance.sh) after
+`01-cluster.sh`; run it there by hand. It runs the conformance suite, in
+process, against the built plugin and as `TestRoleSuffices`, with a pending
+profile whose CPU request no node can meet, in a pod of
+[`conformance.yaml`](test/e2e/conformance.yaml) in the cluster, since the
+runs claim is a hostPath inside the kind node the runner cannot see. The
+pod runs Go, from the image of the Go release `go.mod` names, as UID 1001
+under Pod Security `restricted`, with the namespace's `wherry-receiver`
+service account, its Role, and the runs claim mounted at the `runs_dir` the
+suite names; its build cache, module cache and temporary files are in an
+`emptyDir`. The step provisions the runs claim's volume, the namespace and,
+from the example `receiver.yaml` without its Deployment, Service and state
+claim, the service account, Role, binding and runs claim, and copies the
+module's tracked files into the pod, so it needs no receiver. It fails
+unless each suite ran and passed its pending profile.
 
 Each roll follows [Upgrade](#upgrade)'s order: it applies the receiver's
 configuration with the SHA-256 of the plugin binary in the image it rolls
@@ -1262,8 +1283,9 @@ failure fails the step: no tag, a fetch or checksum error, a `replace`,
 `go.work` or vendored copy of pluginsdk, or a form the script does not
 know. The sides are compatible when they serve a protocol in common, and
 each roll expects the newest protocol its side serves in the identity line.
-When they serve none, a 0.x clean break, `06-upgrade.sh` and
-`07-rollback.sh` skip their rolls with a notice naming both, since the
+When they serve none, a 0.x clean break such as protocol 10 to 11,
+`06-upgrade.sh` and `07-rollback.sh` skip their rolls with a notice naming
+both, since the
 release notes then say to upgrade the receiver and its plugins together, or
 to reset. Steps 1 to 5 still run.
 

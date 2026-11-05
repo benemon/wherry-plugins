@@ -187,11 +187,14 @@ metrics_address() {
 		jq -r '.AllocatedResources.Shared.Ports[] | select(.Label == "metrics") | "\(.HostIP):\(.Value)"'
 }
 
-# A pool takes submits once a receiver has taken custody and published the pool key, a few seconds after it starts.
+# submit submits a run with the prompt $1 and the selector $2, e2e=fake when $2 is not given and none when it is empty,
+# and prints its run ID. A pool takes submits once a receiver has taken custody and published the pool key, a few
+# seconds after it starts.
 submit() {
-	local out run i
+	local out run i selector=(--selector "${2-e2e=fake}")
+	[ -n "${2-e2e=fake}" ] || selector=()
 	for i in $(seq 60); do
-		out=$(host submit --selector e2e=fake --output echo.txt:required --prompt "$1" 2>&1) && break
+		out=$(host submit "${selector[@]}" --output echo.txt:required --prompt "$1" 2>&1) && break
 		[[ $out == *"has no custodian yet"* ]] || break
 		sleep 2
 	done
