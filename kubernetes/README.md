@@ -115,7 +115,7 @@ outside it. The plugin's calls, all in that namespace, need:
 
 | Resource | Verbs | Use |
 | --- | --- | --- |
-| `pods` | create, get, list, watch, delete | create a run's pod, read it for lookups and polls, list it for the sweep, and delete it for a stop, a dispatch or lookup cut short, and a purge |
+| `pods` | create, get, list, watch, delete | create a run's pod, read it for lookups and polls, list it for the sweep, and delete it for a stop and a purge |
 | `pods/log` | get | stream the agent's standard output |
 | `secrets` | create, get, update, delete, list | write a run's material, delete it when the run ends, and list its metadata for the sweep |
 | `namespaces` | get | readiness |
@@ -220,9 +220,11 @@ withdraws its offer and takes no new work. Readiness checks nothing else:
 
 - Nodes. Nodes are cluster-scoped, and the plugin does not read the
   cluster's topology. A pod no node can take, such as one whose
-  `node_selector` no node matches, waits until the run's deadline, holding
-  one of the receiver's `capacity` slots, and the run then fails
-  `timeout`.
+  `node_selector` no node matches, is pending: the run reports `placing`
+  with the scheduler's message, holds one of the receiver's `capacity`
+  slots and stops the receiver claiming, until the pod is placed or the
+  run's start bound, `task_started_by`, passes. The receiver then stops
+  the pod and the run fails `not started by task_started_by`.
 - Quota. A ResourceQuota in the namespace that is full refuses pod
   creation with 403. Each refusal counts a `dispatch` start failure, and
   the task spends its delivery budget.
@@ -365,6 +367,14 @@ plugin names its jobs. Both carry the labels `wherry.io/pool`,
 with the attempt that created it. The receiver reads the labels to decide
 whether to adopt the pod.
 
+Dispatch returns once the API server holds the pod, scheduled or not, with
+the pod's handle; a dispatch that finds the pod already there returns its
+handle at once. Lookup then observes the pod once: running, ended or never
+started once the agent has started or the pod has settled; pending at once
+while the scheduler cannot place it; otherwise it waits, polling every 2
+seconds, until one of those or the receiver cancels it. A Lookup cut short
+deletes nothing.
+
 The pod is a bare pod with `restartPolicy: Never`, so a run executes exactly
 once and nothing replaces its pod. Its one container, `agent`, runs the
 plugin profile's `runtime`, and the pod ends when the agent does. It mounts
@@ -398,7 +408,11 @@ message as the reason:
 | `start` | the agent container ended without starting, such as a CRI-O `StartError` |
 | `pod` | the pod failed before the agent started (eviction, a lost node), or is being deleted |
 
-A first `ErrImagePull` and an unscheduled pod are waited on.
+A first `ErrImagePull`, and a scheduled pod whose agent is starting, are
+waited on. A pod whose `PodScheduled` condition is `False` with reason
+`Unschedulable` or `SchedulingGated` is pending, with the condition's
+message, else its reason, as the run's `placing` reason; a class above wins
+over pending. A stop deletes a pending pod.
 
 ### Credential targets
 
@@ -616,7 +630,7 @@ certificate` and each S3 output with `not uploaded: request failed`.
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
 over the runtime's `env` and removes those of
-[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.8.0-rc.2/pluginsdk/pluginsdk.go#L249)
+[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.9.0-rc.1/pluginsdk/pluginsdk.go#L264)
 from it, so no system, global or environment `git` configuration reaches
 the agent's clones. It removes them from the runtime's `env` only; keep
 them out of agent images' `ENV`. CA and proxy variables pass through as the
@@ -624,19 +638,20 @@ operator sets them. A command the agent runs can set the variables again.
 
 ## Metrics
 
-The plugin speaks plugin protocol version 10, and a receiver of another
-protocol version refuses it at its start, as
+The plugin speaks plugin protocol version 11, in which Dispatch returns at
+creation and Lookup reports a pod the scheduler cannot place as pending. A
+receiver of another protocol version refuses it at its start, as
 [Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
-upgrade it with the receiver. For each
-plugin profile it reports these families, which the receiver serves on its
-`/metrics` with the plugin profile's name as `profile`:
+the receiver and its plugins upgrade together: protocol 11 needs wherry
+v0.1.0-rc.29 or later. The receiver times placement itself. For each
+plugin profile the plugin reports these families, which the receiver serves
+on its `/metrics` with the plugin profile's name as `profile`:
 
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
 | `wherry_plugin_platform_errors_total` | counter | `class` | failed API calls |
 | `wherry_plugin_cleanup_pending` | gauge | none | the plugin profile's ended pods the latest sweep left |
 | `wherry_plugin_sweep_deletions_total` | counter | `kind` | the plugin profile's pods a sweep purged (`job`), Secrets it deleted (`variable`) and run directories it removed (`directory`) |
-| `wherry_plugin_placement_seconds` | histogram | none | time from a Dispatch that creates the pod to the plugin seeing its agent container running |
 | `wherry_plugin_storage_free_bytes` | gauge | none | the free bytes of the runs claim at `runs_dir` |
 
 An API call's class comes from its status: 401 and 403 are `denied`, 409
@@ -696,7 +711,7 @@ Run the repository commands from that checkout and the operator commands from yo
    ```
 
    `<plugin version>` is the plugin's tag version, such as `v0.1.0-rc.10`.
-   `<wherry version>` is the wherry release the image holds, such as `v0.1.0-rc.28`.
+   `<wherry version>` is the wherry release the image holds, such as `v0.1.0-rc.29`.
    Set `CONTAINER=docker` to run Docker.
    The [Containerfile](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/Containerfile) builds the plugin and verifies the wherry release.
    The [image reference](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image) describes the image's contents and its verification.
@@ -1044,13 +1059,12 @@ and nothing renews the receiver's copy:
 
 ## Kubernetes and Nomad together
 
-Put the in-cluster receiver in a pool of its own, and Nomad-hosted receivers in
-another, and entitle the tenant to both. A submit places the task in a pool
-whose live plugin profiles satisfy its selector, so a task meant for one platform is
-never delivered to the other's receivers. In one pool, a receiver with no
-matching plugin profile takes the task and hands it back, spending its delivery
-budget, and a task both platforms accept can be redelivered to a receiver that
-cannot see its running job and start a second one.
+Receivers on Kubernetes and Nomad may share a pool; their `platform` labels give
+them different signatures, so a task reaches only the platform its selector
+names, and a task with no selector may go to either.
+
+Two receivers meant to share a queue carry identical labels for the profile; one
+differing label is a different signature.
 
 A run is adopted only by a receiver with the same plugin profile. For a Kubernetes
 run that is the in-cluster receiver itself, restarted: the new pod mounts the

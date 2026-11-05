@@ -474,16 +474,16 @@ func (profile *Kubernetes) buildPod(run pluginsdk.Run, name string) *corev1.Pod 
 	}
 }
 
-// Dispatch starts a run idempotently and returns once its agent has started or its pod has ended.
+// Dispatch creates a run's pod idempotently and returns once the API server holds it, scheduled or not; a dispatch
+// that finds the pod already there returns its handle at once.
 func (profile *Kubernetes) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
-	began := time.Now()
 	name := profile.jobName(run.ID)
 	data, err := secretData(run)
 	if err != nil {
 		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, err
 	}
-	created := false
-	switch existing, err := profile.pods().Get(ctx, name, metav1.GetOptions{}); {
+	existing, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
+	switch {
 	case apierrors.IsNotFound(err):
 		if err := profile.writeInputs(ctx, name, run); err != nil {
 			return profile.notStarted(ctx, name, err)
@@ -491,27 +491,31 @@ func (profile *Kubernetes) Dispatch(ctx context.Context, run pluginsdk.Run) (plu
 		if err := profile.upsertSecret(ctx, name, profile.labels(run), data); err != nil {
 			return profile.notStarted(ctx, name, err)
 		}
-		_, err := profile.pods().Create(ctx, profile.buildPod(run, name), metav1.CreateOptions{})
+		created, err := profile.pods().Create(ctx, profile.buildPod(run, name), metav1.CreateOptions{})
 		switch {
 		case apierrors.IsAlreadyExists(err):
+			// Another dispatch created it between the read and the create.
+			if existing, err = profile.pods().Get(ctx, name, metav1.GetOptions{}); err != nil {
+				return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, profile.failed("read pod "+name, err)
+			}
 		case err != nil:
 			return profile.notStarted(ctx, name, profile.failed("create pod "+name, err))
 		default:
-			created = true
+			return pluginsdk.OutcomeCreated, podHandle(created), nil
 		}
 	case err != nil:
 		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, profile.failed("read pod "+name, err)
-	case !profile.agentPod(existing):
+	}
+	if !profile.agentPod(existing) {
 		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, errors.New("existing pod is not an agent pod")
 	}
-	handle, state, err := profile.wait(ctx, name)
-	if err != nil {
-		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, err
-	}
-	if created && state != pluginsdk.JobNeverStarted {
-		profile.metrics.Placed(time.Since(began).Seconds())
-	}
-	return pluginsdk.OutcomeCreated, handle, nil
+	return pluginsdk.OutcomeCreated, podHandle(existing), nil
+}
+
+// podHandle encodes the version 1 handle of pod.
+func podHandle(pod *corev1.Pod) pluginsdk.Handle {
+	data, _ := json.Marshal(handle{V: 1, Pod: pod.Name, UID: string(pod.UID)}) // strings always encode
+	return pluginsdk.Handle{Data: data, Name: pod.Name}
 }
 
 // upsertSecret writes the run's Secret over any an earlier attempt left.
@@ -728,35 +732,54 @@ func (profile *Kubernetes) current(ctx context.Context, h handle) (*corev1.Pod, 
 	return pod, nil
 }
 
-// wait returns once the pod is settled; a wait cut short deletes the pod.
-func (profile *Kubernetes) wait(ctx context.Context, name string) (pluginsdk.Handle, pluginsdk.JobState, error) {
+// wait observes the run's pod until it is settled or not scheduled, and returns the job that observation decides with
+// its handle; the metadata is the caller's. A wait cut short returns ctx's error and removes nothing.
+func (profile *Kubernetes) wait(ctx context.Context, name string) (pluginsdk.Job, error) {
 	for {
 		pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			if ctx.Err() != nil {
-				return pluginsdk.Handle{}, 0, profile.deleteTimedOut(ctx, name)
-			}
-			return pluginsdk.Handle{}, 0, profile.failed("read pod "+name, err)
+		switch {
+		case apierrors.IsNotFound(err):
+			return pluginsdk.Job{}, nil
+		case ctx.Err() != nil:
+			return pluginsdk.Job{}, ctx.Err()
+		case err != nil:
+			return pluginsdk.Job{}, profile.failed("read pod "+name, err)
+		case !profile.agentPod(pod):
+			return pluginsdk.Job{}, errors.New("existing pod is not an agent pod")
 		}
-		if state, _, settled := judge(pod); settled {
-			data, _ := json.Marshal(handle{V: 1, Pod: name, UID: string(pod.UID)}) // strings always encode
-			return pluginsdk.Handle{Data: data, Name: name}, state, nil
+		if job, decided := observe(pod); decided {
+			job.Handle = podHandle(pod)
+			// A pod created without the annotation reads as attempt 0.
+			job.Attempt, _ = strconv.ParseInt(pod.Annotations[annotationAttempt], 10, 64)
+			job.Profile, job.Agent = pod.Labels[labelProfile], pod.Labels[labelAgent]
+			return job, nil
 		}
 		select {
 		case <-ctx.Done():
-			return pluginsdk.Handle{}, 0, profile.deleteTimedOut(ctx, name)
+			return pluginsdk.Job{}, ctx.Err()
 		case <-time.After(waitPoll):
 		}
 	}
 }
 
-func (profile *Kubernetes) deleteTimedOut(ctx context.Context, name string) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
-	defer cancel()
-	if err := profile.deletePod(cleanupCtx, name); err != nil {
-		return errors.Join(ctx.Err(), fmt.Errorf("delete timed-out pod: %w", err))
+// observe decides a pod's job in mch5's order: judge's settled state first, with a never-started pod's class and
+// reason; then a pod the scheduler has not placed, pending with the condition's message, else its reason. decided is
+// false for any other pod, which Lookup waits on.
+func observe(pod *corev1.Pod) (pluginsdk.Job, bool) {
+	if state, terminal, settled := judge(pod); settled {
+		job := pluginsdk.Job{State: state}
+		if state == pluginsdk.JobNeverStarted {
+			job.Class, job.Reason = terminal.Class, terminal.Reason
+		}
+		return job, true
 	}
-	return ctx.Err()
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodScheduled && condition.Status == corev1.ConditionFalse &&
+			(condition.Reason == corev1.PodReasonUnschedulable || condition.Reason == corev1.PodReasonSchedulingGated) {
+			return pluginsdk.Job{State: pluginsdk.JobPending, Reason: cmp.Or(condition.Message, condition.Reason)}, true
+		}
+	}
+	return pluginsdk.Job{}, false
 }
 
 func status(statuses []corev1.ContainerStatus, name string) *corev1.ContainerStatus {
@@ -843,26 +866,11 @@ func neverStarted(pod *corev1.Pod, agent *corev1.ContainerStateTerminated) (stri
 	return "", ""
 }
 
-// Lookup finds a run's existing pod and waits for it as Dispatch does.
+// Lookup finds a run's existing pod in one observation: pending at once while the scheduler cannot place it, and
+// running, ended or never started once judge settles it. A pod that is placed and starting, or not yet judged by the
+// scheduler, waits for one of those; a Lookup cut short returns ctx's error and removes nothing.
 func (profile *Kubernetes) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
-	name := profile.jobName(runID)
-	pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return pluginsdk.Job{}, nil
-	}
-	if err != nil {
-		return pluginsdk.Job{}, profile.failed("read pod "+name, err)
-	}
-	if !profile.agentPod(pod) {
-		return pluginsdk.Job{}, errors.New("existing pod is not an agent pod")
-	}
-	handle, state, err := profile.wait(ctx, name)
-	if err != nil {
-		return pluginsdk.Job{}, err
-	}
-	// A pod created without the annotation reads as attempt 0.
-	attempt, _ := strconv.ParseInt(pod.Annotations[annotationAttempt], 10, 64)
-	return pluginsdk.Job{State: state, Handle: handle, Attempt: attempt, Profile: pod.Labels[labelProfile], Agent: pod.Labels[labelAgent]}, nil
+	return profile.wait(ctx, profile.jobName(runID))
 }
 
 // agentPod reports whether pod is this pool's agent pod.
@@ -992,10 +1000,12 @@ func (profile *Kubernetes) stream(ctx context.Context, h handle, reader *LineRea
 	}
 }
 
-// running reports whether the agent may still run in a live pod; a pod not yet settled may hold a running agent.
+// running reports whether the agent may still run, or start, in a live pod: a pod not yet settled may hold a running
+// agent, and one the scheduler has not placed may yet be placed.
 func running(pod *corev1.Pod) bool {
-	state, _, settled := judge(pod)
-	return (!settled || state == pluginsdk.JobRunning) && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed
+	job, decided := observe(pod)
+	return (!decided || job.State == pluginsdk.JobRunning || job.State == pluginsdk.JobPending) &&
+		pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed
 }
 
 // Stop deletes the pod with the grace, so its kubelet sends the agent SIGTERM and then SIGKILL, and waits for it to go.
