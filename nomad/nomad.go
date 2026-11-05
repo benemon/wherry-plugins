@@ -361,11 +361,15 @@ func (profile *Nomad) Lookup(ctx context.Context, runID string) (pluginsdk.Job, 
 var lookupWait = 2 * time.Second
 
 // observe decides a registered agent job's state from its allocations and, with none, its evaluations, in the order
-// mch5's decision table gives; decided is false when Lookup waits. Allocations decide before any evaluation is read.
+// mch5's decision table gives; decided is false when Lookup waits. Allocations decide before any evaluation is read. A
+// read cut short by ctx returns ctx's error, as Lookup's own reads do, and counts no platform error.
 func (profile *Nomad) observe(ctx context.Context, job *api.Job) (pluginsdk.Job, bool, error) {
 	jobID, driver := *job.ID, job.TaskGroups[0].Tasks[0].Driver
 	allocs, _, err := profile.client.Jobs().Allocations(jobID, false, (&api.QueryOptions{}).WithContext(ctx))
-	if err != nil {
+	switch {
+	case ctx.Err() != nil:
+		return pluginsdk.Job{}, false, ctx.Err()
+	case err != nil:
 		return pluginsdk.Job{}, false, profile.failed("list allocations", err)
 	}
 	if alloc := current(allocs); alloc != nil {
@@ -386,7 +390,10 @@ func (profile *Nomad) observe(ctx context.Context, job *api.Job) (pluginsdk.Job,
 		return pluginsdk.Job{State: pluginsdk.JobNeverStarted, Handle: unplaced, Class: classStopped}, true, nil
 	}
 	evals, _, err := profile.client.Jobs().Evaluations(jobID, (&api.QueryOptions{}).WithContext(ctx))
-	if err != nil {
+	switch {
+	case ctx.Err() != nil:
+		return pluginsdk.Job{}, false, ctx.Err()
+	case err != nil:
 		return pluginsdk.Job{}, false, profile.failed("list evaluations", err)
 	}
 	eval := currentEval(evals, job.JobModifyIndex)
@@ -402,6 +409,8 @@ func (profile *Nomad) observe(ctx context.Context, job *api.Job) (pluginsdk.Job,
 	switch {
 	case notFound(err):
 		return pluginsdk.Job{}, false, nil
+	case ctx.Err() != nil:
+		return pluginsdk.Job{}, false, ctx.Err()
 	case err != nil:
 		return pluginsdk.Job{}, false, profile.failed("read evaluation", err)
 	case blocked.Status == api.EvalStatusBlocked:

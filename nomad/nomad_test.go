@@ -880,6 +880,30 @@ func TestDeregisterTimedOutPurgesJob(t *testing.T) {
 	}
 }
 
+// A read in observe cut by the run's deadline returns the deadline and counts no platform error: the job and its empty
+// allocations are read, and the deadline expires while the evaluations are.
+func TestDeadlineCutEvaluationsReadCountsNoError(t *testing.T) {
+	profile, requests := nomadServer(t, map[string]http.HandlerFunc{
+		"GET /v1/job/" + pendingJobID:                  serve(pendingJob(t, "pending", false)),
+		"GET /v1/job/" + pendingJobID + "/allocations": serve([]byte(`[]`)),
+		"GET /v1/job/" + pendingJobID + "/evaluations": func(_ http.ResponseWriter, request *http.Request) {
+			<-request.Context().Done()
+		},
+	})
+	before := samples(t, profile)
+	if _, got := lookupOnce(t, profile); got != (lookupOutcome{wait: true}) {
+		t.Fatalf("lookup = %+v; want the context's deadline (requests %v)", got, requests())
+	}
+	if !slices.Contains(requests(), "GET /v1/job/"+pendingJobID+"/evaluations") {
+		t.Fatalf("requests %v; want the evaluations read", requests())
+	}
+	for name, sample := range samples(t, profile) {
+		if strings.HasPrefix(name, "wherry_plugin_platform_errors_total/") && sample.Value != before[name].Value {
+			t.Fatalf("%s went from %v to %v; want no platform error counted", name, before[name].Value, sample.Value)
+		}
+	}
+}
+
 func follow(t *testing.T, ctx context.Context, profile *Nomad, handle pluginsdk.Handle, offset int64, count int) []pluginsdk.Line {
 	t.Helper()
 	followCtx, cancel := context.WithCancel(ctx)
