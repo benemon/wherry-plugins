@@ -732,36 +732,6 @@ func (profile *Kubernetes) current(ctx context.Context, h handle) (*corev1.Pod, 
 	return pod, nil
 }
 
-// wait observes the run's pod until it is settled or not scheduled, and returns the job that observation decides with
-// its handle; the metadata is the caller's. A wait cut short returns ctx's error and removes nothing.
-func (profile *Kubernetes) wait(ctx context.Context, name string) (pluginsdk.Job, error) {
-	for {
-		pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
-		switch {
-		case apierrors.IsNotFound(err):
-			return pluginsdk.Job{}, nil
-		case ctx.Err() != nil:
-			return pluginsdk.Job{}, ctx.Err()
-		case err != nil:
-			return pluginsdk.Job{}, profile.failed("read pod "+name, err)
-		case !profile.agentPod(pod):
-			return pluginsdk.Job{}, errors.New("existing pod is not an agent pod")
-		}
-		if job, decided := observe(pod); decided {
-			job.Handle = podHandle(pod)
-			// A pod created without the annotation reads as attempt 0.
-			job.Attempt, _ = strconv.ParseInt(pod.Annotations[annotationAttempt], 10, 64)
-			job.Profile, job.Agent = pod.Labels[labelProfile], pod.Labels[labelAgent]
-			return job, nil
-		}
-		select {
-		case <-ctx.Done():
-			return pluginsdk.Job{}, ctx.Err()
-		case <-time.After(waitPoll):
-		}
-	}
-}
-
 // observe decides a pod's job in mch5's order: judge's settled state first, with a never-started pod's class and
 // reason; then a pod the scheduler has not placed, pending with the condition's message, else its reason. decided is
 // false for any other pod, which Lookup waits on.
@@ -870,7 +840,32 @@ func neverStarted(pod *corev1.Pod, agent *corev1.ContainerStateTerminated) (stri
 // running, ended or never started once judge settles it. A pod that is placed and starting, or not yet judged by the
 // scheduler, waits for one of those; a Lookup cut short returns ctx's error and removes nothing.
 func (profile *Kubernetes) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
-	return profile.wait(ctx, profile.jobName(runID))
+	name := profile.jobName(runID)
+	for {
+		pod, err := profile.pods().Get(ctx, name, metav1.GetOptions{})
+		switch {
+		case apierrors.IsNotFound(err):
+			return pluginsdk.Job{}, nil
+		case ctx.Err() != nil:
+			return pluginsdk.Job{}, ctx.Err()
+		case err != nil:
+			return pluginsdk.Job{}, profile.failed("read pod "+name, err)
+		case !profile.agentPod(pod):
+			return pluginsdk.Job{}, errors.New("existing pod is not an agent pod")
+		}
+		if job, decided := observe(pod); decided {
+			job.Handle = podHandle(pod)
+			// A pod created without the annotation reads as attempt 0.
+			job.Attempt, _ = strconv.ParseInt(pod.Annotations[annotationAttempt], 10, 64)
+			job.Profile, job.Agent = pod.Labels[labelProfile], pod.Labels[labelAgent]
+			return job, nil
+		}
+		select {
+		case <-ctx.Done():
+			return pluginsdk.Job{}, ctx.Err()
+		case <-time.After(waitPoll):
+		}
+	}
 }
 
 // agentPod reports whether pod is this pool's agent pod.
