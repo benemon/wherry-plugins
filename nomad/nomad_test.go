@@ -884,27 +884,31 @@ func TestCancelledLookupOnlyReadsTheJob(t *testing.T) {
 	}
 }
 
-// A read in observe cut by the run's deadline returns the deadline and counts no platform error: the job and its empty
-// allocations are read, and the deadline expires while the evaluations are.
-func TestDeadlineCutEvaluationsReadCountsNoError(t *testing.T) {
-	profile, requests := nomadServer(t, map[string]http.HandlerFunc{
-		"GET /v1/job/" + pendingJobID:                  serve(pendingJob(t, "pending", false)),
-		"GET /v1/job/" + pendingJobID + "/allocations": serve([]byte(`[]`)),
-		"GET /v1/job/" + pendingJobID + "/evaluations": func(_ http.ResponseWriter, request *http.Request) {
-			<-request.Context().Done()
-		},
-	})
-	before := samples(t, profile)
-	if _, got := lookupOnce(t, profile); got != (lookupOutcome{wait: true}) {
-		t.Fatalf("lookup = %+v; want the context's deadline (requests %v)", got, requests())
-	}
-	if !slices.Contains(requests(), "GET /v1/job/"+pendingJobID+"/evaluations") {
-		t.Fatalf("requests %v; want the evaluations read", requests())
-	}
-	for name, sample := range samples(t, profile) {
-		if strings.HasPrefix(name, "wherry_plugin_platform_errors_total/") && sample.Value != before[name].Value {
-			t.Fatalf("%s went from %v to %v; want no platform error counted", name, before[name].Value, sample.Value)
-		}
+// A read in observe cut by the run's deadline returns the deadline and counts no platform error, whether the deadline
+// expires while the allocations or the evaluations are read.
+func TestDeadlineCutReadCountsNoError(t *testing.T) {
+	block := func(_ http.ResponseWriter, request *http.Request) { <-request.Context().Done() }
+	for _, cut := range []string{"allocations", "evaluations"} {
+		t.Run(cut, func(t *testing.T) {
+			handlers := map[string]http.HandlerFunc{
+				"GET /v1/job/" + pendingJobID:                  serve(pendingJob(t, "pending", false)),
+				"GET /v1/job/" + pendingJobID + "/allocations": serve([]byte(`[]`)),
+			}
+			handlers["GET /v1/job/"+pendingJobID+"/"+cut] = block
+			profile, requests := nomadServer(t, handlers)
+			before := samples(t, profile)
+			if _, got := lookupOnce(t, profile); got != (lookupOutcome{wait: true}) {
+				t.Fatalf("lookup = %+v; want the context's deadline (requests %v)", got, requests())
+			}
+			if !slices.Contains(requests(), "GET /v1/job/"+pendingJobID+"/"+cut) {
+				t.Fatalf("requests %v; want the %s read", requests(), cut)
+			}
+			for name, sample := range samples(t, profile) {
+				if strings.HasPrefix(name, "wherry_plugin_platform_errors_total/") && sample.Value != before[name].Value {
+					t.Fatalf("%s went from %v to %v; want no platform error counted", name, before[name].Value, sample.Value)
+				}
+			}
+		})
 	}
 }
 
