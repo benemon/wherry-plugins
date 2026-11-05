@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -149,7 +150,7 @@ func TestLookupDecisionOrder(t *testing.T) {
 	// None queued and not blocked waits whatever the current evaluation's status and metric.
 	for _, status := range []string{api.EvalStatusComplete, api.EvalStatusFailed, api.EvalStatusCancelled, "unknown-status", ""} {
 		for name, metric := range map[string]*api.AllocationMetric{"populated": metricA, "all-zero": {}} {
-			tests = append(tests, test{"none queued, " + name + " metric, status " + cmpOr(status, "none"), nil, none, evals(eval("e1", 20, 21, status, 0, metric)), nil, wait})
+			tests = append(tests, test{"none queued, " + name + " metric, status " + cmp.Or(status, "none"), nil, none, evals(eval("e1", 20, 21, status, 0, metric)), nil, wait})
 		}
 	}
 	for _, test := range tests {
@@ -188,13 +189,6 @@ func TestLookupDecisionOrder(t *testing.T) {
 			}
 		})
 	}
-}
-
-func cmpOr(value, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
 }
 
 // naming makes e name the blocked evaluation blocked-1.
