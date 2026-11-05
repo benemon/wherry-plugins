@@ -629,7 +629,7 @@ func (profile *Systemd) Dispatch(ctx context.Context, run pluginsdk.Run) (plugin
 		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, errNotAgent
 	}
 	if !u.loaded && (m == nil || m.Phase == phasePrepared && m.NeverStarted == nil) {
-		if _, outcome, err := profile.start(ctx, run, job); err != nil {
+		if outcome, err := profile.start(ctx, run, job); err != nil {
 			return outcome, pluginsdk.Handle{}, err
 		}
 		if m, err = readMarker(job); err != nil {
@@ -653,22 +653,23 @@ func (profile *Systemd) foreign(m *marker, u unit) bool {
 	return u.loaded && (m == nil || !u.transient) || m != nil && m.Pool != profile.pool
 }
 
-// start writes the run's material over any leftover and starts its unit. It reports whether the start job was done,
-// or the outcome and error of a run that never reached its start.
-func (profile *Systemd) start(ctx context.Context, run pluginsdk.Run, job string) (bool, pluginsdk.Outcome, error) {
+// start writes the run's material over any leftover and starts its unit, waiting for the start job while ctx and the
+// bus last. It returns OutcomeCreated once the unit or a never-started marker exists, or the outcome and error of a
+// run that never reached its start.
+func (profile *Systemd) start(ctx context.Context, run pluginsdk.Run, job string) (pluginsdk.Outcome, error) {
 	name := unitName(job)
 	if err := profile.removeRun(job); err != nil {
-		return false, pluginsdk.OutcomeNothingCreated, err
+		return pluginsdk.OutcomeNothingCreated, err
 	}
 	instance := make([]byte, 16)
 	_, _ = rand.Read(instance)
 	m := &marker{V: 1, Pool: profile.pool, Profile: run.Profile, Agent: run.Agent, Run: run.ID, Attempt: run.Attempt,
 		Instance: hex.EncodeToString(instance), Phase: phasePrepared}
-	abandon := func(cause error) (bool, pluginsdk.Outcome, error) {
+	abandon := func(cause error) (pluginsdk.Outcome, error) {
 		if err := profile.removeRun(job); err != nil {
-			return false, pluginsdk.OutcomeNothingCreated, errors.Join(cause, err)
+			return pluginsdk.OutcomeNothingCreated, errors.Join(cause, err)
 		}
-		return false, pluginsdk.OutcomeNothingCreated, cause
+		return pluginsdk.OutcomeNothingCreated, cause
 	}
 	if err := profile.prepare(job, run, m); err != nil {
 		return abandon(err)
@@ -682,7 +683,7 @@ func (profile *Systemd) start(ctx context.Context, run pluginsdk.Run, job string
 		if err := profile.writeMarker(job, m); err != nil {
 			return abandon(err)
 		}
-		return false, pluginsdk.OutcomeCreated, nil
+		return pluginsdk.OutcomeCreated, nil
 	}
 	credentials, err := writeCredentials(name, run)
 	if err != nil {
@@ -705,7 +706,7 @@ func (profile *Systemd) start(ctx context.Context, run pluginsdk.Run, job string
 	_, err = bus.StartTransientUnitContext(ctx, name, "fail", profile.properties(run, job, credentials), results)
 	switch {
 	case busName(err) == busUnitExists:
-		return false, pluginsdk.OutcomeCreated, nil
+		return pluginsdk.OutcomeCreated, nil
 	case err != nil:
 		return profile.notStarted(ctx, job, profile.failed("start unit "+name, err))
 	}
@@ -720,17 +721,17 @@ func (profile *Systemd) start(ctx context.Context, run pluginsdk.Run, job string
 	}
 	switch result {
 	case "":
-		return false, pluginsdk.OutcomeCreated, nil
+		return pluginsdk.OutcomeCreated, nil
 	case "done":
 		m.Phase = phaseStarted
 		if err := profile.writeMarker(job, m); err != nil {
 			profile.handled("write "+markerPath(job), err)
 		}
-		return true, pluginsdk.OutcomeCreated, nil
+		return pluginsdk.OutcomeCreated, nil
 	case "failed":
 		u, err := profile.unit(ctx, name)
 		if err != nil {
-			return false, pluginsdk.OutcomeUnknown, err
+			return pluginsdk.OutcomeUnknown, err
 		}
 		m.NeverStarted = &neverStarted{"start", result}
 		if class, reason, own := exitClass(u.status); own {
@@ -740,21 +741,21 @@ func (profile *Systemd) start(ctx context.Context, run pluginsdk.Run, job string
 		m.NeverStarted = &neverStarted{"start", result}
 	}
 	if err := profile.writeMarker(job, m); err != nil {
-		return false, pluginsdk.OutcomeUnknown, err
+		return pluginsdk.OutcomeUnknown, err
 	}
-	return false, pluginsdk.OutcomeCreated, nil
+	return pluginsdk.OutcomeCreated, nil
 }
 
 // notStarted removes the run's material and returns OutcomeNothingCreated when its unit is not loaded, else
 // OutcomeUnknown, with cause.
-func (profile *Systemd) notStarted(ctx context.Context, job string, cause error) (bool, pluginsdk.Outcome, error) {
+func (profile *Systemd) notStarted(ctx context.Context, job string, cause error) (pluginsdk.Outcome, error) {
 	if u, err := profile.unit(ctx, unitName(job)); err != nil || u.loaded {
-		return false, pluginsdk.OutcomeUnknown, cause
+		return pluginsdk.OutcomeUnknown, cause
 	}
 	if err := profile.removeRun(job); err != nil {
-		return false, pluginsdk.OutcomeNothingCreated, errors.Join(cause, err)
+		return pluginsdk.OutcomeNothingCreated, errors.Join(cause, err)
 	}
-	return false, pluginsdk.OutcomeNothingCreated, cause
+	return pluginsdk.OutcomeNothingCreated, cause
 }
 
 // exitClass reports the never-started class and reason of one of systemd's own exit statuses.
