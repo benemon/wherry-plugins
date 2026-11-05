@@ -51,11 +51,15 @@ plugin_sha256() {
 }
 
 # pin applies the receiver configuration directory test/e2e/receiver, with the plugin binary of the receiver image $1
-# as its pin, to the receiver nomad-1, creating it on the first call. A receiver refuses a plugin whose SHA-256 is not
-# its record's pin, and a running receiver exits on a new record.
+# as its pin and examples/nomad/config.yaml with its ca_file uncommented as its local configuration config.yaml, to the
+# receiver nomad-1, creating it on the first call. receiver apply reads that config.yaml, and 04-deploy.sh puts it in
+# the receiver's Nomad variable. A receiver refuses a plugin whose SHA-256 is not its record's pin, and a running
+# receiver exits on a new record.
 pin() {
 	rm -rf "$work/receiver"
 	cp -R "$e2e/receiver" "$work/receiver"
+	sed 's|^# ca_file: |ca_file: |' "$repo/examples/nomad/config.yaml" >"$work/receiver/config.yaml"
+	grep -x 'ca_file: /secrets/kafka-ca.pem' "$work/receiver/config.yaml" >/dev/null || fail "config.yaml names no ca_file"
 	printf 'plugin_sha256:\n  nomad: %s\n' "$(plugin_sha256 "$1")" >>"$work/receiver/receiver.yaml"
 	wherry operator receiver apply nomad-1 --dir "$operator" -f "$work/receiver"
 }
