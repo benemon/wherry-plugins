@@ -108,14 +108,13 @@ type Nomad struct {
 	logger      hclog.Logger
 }
 
-// metrics holds the values Metrics reports: API errors by class, sweep deletions by kind, the dead jobs the latest sweep
-// left, and placement latency over pluginsdk.PlacementBuckets.
+// metrics holds the values Metrics reports: API errors by class, sweep deletions by kind, and the dead jobs the latest
+// sweep left.
 type metrics struct {
 	mu        sync.Mutex
 	errors    map[string]float64
 	deletions map[string]float64
 	pending   float64
-	placement pluginsdk.Histogram
 }
 
 // inlineLimit is the inline input bytes Dispatch accepts: maxVariable holds the inputs' names and base64 values, so
@@ -220,7 +219,7 @@ func New(config Config, name, pool string, client *api.Client, logger hclog.Logg
 		prefix:      prefix,
 		agentJob:    regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `.+$`),
 		runVariable: regexp.MustCompile(`^` + regexp.QuoteMeta(jobVariablePrefix) + `(` + regexp.QuoteMeta(prefix) + `.+?)(` + regexp.QuoteMeta(inputsSuffix) + `)?$`),
-		metrics:     metrics{errors: map[string]float64{}, deletions: map[string]float64{}, placement: pluginsdk.Histogram{Buckets: make([]uint64, len(pluginsdk.PlacementBuckets))}},
+		metrics:     metrics{errors: map[string]float64{}, deletions: map[string]float64{}},
 		logger:      logger,
 	}, nil
 }
@@ -264,11 +263,11 @@ func (profile *Nomad) Ready(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// Dispatch starts one run idempotently and returns once its task has started or ended. It removes the
-// run's material only when Info confirms that no job exists. Inputs and task credentials travel base64-encoded,
-// which the templates decode, so binary files arrive intact.
+// Dispatch registers one run's job idempotently and returns once Nomad holds it, placed or not, with a handle that
+// names no allocation; a job already registered returns its handle at once. It removes the run's material only when
+// Info confirms that no job exists. Inputs and task credentials travel base64-encoded, which the templates decode, so
+// binary files arrive intact.
 func (profile *Nomad) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
-	began := time.Now()
 	jobID := profile.jobID(run.ID)
 	path := jobVariablePrefix + jobID
 	job, err := profile.buildJob(run, jobID, path)
@@ -296,7 +295,6 @@ func (profile *Nomad) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsd
 			return profile.notStarted(ctx, run, profile.failed("write variable "+inputsPath, err))
 		}
 	}
-	registered := false
 	if _, _, err := profile.client.Jobs().Info(jobID, (&api.QueryOptions{}).WithContext(ctx)); err != nil {
 		if !notFound(err) {
 			return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, profile.failed("read job", err)
@@ -304,17 +302,8 @@ func (profile *Nomad) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsd
 		if _, _, err := profile.client.Jobs().RegisterOpts(job, &api.RegisterOptions{EnforceIndex: true, ModifyIndex: 0}, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
 			return profile.notStarted(ctx, run, profile.failed("register job "+jobID, err))
 		}
-		registered = true
 	}
-	handle, state, err := profile.wait(ctx, jobID, job.TaskGroups[0].Tasks[0].Driver)
-	if err != nil {
-		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, err
-	}
-	// Placement runs from this dispatch only for a job it registered, to when wait sees the agent task started.
-	if registered && state != pluginsdk.JobNeverStarted {
-		profile.metrics.placed(time.Since(began).Seconds())
-	}
-	return pluginsdk.OutcomeCreated, handle, nil
+	return pluginsdk.OutcomeCreated, encodeHandle(jobID, "", job.TaskGroups[0].Tasks[0].Driver), nil
 }
 
 // notStarted returns OutcomeNothingCreated, with the run's material released, when Info finds no job;
@@ -330,25 +319,173 @@ func (profile *Nomad) notStarted(ctx context.Context, run pluginsdk.Run, cause e
 	return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, profile.Release(cleanupCtx, run.ID)
 }
 
-// Lookup finds a run's existing job and waits for it as Dispatch does.
+// Lookup finds a run's existing job in one observation: pending at once while Nomad has not placed it, and running,
+// ended or never started once its agent task has started or ended. A placed allocation whose task is starting, or a
+// job Nomad has not yet decided on, waits for one of those; a Lookup cut short returns ctx's error and removes nothing.
 func (profile *Nomad) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
-	job, _, err := profile.client.Jobs().Info(profile.jobID(runID), (&api.QueryOptions{}).WithContext(ctx))
-	if notFound(err) {
-		return pluginsdk.Job{}, nil
+	jobID := profile.jobID(runID)
+	for {
+		job, _, err := profile.client.Jobs().Info(jobID, (&api.QueryOptions{}).WithContext(ctx))
+		switch {
+		case notFound(err):
+			return pluginsdk.Job{}, nil
+		case ctx.Err() != nil:
+			return pluginsdk.Job{}, ctx.Err()
+		case err != nil:
+			return pluginsdk.Job{}, profile.failed("read job", err)
+		}
+		if len(job.TaskGroups) != 1 || len(job.TaskGroups[0].Tasks) != 1 || job.TaskGroups[0].Tasks[0].Name != taskName {
+			return pluginsdk.Job{}, errors.New("existing job is not an agent job")
+		}
+		found, decided, err := profile.observe(ctx, job)
+		switch {
+		case ctx.Err() != nil:
+			return pluginsdk.Job{}, ctx.Err()
+		case err != nil:
+			return pluginsdk.Job{}, err
+		case decided:
+			// A job registered without the key reads as attempt 0.
+			found.Attempt, _ = strconv.ParseInt(job.Meta["attempt"], 10, 64)
+			found.Profile, found.Agent = job.Meta["profile"], job.Meta["agent"]
+			return found, nil
+		}
+		select {
+		case <-ctx.Done():
+			return pluginsdk.Job{}, ctx.Err()
+		case <-time.After(lookupWait):
+		}
 	}
-	if err != nil {
-		return pluginsdk.Job{}, profile.failed("read job", err)
+}
+
+// lookupWait separates the observations of a Lookup that waits.
+var lookupWait = 2 * time.Second
+
+// observe decides a registered agent job's state from its allocations and, with none, its evaluations, in the order
+// mch5's decision table gives; decided is false when Lookup waits. Allocations decide before any evaluation is read. A
+// read cut short by ctx returns ctx's error, as Lookup's own reads do, and counts no platform error.
+func (profile *Nomad) observe(ctx context.Context, job *api.Job) (pluginsdk.Job, bool, error) {
+	jobID, driver := *job.ID, job.TaskGroups[0].Tasks[0].Driver
+	allocs, _, err := profile.client.Jobs().Allocations(jobID, false, (&api.QueryOptions{}).WithContext(ctx))
+	switch {
+	case ctx.Err() != nil:
+		return pluginsdk.Job{}, false, ctx.Err()
+	case err != nil:
+		return pluginsdk.Job{}, false, profile.failed("list allocations", err)
 	}
-	if len(job.TaskGroups) != 1 || len(job.TaskGroups[0].Tasks) != 1 || job.TaskGroups[0].Tasks[0].Name != taskName {
-		return pluginsdk.Job{}, errors.New("existing job is not an agent job")
+	if alloc := current(allocs); alloc != nil {
+		state := alloc.TaskStates[taskName]
+		// The logs API answers 404 until the task has started.
+		if !terminal(alloc.ClientStatus) && !started(state) {
+			return pluginsdk.Job{}, false, nil
+		}
+		found := pluginsdk.Job{State: jobState(alloc), Handle: encodeHandle(jobID, alloc.ID, driver)}
+		if found.State == pluginsdk.JobNeverStarted {
+			terminal := taskTerminal(alloc.NodeName, state)
+			found.Class, found.Reason = terminal.Class, terminal.Reason
+		}
+		return found, true, nil
 	}
-	handle, state, err := profile.wait(ctx, *job.ID, job.TaskGroups[0].Tasks[0].Driver)
-	if err != nil {
-		return pluginsdk.Job{}, err
+	unplaced := encodeHandle(jobID, "", driver)
+	if job.Stop != nil && *job.Stop || job.Status != nil && *job.Status == "dead" {
+		return pluginsdk.Job{State: pluginsdk.JobNeverStarted, Handle: unplaced, Class: classStopped}, true, nil
 	}
-	// A job registered without the key reads as attempt 0.
-	attempt, _ := strconv.ParseInt(job.Meta["attempt"], 10, 64)
-	return pluginsdk.Job{State: state, Handle: handle, Attempt: attempt, Profile: job.Meta["profile"], Agent: job.Meta["agent"]}, nil
+	evals, _, err := profile.client.Jobs().Evaluations(jobID, (&api.QueryOptions{}).WithContext(ctx))
+	switch {
+	case ctx.Err() != nil:
+		return pluginsdk.Job{}, false, ctx.Err()
+	case err != nil:
+		return pluginsdk.Job{}, false, profile.failed("list evaluations", err)
+	}
+	eval := currentEval(evals, job.JobModifyIndex)
+	switch {
+	case eval == nil:
+		return pluginsdk.Job{}, false, nil
+	case eval.QueuedAllocations[taskName] > 0 || eval.Status == api.EvalStatusBlocked:
+		return pluginsdk.Job{State: pluginsdk.JobPending, Handle: unplaced, Reason: pendingReason(eval)}, true, nil
+	case eval.BlockedEval == "":
+		return pluginsdk.Job{}, false, nil
+	}
+	blocked, _, err := profile.client.Evaluations().Info(eval.BlockedEval, (&api.QueryOptions{}).WithContext(ctx))
+	switch {
+	case notFound(err):
+		return pluginsdk.Job{}, false, nil
+	case ctx.Err() != nil:
+		return pluginsdk.Job{}, false, ctx.Err()
+	case err != nil:
+		return pluginsdk.Job{}, false, profile.failed("read evaluation", err)
+	case blocked.Status == api.EvalStatusBlocked:
+		return pluginsdk.Job{State: pluginsdk.JobPending, Handle: unplaced, Reason: pendingReason(blocked)}, true, nil
+	}
+	return pluginsdk.Job{}, false, nil
+}
+
+// classStopped is the Class of a job stopped before Nomad placed it.
+const classStopped = "stopped"
+
+// currentEval is, among evals, the one of the job's current version, modifyIndex, created last; an earlier version's
+// evaluations are stale.
+func currentEval(evals []*api.Evaluation, modifyIndex *uint64) *api.Evaluation {
+	var newest *api.Evaluation
+	for _, eval := range evals {
+		if modifyIndex == nil || eval.JobModifyIndex != *modifyIndex {
+			continue
+		}
+		if newest == nil || eval.CreateIndex > newest.CreateIndex {
+			newest = eval
+		}
+	}
+	return newest
+}
+
+// enumerate lists the keys of one of a placement metric's maps, or its exhausted quotas, in the order pendingReason
+// meets them; pendingReason sorts them, which a test checks by setting enumerate to another order.
+var enumerate = func(keys []string) []string { return keys }
+
+// sorted returns keys as enumerate lists them, sorted.
+func sorted(keys []string) []string {
+	keys = enumerate(slices.Clone(keys))
+	slices.Sort(keys)
+	return keys
+}
+
+// pendingReason formats why Nomad has not placed the agent group, from eval's failed-placement metric: every counter
+// named, none combined, each map in key order. With nothing to name it is eval's StatusDescription, which may be empty.
+func pendingReason(eval *api.Evaluation) string {
+	m := eval.FailedTGAllocs[taskName]
+	if m == nil {
+		return eval.StatusDescription
+	}
+	var fragments []string
+	if m.NodesInPool == 0 && m.NodePool != "" {
+		fragments = append(fragments, "node pool "+m.NodePool+" has no nodes")
+	}
+	for _, dc := range sorted(slices.Collect(maps.Keys(m.NodesAvailable))) {
+		if m.NodesAvailable[dc] == 0 {
+			fragments = append(fragments, "no nodes available in datacenter "+dc)
+		}
+	}
+	for _, counts := range []struct {
+		format string
+		counts map[string]int
+	}{
+		{"%s exhausted on %d nodes", m.DimensionExhausted},
+		{"constraint %s filtered %d", m.ConstraintFiltered},
+		{"class %s filtered %d", m.ClassFiltered},
+		{"class %s exhausted %d", m.ClassExhausted},
+	} {
+		for _, key := range sorted(slices.Collect(maps.Keys(counts.counts))) {
+			if n := counts.counts[key]; n != 0 {
+				fragments = append(fragments, fmt.Sprintf(counts.format, key, n))
+			}
+		}
+	}
+	for _, quota := range sorted(m.QuotaExhausted) {
+		fragments = append(fragments, "quota "+quota+" exhausted")
+	}
+	if m.NodesEvaluated == 0 && m.NodesFiltered == 0 && m.NodesExhausted == 0 && len(fragments) == 0 {
+		return eval.StatusDescription
+	}
+	return strings.Join(append([]string{fmt.Sprintf("%d nodes evaluated, %d filtered, %d exhausted", m.NodesEvaluated, m.NodesFiltered, m.NodesExhausted)}, fragments...), "; ")
 }
 
 // handle is the version 1 encoding of pluginsdk.Handle.Data.
@@ -370,32 +507,20 @@ func decodeHandle(encoded pluginsdk.Handle) (handle, error) {
 	return decoded, nil
 }
 
-// wait returns once the job's agent task has started or ended; a wait cut short deregisters the job.
-func (profile *Nomad) wait(ctx context.Context, jobID, driver string) (pluginsdk.Handle, pluginsdk.JobState, error) {
+// encodeHandle encodes the version 1 handle of the job jobID on driver; alloc is empty until Nomad places the job.
+func encodeHandle(jobID, alloc, driver string) pluginsdk.Handle {
 	format := ""
 	if driver == "podman" {
 		format = formatCRI
 	}
-	for {
-		allocs, _, err := profile.client.Jobs().Allocations(jobID, false, (&api.QueryOptions{}).WithContext(ctx))
-		if err != nil {
-			if ctx.Err() != nil {
-				return pluginsdk.Handle{}, 0, profile.deregisterTimedOut(ctx, jobID)
-			}
-			return pluginsdk.Handle{}, 0, profile.failed("list allocations", err)
-		}
-		alloc := current(allocs)
-		// The logs API answers 404 until the task has started.
-		if alloc != nil && (terminal(alloc.ClientStatus) || started(alloc.TaskStates[taskName])) {
-			data, _ := json.Marshal(handle{V: 1, Job: jobID, Alloc: alloc.ID, Format: format}) // strings always encode
-			return pluginsdk.Handle{Data: data, Name: jobID}, jobState(alloc), nil
-		}
-		select {
-		case <-ctx.Done():
-			return pluginsdk.Handle{}, 0, profile.deregisterTimedOut(ctx, jobID)
-		case <-time.After(2 * time.Second):
-		}
-	}
+	data, _ := json.Marshal(handle{V: 1, Job: jobID, Alloc: alloc, Format: format}) // strings always encode
+	return pluginsdk.Handle{Data: data, Name: jobID}
+}
+
+// errNoAllocation is the error of Follow and Collect on a handle that names no allocation: Dispatch's, before Lookup
+// has found the job placed.
+func errNoAllocation() error {
+	return &pluginsdk.Error{Op: "read allocation", Err: errors.New("the handle names no allocation; follow the handle of a Lookup")}
 }
 
 // jobState keys never-started on a terminal allocation whose agent task has no Started event.
@@ -516,16 +641,6 @@ func notFound(err error) bool {
 	return errors.As(err, &response) && response.StatusCode() == 404
 }
 
-func (profile *Nomad) deregisterTimedOut(ctx context.Context, jobID string) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
-	defer cancel()
-	_, _, err := profile.client.Jobs().Deregister(jobID, true, (&api.WriteOptions{}).WithContext(cleanupCtx))
-	if err != nil {
-		return errors.Join(ctx.Err(), fmt.Errorf("deregister timed-out job: %w", profile.failed("deregister job", err)))
-	}
-	return ctx.Err()
-}
-
 // current prefers a non-terminal allocation, else the newest.
 func current(allocs []*api.AllocationListStub) *api.AllocationListStub {
 	var newest *api.AllocationListStub
@@ -564,8 +679,12 @@ var failureClasses = map[string]string{
 // terminalOf reads the agent task's final state; the class is that of its last failure event, and the reason that
 // event's message.
 func terminalOf(alloc *api.Allocation) pluginsdk.Terminal {
-	state := alloc.TaskStates[taskName]
-	result := pluginsdk.Terminal{Started: started(state), Node: alloc.NodeName}
+	return taskTerminal(alloc.NodeName, alloc.TaskStates[taskName])
+}
+
+// taskTerminal reads the agent task's final state on node.
+func taskTerminal(node string, state *api.TaskState) pluginsdk.Terminal {
+	result := pluginsdk.Terminal{Started: started(state), Node: node}
 	if state == nil {
 		return result
 	}
@@ -593,6 +712,9 @@ func (profile *Nomad) Follow(ctx context.Context, encoded pluginsdk.Handle, offs
 	handle, err := decodeHandle(encoded)
 	if err != nil {
 		return pluginsdk.Terminal{}, err
+	}
+	if handle.Alloc == "" {
+		return pluginsdk.Terminal{}, errNoAllocation()
 	}
 	alloc, _, err := profile.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
@@ -845,6 +967,9 @@ func (profile *Nomad) Stop(ctx context.Context, encoded pluginsdk.Handle) error 
 	if err != nil {
 		return err
 	}
+	if handle.Alloc == "" {
+		return profile.stopUnplaced(ctx, handle.Job)
+	}
 	alloc, meta, err := profile.client.Allocations().Info(handle.Alloc, (&api.QueryOptions{}).WithContext(ctx))
 	// A purged or garbage-collected allocation has stopped.
 	if notFound(err) {
@@ -863,6 +988,31 @@ func (profile *Nomad) Stop(ctx context.Context, encoded pluginsdk.Handle) error 
 	// gone, so the wait ends without a deadline of its own.
 	_, err = profile.terminated(ctx, handle.Alloc, meta.LastIndex)
 	return err
+}
+
+// stopUnplaced stops a job by its ID alone, from a handle that names no allocation: it deregisters the job, a job
+// already gone counting as stopped, and returns once the job lists no allocation that is not terminal, so one Nomad
+// placed after the handle was taken is stopped too. A queued job lists none.
+func (profile *Nomad) stopUnplaced(ctx context.Context, jobID string) error {
+	if _, _, err := profile.client.Jobs().Deregister(jobID, false, (&api.WriteOptions{}).WithContext(ctx)); err != nil && !notFound(err) {
+		return profile.failed("deregister job", err)
+	}
+	for {
+		allocs, _, err := profile.client.Jobs().Allocations(jobID, false, (&api.QueryOptions{}).WithContext(ctx))
+		switch {
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case err != nil:
+			profile.handled("list allocations", err)
+		case !slices.ContainsFunc(allocs, func(alloc *api.AllocationListStub) bool { return !terminal(alloc.ClientStatus) }):
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryWait):
+		}
+	}
 }
 
 // Release deletes the run's variables holding the credentials, the prompt and the inputs.
@@ -892,6 +1042,9 @@ func (profile *Nomad) Collect(ctx context.Context, encoded pluginsdk.Handle, lim
 	handle, err := decodeHandle(encoded)
 	if err != nil {
 		return err
+	}
+	if handle.Alloc == "" {
+		return errNoAllocation()
 	}
 	var alloc *api.Allocation
 	var index uint64
@@ -1176,28 +1329,13 @@ func (profile *Nomad) handled(op string, err error) {
 	}
 }
 
-func (m *metrics) placed(seconds float64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i, bound := range pluginsdk.PlacementBuckets {
-		if seconds <= bound {
-			m.placement.Buckets[i]++
-		}
-	}
-	m.placement.Sum += seconds
-	m.placement.Count++
-}
-
-// Metrics reports the profile's API errors, sweep deletions, cleanup-pending jobs and placement latency.
+// Metrics reports the profile's API errors, sweep deletions and cleanup-pending jobs.
 func (profile *Nomad) Metrics(context.Context) ([]pluginsdk.Sample, error) {
 	m := &profile.metrics
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	placement := m.placement
-	placement.Buckets = slices.Clone(placement.Buckets)
 	samples := []pluginsdk.Sample{
 		{Family: "wherry_plugin_cleanup_pending", Kind: pluginsdk.KindGauge, Value: m.pending},
-		{Family: "wherry_plugin_placement_seconds", Kind: pluginsdk.KindHistogram, Histogram: placement},
 	}
 	for class, count := range m.errors {
 		samples = append(samples, pluginsdk.Sample{Family: "wherry_plugin_platform_errors_total", Labels: map[string]string{"class": class}, Kind: pluginsdk.KindCounter, Value: count})

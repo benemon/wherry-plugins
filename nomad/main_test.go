@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"encoding/pem"
 	"io"
@@ -175,7 +176,7 @@ func TestFactoryTokenFromCredentialElseNomadToken(t *testing.T) {
 	}
 }
 
-func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings) {
+func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings, pluginsdk.Settings) {
 	t.Helper()
 	address := os.Getenv("WHERRY_NOMAD_DEV_ADDR")
 	if address == "" {
@@ -183,27 +184,34 @@ func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings) 
 	}
 	// The completing job exits 0 only with pluginsdktest.Credentials delivered at their targets.
 	return settings(t, "completes", execConfig(address, "/bin/sh", "-c", `sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`)),
-		settings(t, "never-starts", execConfig(address, "/nonexistent/wherry-conformance"))
+		settings(t, "never-starts", execConfig(address, "/nonexistent/wherry-conformance")),
+		// No dev node has a terabyte of memory, so Nomad blocks the job's evaluation and never places it.
+		settings(t, "pending", merge(execConfig(address, "/bin/true"), map[string]any{"runtime": map[string]any{"resources": map[string]any{"memory_mb": 1 << 20}}}))
 }
 
 func TestConformance(t *testing.T) {
-	completes, neverStarts := conformanceSettings(t)
-	pluginsdktest.Run(t, newProfile, completes, neverStarts, inlineLimit)
+	completes, neverStarts, pending := conformanceSettings(t)
+	pluginsdktest.Run(t, newProfile, completes, neverStarts, pending, inlineLimit)
 }
 
 // TestConformanceOverTheLink runs the suite against the built plugin, through the receiver's side of the link.
 func TestConformanceOverTheLink(t *testing.T) {
-	completes, neverStarts := conformanceSettings(t)
+	completes, neverStarts, pending := conformanceSettings(t)
 	binary := filepath.Join(t.TempDir(), "wherry-plugin-nomad")
 	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, output)
 	}
-	plugin, err := pluginsdk.Launch(func() (string, error) { return binary, nil }, io.Discard)
+	content, err := os.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checksum := sha256.Sum256(content)
+	plugin, err := pluginsdk.Launch("nomad", func() (string, error) { return binary, nil }, checksum[:], io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer plugin.Close()
 	pluginsdktest.Run(t, func(settings pluginsdk.Settings, _ hclog.Logger) (pluginsdk.Plugin, error) {
 		return plugin.Configure(settings)
-	}, completes, neverStarts, inlineLimit)
+	}, completes, neverStarts, pending, inlineLimit)
 }

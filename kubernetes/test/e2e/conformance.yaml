@@ -1,0 +1,46 @@
+# The pod conformance.sh runs the plugin's conformance suite in: Go and the checkout's kubernetes module, as the
+# receiver's UID 1001 under Pod Security restricted, with the namespace's wherry-receiver service account and its Role,
+# and the runs claim at the runs_dir the suite names. Its image is the Go release kubernetes/go.mod names, by digest.
+apiVersion: v1
+kind: Pod
+metadata: {name: wherry-conformance, labels: {app: wherry-conformance}}
+spec:
+  serviceAccountName: wherry-receiver
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: suite
+      image: docker.io/library/golang:1.27@sha256:c292963ad0e5f51e843c726edc204a4e4c26a859ba1e4d736d91028aa3633048
+      # conformance.sh copies the module in and runs the suite with kubectl exec.
+      command: [sleep, "3600"]
+      workingDir: /work
+      env:
+        # Go's build cache, module cache and temporary files, and the suite's, go to the writable /work.
+        - {name: HOME, value: /work}
+        - {name: GOPATH, value: /work/go}
+        - {name: GOCACHE, value: /work/cache}
+        - {name: GOTMPDIR, value: /work/tmp}
+        - {name: TMPDIR, value: /work/tmp}
+        - {name: GOFLAGS, value: -modcacherw}
+        - {name: GOTOOLCHAIN, value: local}
+        - {name: WHERRY_KUBERNETES_DEV_ADDR, value: https://kubernetes.default.svc}
+        - {name: WHERRY_KUBERNETES_DEV_CA_FILE, value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt}
+        - {name: WHERRY_KUBERNETES_DEV_TOKEN_FILE, value: /var/run/secrets/kubernetes.io/serviceaccount/token}
+        - {name: WHERRY_KUBERNETES_DEV_NAMESPACE, value: wherry}
+        - {name: WHERRY_KUBERNETES_DEV_RUNS_CLAIM, value: wherry-runs}
+        - {name: WHERRY_KUBERNETES_DEV_RUNS_DIR, value: /var/lib/wherry/runs}
+        # The agent pods share the suite's UID, as they share the receiver's.
+        - {name: WHERRY_KUBERNETES_DEV_USER, value: "1001"}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+      volumeMounts:
+        - {name: work, mountPath: /work}
+        - {name: runs, mountPath: /var/lib/wherry/runs}
+  volumes:
+    - {name: work, emptyDir: {}}
+    - {name: runs, persistentVolumeClaim: {claimName: wherry-runs}}

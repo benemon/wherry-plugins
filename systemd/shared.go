@@ -18,18 +18,17 @@ import (
 // maxPending bounds a line LineReader holds; a longer one is split.
 const maxPending = 1 << 20
 
-// PlatformMetrics holds a plugin profile's API errors, sweep deletions, cleanup-pending jobs and placement latency.
+// PlatformMetrics holds a plugin profile's API errors, sweep deletions and cleanup-pending jobs.
 type PlatformMetrics struct {
 	mu        sync.Mutex
 	errors    map[string]float64
 	deletions map[string]float64
 	pending   float64
-	placement pluginsdk.Histogram
 }
 
 // NewPlatformMetrics returns empty metrics.
 func NewPlatformMetrics() *PlatformMetrics {
-	return &PlatformMetrics{errors: map[string]float64{}, deletions: map[string]float64{}, placement: pluginsdk.Histogram{Buckets: make([]uint64, len(pluginsdk.PlacementBuckets))}}
+	return &PlatformMetrics{errors: map[string]float64{}, deletions: map[string]float64{}}
 }
 
 // Failed counts a failed platform call of class.
@@ -53,28 +52,12 @@ func (m *PlatformMetrics) Pending(n int) {
 	m.pending = float64(n)
 }
 
-// Placed observes one placement.
-func (m *PlatformMetrics) Placed(seconds float64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i, bound := range pluginsdk.PlacementBuckets {
-		if seconds <= bound {
-			m.placement.Buckets[i]++
-		}
-	}
-	m.placement.Sum += seconds
-	m.placement.Count++
-}
-
 // Samples reports the metrics as the plugin families' samples.
 func (m *PlatformMetrics) Samples() []pluginsdk.Sample {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	placement := m.placement
-	placement.Buckets = slices.Clone(placement.Buckets)
 	samples := []pluginsdk.Sample{
 		{Family: "wherry_plugin_cleanup_pending", Kind: pluginsdk.KindGauge, Value: m.pending},
-		{Family: "wherry_plugin_placement_seconds", Kind: pluginsdk.KindHistogram, Histogram: placement},
 	}
 	for class, count := range m.errors {
 		samples = append(samples, pluginsdk.Sample{Family: "wherry_plugin_platform_errors_total", Labels: map[string]string{"class": class}, Kind: pluginsdk.KindCounter, Value: count})

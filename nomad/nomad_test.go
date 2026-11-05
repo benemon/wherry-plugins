@@ -102,6 +102,8 @@ func cleanupRun(t *testing.T, profile *Nomad, run pluginsdk.Run) {
 	})
 }
 
+// dispatch dispatches run, which Dispatch must create with a handle that names no allocation, and returns the handle of
+// a Lookup that finds the job running, ended or never started, which Follow and Collect take.
 func dispatch(t *testing.T, profile *Nomad, ctx context.Context, run pluginsdk.Run) pluginsdk.Handle {
 	t.Helper()
 	cleanupRun(t, profile, run)
@@ -109,7 +111,33 @@ func dispatch(t *testing.T, profile *Nomad, ctx context.Context, run pluginsdk.R
 	if err != nil || outcome != pluginsdk.OutcomeCreated {
 		t.Fatalf("dispatch = %v, %v", outcome, err)
 	}
-	return handle
+	if alloc := decoded(t, handle).Alloc; alloc != "" {
+		t.Fatalf("dispatch handle names allocation %q; want none", alloc)
+	}
+	return lookupStarted(t, ctx, profile, run.ID).Handle
+}
+
+// lookupStarted repeats Lookup, bounded by ctx, while it reports the job pending, and returns the job once it is running,
+// ended or never started.
+func lookupStarted(t *testing.T, ctx context.Context, profile *Nomad, runID string) pluginsdk.Job {
+	t.Helper()
+	for {
+		job, err := profile.Lookup(ctx, runID)
+		if err != nil {
+			t.Fatalf("lookup: %v", err)
+		}
+		switch job.State {
+		case pluginsdk.JobRunning, pluginsdk.JobEnded, pluginsdk.JobNeverStarted:
+			return job
+		case pluginsdk.JobAbsent:
+			t.Fatalf("lookup found no job")
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("job still pending: %s", job.Reason)
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 func decoded(t *testing.T, encoded pluginsdk.Handle) handle {
@@ -535,7 +563,9 @@ func TestLookupMissingRun(t *testing.T) {
 	}
 }
 
-func TestLookupWaitsForUnplacedJob(t *testing.T) {
+// TestLookupReportsUnplacedJobPending: on dev Nomad, a job no node can take is pending with the scheduler's reason once
+// Nomad has evaluated it; Stop with the pending handle leaves it never started, class stopped, and Purge removes it.
+func TestLookupReportsUnplacedJobPending(t *testing.T) {
 	profile, ctx := devProfile(t)
 	run := testRun("lookup-unplaced")
 	profile.datacenters = []string{"wherry-no-such-datacenter"}
@@ -547,13 +577,31 @@ func TestLookupWaitsForUnplacedJob(t *testing.T) {
 	if _, _, err := profile.client.Jobs().Register(job, nil); err != nil {
 		t.Fatal(err)
 	}
-	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	// The scheduler may not have decided at the first observation; Lookup waits for it, then reports pending at once.
+	lookupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if job, err := profile.Lookup(lookupCtx, run.ID); job.State != pluginsdk.JobAbsent || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("lookup of a job without an allocation = %#v, %v; want a wait that times out", job, err)
+	found, err := profile.Lookup(lookupCtx, run.ID)
+	if want := "0 nodes evaluated, 0 filtered, 0 exhausted; node pool default has no nodes"; err != nil || found.State != pluginsdk.JobPending || found.Reason != want || found.Attempt != run.Attempt {
+		t.Fatalf("lookup of a job without an allocation = %#v, %v; want pending with reason %q", found, err, want)
 	}
-	if _, _, err := profile.client.Jobs().Info(profile.jobID(run.ID), nil); !notFound(err) {
-		t.Fatalf("timed-out job still registered: %v", err)
+	if alloc := decoded(t, found.Handle).Alloc; alloc != "" {
+		t.Fatalf("pending handle names allocation %q", alloc)
+	}
+	if _, _, err := profile.client.Jobs().Info(profile.jobID(run.ID), nil); err != nil {
+		t.Fatalf("pending job not registered: %v", err)
+	}
+	// Stop with the pending handle deregisters the job by its ID, and Lookup then reads it as stopped before placement.
+	if err := profile.Stop(ctx, found.Handle); err != nil {
+		t.Fatalf("stop of a pending job: %v", err)
+	}
+	if found, err := profile.Lookup(ctx, run.ID); err != nil || found.State != pluginsdk.JobNeverStarted || found.Class != classStopped {
+		t.Fatalf("lookup after stop = %#v, %v; want never started, class %s", found, err, classStopped)
+	}
+	if err := profile.Purge(ctx, run.ID); err != nil {
+		t.Fatalf("purge of a stopped pending job: %v", err)
+	}
+	if found, err := profile.Lookup(ctx, run.ID); err != nil || found.State != pluginsdk.JobAbsent {
+		t.Fatalf("lookup after purge = %#v, %v; want absent", found, err)
 	}
 }
 
@@ -753,43 +801,114 @@ func TestStopAfterPurgeSucceeds(t *testing.T) {
 	}
 }
 
-func TestDispatchTimeoutDeregisters(t *testing.T) {
+// TestDispatchTimeoutKeepsTheJob: Dispatch returns at registration, so a short context does not cut it short, and the
+// unplaceable job stays registered and unstopped, after a cancelled Lookup too.
+func TestDispatchTimeoutKeepsTheJob(t *testing.T) {
 	profile, ctx := devProfile(t)
 	run := testRun("dispatch-timeout")
 	profile.datacenters = []string{"wherry-no-such-datacenter"}
 	cleanupRun(t, profile, run)
 	dispatchCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if _, _, err := profile.Dispatch(dispatchCtx, run); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("dispatch of an unplaceable job = %v; want a wait that times out", err)
+	if outcome, handle, err := profile.Dispatch(dispatchCtx, run); err != nil || outcome != pluginsdk.OutcomeCreated || decoded(t, handle).Alloc != "" {
+		t.Fatalf("dispatch of an unplaceable job = %v, %s, %v; want created with no allocation", outcome, handle.Data, err)
 	}
-	if _, _, err := profile.client.Jobs().Info(profile.jobID(run.ID), nil); !notFound(err) {
-		t.Fatalf("timed-out job still registered: %v", err)
+	if _, _, err := profile.client.Jobs().Info(profile.jobID(run.ID), nil); err != nil {
+		t.Fatalf("dispatched job not registered: %v", err)
+	}
+	// A Lookup cut short removes nothing either.
+	lookupCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := profile.Lookup(lookupCtx, run.ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled lookup = %v; want the context's error", err)
+	}
+	if job, _, err := profile.client.Jobs().Info(profile.jobID(run.ID), nil); err != nil || *job.Stop {
+		t.Fatalf("job after a cancelled lookup = %v, %v; want it registered and not stopped", job, err)
 	}
 }
 
-func TestDeregisterTimedOutPurgesJob(t *testing.T) {
-	var purge string
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodDelete || request.URL.Path != "/v1/job/agent-timed-out" {
-			http.Error(response, "unexpected request", http.StatusInternalServerError)
-			return
+// TestCancelledLookupOnlyReadsTheJob: a Lookup cut short, by a cancel or its deadline, while it waits on a placed
+// allocation whose task is starting, or while a read is in flight, returns the context's error and removes nothing: no
+// request but reads.
+func TestCancelledLookupOnlyReadsTheJob(t *testing.T) {
+	const id = poolPrefix + "capture-clean"
+	starting := edited(t, "clean.allocations.json", func(alloc *api.AllocationListStub) {
+		alloc.ClientStatus = api.AllocClientStatusPending
+		alloc.TaskStates = nil
+	})
+	profile, requests := nomadServer(t, map[string]http.HandlerFunc{
+		"GET /v1/job/" + id:                  serve(captured(t, "clean.job.json")),
+		"GET /v1/job/" + id + "/allocations": serve(starting),
+	})
+	shortLookupWait(t)
+	t.Run("read in flight", func(t *testing.T) {
+		profile, requests := nomadServer(t, map[string]http.HandlerFunc{
+			"GET /v1/job/" + id: serve(captured(t, "clean.job.json")),
+			"GET /v1/job/" + id + "/allocations": func(_ http.ResponseWriter, request *http.Request) {
+				<-request.Context().Done()
+			},
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(200*time.Millisecond, cancel)
+		if job, err := profile.Lookup(ctx, "capture-clean"); !errors.Is(err, context.Canceled) || job.State != pluginsdk.JobAbsent {
+			t.Fatalf("lookup with its read cut short = %#v, %v; want the context's error", job, err)
 		}
-		purge = request.URL.Query().Get("purge")
-		_, _ = response.Write([]byte(`{"EvalID":""}`))
-	}))
-	defer server.Close()
-	profile, err := build(Config{Address: server.URL, Runtime: Runtime{Driver: "raw_exec"}}, testPool, "")
-	if err != nil {
-		t.Fatal(err)
+		for _, request := range requests() {
+			if !strings.HasPrefix(request, "GET ") {
+				t.Fatalf("requests %v; want reads only", requests())
+			}
+		}
+	})
+	for name, cut := range map[string]func(context.Context) (context.Context, context.CancelFunc){
+		"deadline": func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(ctx, 300*time.Millisecond)
+		},
+		"cancelled": func(ctx context.Context) (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(ctx)
+			time.AfterFunc(300*time.Millisecond, cancel)
+			return ctx, cancel
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := cut(context.Background())
+			defer cancel()
+			if job, err := profile.Lookup(ctx, "capture-clean"); err == nil || !errors.Is(err, ctx.Err()) || job.State != pluginsdk.JobAbsent {
+				t.Fatalf("lookup cut short = %#v, %v; want the context's error", job, err)
+			}
+			for _, request := range requests() {
+				if !strings.HasPrefix(request, "GET ") {
+					t.Fatalf("requests %v; want reads only", requests())
+				}
+			}
+		})
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := profile.deregisterTimedOut(ctx, "agent-timed-out"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("error = %v, want context canceled", err)
-	}
-	if purge != "true" {
-		t.Fatalf("purge = %q, want true", purge)
+}
+
+// A read in observe cut by the run's deadline returns the deadline and counts no platform error, whether the deadline
+// expires while the allocations or the evaluations are read.
+func TestDeadlineCutReadCountsNoError(t *testing.T) {
+	block := func(_ http.ResponseWriter, request *http.Request) { <-request.Context().Done() }
+	for _, cut := range []string{"allocations", "evaluations"} {
+		t.Run(cut, func(t *testing.T) {
+			handlers := map[string]http.HandlerFunc{
+				"GET /v1/job/" + pendingJobID:                  serve(pendingJob(t, "pending", false)),
+				"GET /v1/job/" + pendingJobID + "/allocations": serve([]byte(`[]`)),
+			}
+			handlers["GET /v1/job/"+pendingJobID+"/"+cut] = block
+			profile, requests := nomadServer(t, handlers)
+			before := samples(t, profile)
+			if _, got := lookupOnce(t, profile); got != (lookupOutcome{wait: true}) {
+				t.Fatalf("lookup = %+v; want the context's deadline (requests %v)", got, requests())
+			}
+			if !slices.Contains(requests(), "GET /v1/job/"+pendingJobID+"/"+cut) {
+				t.Fatalf("requests %v; want the %s read", requests(), cut)
+			}
+			for name, sample := range samples(t, profile) {
+				if strings.HasPrefix(name, "wherry_plugin_platform_errors_total/") && sample.Value != before[name].Value {
+					t.Fatalf("%s went from %v to %v; want no platform error counted", name, before[name].Value, sample.Value)
+				}
+			}
+		})
 	}
 }
 
@@ -1058,17 +1177,19 @@ func TestSecretsNeverInRequestURLs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch = %#v, %v", handle, err)
 	}
-	if found, err := profile.Lookup(ctx, run.ID); err != nil || found.State != pluginsdk.JobNeverStarted {
+	found, err := profile.Lookup(ctx, run.ID)
+	if err != nil || found.State != pluginsdk.JobNeverStarted {
 		t.Fatalf("lookup = %#v, %v", found, err)
 	}
-	if _, err := profile.Follow(ctx, handle, 0, make(chan pluginsdk.Line, 1)); err != nil {
+	if _, err := profile.Follow(ctx, found.Handle, 0, make(chan pluginsdk.Line, 1)); err != nil {
 		t.Fatalf("follow: %v", err)
 	}
+	// Dispatch's handle names no allocation, so Stop deregisters by the job's ID and lists its allocations.
 	if err := profile.Stop(ctx, handle); err != nil {
 		t.Fatal(err)
 	}
 	outputs := make(chan pluginsdk.Output, 1)
-	if err := profile.Collect(ctx, handle, pluginsdk.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || string((<-outputs).Data) != outputContent {
+	if err := profile.Collect(ctx, found.Handle, pluginsdk.Limits{Files: 256, FileBytes: 1 << 20, TotalBytes: 1 << 20}, outputs); err != nil || string((<-outputs).Data) != outputContent {
 		t.Fatalf("collect: %v", err)
 	}
 	if err := profile.Release(ctx, run.ID); err != nil {
@@ -1508,13 +1629,6 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 		// failed is whether Dispatch reports an error beside the outcome.
 		failed bool
 	}{
-		{"wait fails", map[string]http.HandlerFunc{
-			"GET /v1/job/agent-44575cf5b285-run-outcome": jobNotFound,
-			"PUT /v1/jobs": serve([]byte(`{"EvalID":"eval-1","EvalCreateIndex":10,"JobModifyIndex":10}`)),
-			"GET /v1/job/agent-44575cf5b285-run-outcome/allocations": func(response http.ResponseWriter, _ *http.Request) {
-				http.Error(response, "rpc error", http.StatusInternalServerError)
-			},
-		}, pluginsdk.OutcomeUnknown, false, true},
 		{"register fails and no job exists", map[string]http.HandlerFunc{
 			"GET /v1/job/agent-44575cf5b285-run-outcome": jobNotFound,
 			"PUT /v1/jobs": func(response http.ResponseWriter, _ *http.Request) {
@@ -1620,9 +1734,19 @@ func TestLookupReadsDispatchMetadata(t *testing.T) {
 	if err != nil || outcome != pluginsdk.OutcomeCreated || dispatched.Name != "agent-44575cf5b285-run-meta" {
 		t.Fatalf("dispatch = %v, %q, %v; want created with the job ID as its name", outcome, dispatched.Name, err)
 	}
+	if h := decoded(t, dispatched); h.Job != "agent-44575cf5b285-run-meta" || h.Alloc != "" {
+		t.Fatalf("dispatch handle %#v; want version 1 for the job with no allocation", h)
+	}
 	job, err := profile.Lookup(context.Background(), run.ID)
 	if err != nil || job.State != pluginsdk.JobEnded || job.Attempt != 3 || job.Profile != "container" || job.Agent != "coder" || job.Handle.Name != "agent-44575cf5b285-run-meta" {
 		t.Fatalf("lookup = %#v, %v; want the ended job named agent-44575cf5b285-run-meta with attempt 3, profile container, agent coder", job, err)
+	}
+	var allocs []*api.AllocationListStub
+	if err := json.Unmarshal(captured(t, "clean.allocations.json"), &allocs); err != nil || len(allocs) != 1 {
+		t.Fatalf("capture: %d allocations, %v", len(allocs), err)
+	}
+	if h := decoded(t, job.Handle); h.Job != "agent-44575cf5b285-run-meta" || h.Alloc != allocs[0].ID {
+		t.Fatalf("lookup handle %#v; want the captured allocation %s", h, allocs[0].ID)
 	}
 }
 
@@ -2386,26 +2510,6 @@ func TestSweepReportsDeletionsAndPendingJobs(t *testing.T) {
 	got := samples(t, profile)
 	if got["wherry_plugin_cleanup_pending/"].Value != 1 || got["wherry_plugin_sweep_deletions_total/job"].Value != 1 || got["wherry_plugin_sweep_deletions_total/variable"].Value != 1 {
 		t.Fatalf("samples %+v; want one pending job, one job and one variable deleted", got)
-	}
-}
-
-func TestDispatchReportsPlacement(t *testing.T) {
-	const job = poolPrefix + "run-placed"
-	routes := map[string]http.HandlerFunc{
-		"PUT /v1/var/nomad/jobs/" + job:       serve([]byte(`{}`)),
-		"GET /v1/job/" + job:                  jobNotFound,
-		"PUT /v1/jobs":                        serve([]byte(`{"EvalID":"eval-1","EvalCreateIndex":10,"JobModifyIndex":10}`)),
-		"GET /v1/job/" + job + "/allocations": serve([]byte(`[{"ID":"alloc-1","ClientStatus":"running","TaskStates":{"agent":{"State":"running","StartedAt":"2026-10-20T00:00:00Z"}}}]`)),
-	}
-	profile, _ := nomadServer(t, routes)
-	run := testRun("placed")
-	run.ID = "run-placed"
-	if outcome, _, err := profile.Dispatch(context.Background(), run); err != nil || outcome != pluginsdk.OutcomeCreated {
-		t.Fatalf("dispatch = %v, %v", outcome, err)
-	}
-	placement := samples(t, profile)["wherry_plugin_placement_seconds/"].Histogram
-	if placement.Count != 1 || len(placement.Buckets) != len(pluginsdk.PlacementBuckets) || placement.Buckets[len(placement.Buckets)-1] != 1 {
-		t.Fatalf("placement %+v; want one observation over the placement buckets", placement)
 	}
 }
 

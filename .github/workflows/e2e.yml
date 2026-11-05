@@ -15,7 +15,7 @@ permissions:
 env:
   # The wherry release whose CLI provisions and submits, and which the receiver image holds.
   # ci.yml pins the same release for its nomad-image and systemd-host jobs; change both together.
-  WHERRY_VERSION: v0.1.0-rc.28
+  WHERRY_VERSION: v0.1.0-rc.29
   KIND_VERSION: v0.33.0
   KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
   # A Nomad CE release; NOMAD_SHA256 is its linux_amd64 zip's line in the release's SHA256SUMS.
@@ -60,6 +60,13 @@ jobs:
       - name: Create the cluster and Kafka
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/01-cluster.sh
+      # make check skips the conformance suite without a cluster. It runs here, in a pod in the cluster that mounts the
+      # runs claim, a hostPath inside the kind node the runner cannot see, before and apart from the e2e receiver; the
+      # example runs below are not conformance.
+      - name: Run the conformance suite in the cluster
+        if: steps.changes.outputs.changed == 'true'
+        timeout-minutes: 30
+        run: kubernetes/test/e2e/conformance.sh
       - name: Fetch the wherry CLI and build the images, the checkout's and the previous release's
         if: steps.changes.outputs.changed == 'true'
         run: kubernetes/test/e2e/02-wherry.sh
@@ -138,6 +145,23 @@ jobs:
       - name: Start the Nomad agent and Kafka
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/01-nomad.sh
+      # make check skips the conformance suite without WHERRY_NOMAD_DEV_ADDR. It runs here, direct and over the link,
+      # against the dev agent 01 started, whose raw_exec driver runs the suite's jobs; the pending profile asks for more
+      # memory than the runner has, so Nomad blocks it. The example runs below are not conformance.
+      - name: Run the conformance suite against the Nomad agent
+        if: steps.changes.outputs.changed == 'true'
+        timeout-minutes: 20
+        working-directory: nomad
+        env:
+          WHERRY_NOMAD_DEV_ADDR: http://127.0.0.1:4646
+        shell: bash
+        run: |
+          go test -count=1 -p 1 -v -run '^(TestConformance|TestConformanceOverTheLink)$' . | tee "$RUNNER_TEMP/nomad-conformance.log"
+          # A skipped suite passes too, so each must have run, with its pending profile.
+          for test in TestConformance TestConformanceOverTheLink; do
+            grep -x -- "--- PASS: $test ([0-9.]*s)" "$RUNNER_TEMP/nomad-conformance.log" >/dev/null
+            grep -E -- "^    --- PASS: $test/Pending " "$RUNNER_TEMP/nomad-conformance.log" >/dev/null
+          done
       - name: Fetch the wherry CLI and build the images
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/02-wherry.sh

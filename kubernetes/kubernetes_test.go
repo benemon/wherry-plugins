@@ -923,7 +923,7 @@ func TestDispatchCreatesSecretThenPod(t *testing.T) {
 	handle := dispatch(t, profile, run)
 	name := poolPrefix + "run-create"
 	base := "/api/v1/namespaces/agents/"
-	want := []string{"GET " + base + "pods/" + name, "GET " + base + "secrets/" + name, "POST " + base + "secrets", "POST " + base + "pods", "GET " + base + "pods/" + name}
+	want := []string{"GET " + base + "pods/" + name, "GET " + base + "secrets/" + name, "POST " + base + "secrets", "POST " + base + "pods"}
 	if got := paths(api.recorded(), ""); !slices.Equal(got, want) {
 		t.Fatalf("requests %v; want %v", got, want)
 	}
@@ -1012,8 +1012,8 @@ func TestDispatchConvergesOnExistingPod(t *testing.T) {
 	if err != nil || outcome != pluginsdk.OutcomeCreated || handle.Name != raced.Name {
 		t.Fatalf("dispatch racing a create = %v, %q, %v; want the existing pod", outcome, handle.Name, err)
 	}
-	if placement := samples(t, profile)["wherry_plugin_placement_seconds/"].Histogram; placement.Count != 0 {
-		t.Fatalf("placement counted %d for pods this profile did not create", placement.Count)
+	if handle.Data == nil || string(handle.Data) != string(handleOf(raced).Data) {
+		t.Fatalf("handle %s; want the raced pod's, %s", handle.Data, handleOf(raced).Data)
 	}
 }
 
@@ -1132,7 +1132,8 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 			}
 		})
 	}
-	t.Run("wait fails", func(t *testing.T) {
+	// Dispatch reads nothing after the create; a failed read of the pod is Lookup's observation error.
+	t.Run("read after the create fails", func(t *testing.T) {
 		api := newFakeAPI(t)
 		profile := api.profile(t)
 		reads := 0
@@ -1147,8 +1148,12 @@ func TestDispatchFailureOutcomes(t *testing.T) {
 				return false
 			}
 		})
-		if outcome, _, err := profile.Dispatch(context.Background(), testRun("outcome")); outcome != pluginsdk.OutcomeUnknown || err == nil {
-			t.Fatalf("outcome %v, %v; want unknown", outcome, err)
+		if outcome, _, err := profile.Dispatch(context.Background(), testRun("outcome")); outcome != pluginsdk.OutcomeCreated || err != nil {
+			t.Fatalf("outcome %v, %v; want created", outcome, err)
+		}
+		var failure *pluginsdk.Error
+		if job, err := profile.Lookup(context.Background(), "run-outcome"); !errors.As(err, &failure) || failure.Class != "unavailable" || job.State != pluginsdk.JobAbsent {
+			t.Fatalf("lookup = %+v, %v; want an observation error of class unavailable", job, err)
 		}
 	})
 }
@@ -1214,32 +1219,141 @@ func pendingKubelet(pod *corev1.Pod) {
 	setStatus(pod, corev1.PodPending, waiting("agent", "ContainerCreating", ""))
 }
 
-func TestDispatchTimeoutDeletesThePod(t *testing.T) {
+// TestDispatchTimeoutKeepsThePod: Dispatch returns once the pod is created, before its agent starts, so a short context
+// does not cut it short, and a Lookup cut short while the pod starts keeps the pod and its Secret.
+func TestDispatchTimeoutKeepsThePod(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
 	profile := api.profile(t)
 	api.set(func() { api.kubelet = pendingKubelet })
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	if outcome, _, err := profile.Dispatch(ctx, testRun("timeout")); outcome != pluginsdk.OutcomeUnknown || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("dispatch = %v, %v; want the deadline", outcome, err)
-	}
+	outcome, handle, err := profile.Dispatch(ctx, testRun("timeout"))
 	name := poolPrefix + "run-timeout"
-	if api.pod(name) != nil {
-		t.Fatal("the timed-out pod remains")
+	if err != nil || outcome != pluginsdk.OutcomeCreated || handle.Name != name || string(handle.Data) != string(handleOf(api.pod(name)).Data) {
+		t.Fatalf("dispatch = %v, %s, %v; want created with the pod's handle", outcome, handle.Data, err)
 	}
-	if api.secret(name) == nil {
-		t.Fatal("the timed-out run's Secret was deleted; Release or the sweep removes it")
+	if reads := paths(api.recorded(), http.MethodGet); len(reads) != 2 {
+		t.Fatalf("reads %v; want the pod and the Secret read once each before the create, and no wait", reads)
+	}
+	if _, err := profile.Lookup(ctx, "run-timeout"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lookup of a starting pod = %v; want the deadline", err)
+	}
+	if api.pod(name) == nil || api.secret(name) == nil {
+		t.Fatal("the cut-short run's pod or Secret was deleted")
+	}
+	if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
+		t.Fatalf("deletes %v; want none", deleted)
 	}
 }
 
-func TestDispatchReportsPlacement(t *testing.T) {
+// TestDispatchReturnsAtCreation: Dispatch returns created as soon as the pod exists, whether or not the scheduler can
+// place it, and reports no placement sample.
+func TestDispatchReturnsAtCreation(t *testing.T) {
 	api := newFakeAPI(t)
 	profile := api.profile(t)
-	dispatch(t, profile, testRun("placed"))
-	placement := samples(t, profile)["wherry_plugin_placement_seconds/"].Histogram
-	if placement.Count != 1 || len(placement.Buckets) != len(pluginsdk.PlacementBuckets) || placement.Buckets[len(placement.Buckets)-1] != 1 {
-		t.Fatalf("placement %+v; want one observation over the placement buckets", placement)
+	api.set(func() { api.kubelet = unschedulable("0/3 nodes are available: 3 Insufficient cpu.") })
+	outcome, handle, err := profile.Dispatch(context.Background(), testRun("created"))
+	if err != nil || outcome != pluginsdk.OutcomeCreated || handle.Name != poolPrefix+"run-created" {
+		t.Fatalf("dispatch = %v, %q, %v; want created", outcome, handle.Name, err)
+	}
+	requests := api.recorded()
+	if last := requests[len(requests)-1]; last.method != http.MethodPost || !strings.HasSuffix(last.path, "/pods") {
+		t.Fatalf("requests %v; want the pod's create last", requests)
+	}
+	for family := range samples(t, profile) {
+		if strings.HasPrefix(family, "wherry_plugin_placement_seconds") {
+			t.Fatalf("sample %s; want no placement family", family)
+		}
+	}
+	if job, err := profile.Lookup(context.Background(), "run-created"); err != nil || job.State != pluginsdk.JobPending || job.Handle.Name != handle.Name {
+		t.Fatalf("lookup = %+v, %v; want pending", job, err)
+	}
+}
+
+// unschedulable is a kubelet-less scheduler verdict: the pod stays Pending with PodScheduled False, reason
+// Unschedulable and message.
+func unschedulable(message string) func(*corev1.Pod) {
+	return scheduled(corev1.ConditionFalse, corev1.PodReasonUnschedulable, message)
+}
+
+// scheduled sets a Pending pod's PodScheduled condition, with no node and no container status.
+func scheduled(status corev1.ConditionStatus, reason, message string) func(*corev1.Pod) {
+	return func(pod *corev1.Pod) {
+		pod.Status.Phase = corev1.PodPending
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: status, Reason: reason, Message: message}}
+	}
+}
+
+// TestLookupReportsAnUnscheduledPodPending walks mch5's Kubernetes rows: PodScheduled False with reason Unschedulable or
+// SchedulingGated is pending with the condition's message, else its reason; any other scheduling state waits; a settled
+// pod is judged as before, a permanent waiting reason winning over pending.
+func TestLookupReportsAnUnscheduledPodPending(t *testing.T) {
+	fast(t)
+	const message = "0/3 nodes are available: 3 Insufficient cpu."
+	for _, test := range []struct {
+		name          string
+		kubelet       func(*corev1.Pod)
+		state         pluginsdk.JobState
+		class, reason string
+		wait          bool
+	}{
+		{"unschedulable", unschedulable(message), pluginsdk.JobPending, "", message, false},
+		{"unschedulable without a message", unschedulable(""), pluginsdk.JobPending, "", corev1.PodReasonUnschedulable, false},
+		{"scheduling gated", scheduled(corev1.ConditionFalse, corev1.PodReasonSchedulingGated, "Scheduling is blocked due to non-empty scheduling gates"),
+			pluginsdk.JobPending, "", "Scheduling is blocked due to non-empty scheduling gates", false},
+		{"scheduling gated without a message", scheduled(corev1.ConditionFalse, corev1.PodReasonSchedulingGated, ""), pluginsdk.JobPending, "", corev1.PodReasonSchedulingGated, false},
+		{"scheduled", scheduled(corev1.ConditionTrue, "", ""), 0, "", "", true},
+		{"no condition", func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodPending }, 0, "", "", true},
+		{"unknown", scheduled(corev1.ConditionUnknown, corev1.PodReasonUnschedulable, message), 0, "", "", true},
+		{"false with another reason", scheduled(corev1.ConditionFalse, "SchedulerError", message), 0, "", "", true},
+		{"image pull back-off beside unschedulable", func(pod *corev1.Pod) {
+			unschedulable(message)(pod)
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{waiting("agent", "ImagePullBackOff", "Back-off pulling image")}
+		}, pluginsdk.JobNeverStarted, "image", "Back-off pulling image", false},
+		{"config error beside unschedulable", func(pod *corev1.Pod) {
+			unschedulable(message)(pod)
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{waiting("agent", "CreateContainerConfigError", "secret not found")}
+		}, pluginsdk.JobNeverStarted, "config", "secret not found", false},
+		{"started beside unschedulable", func(pod *corev1.Pod) {
+			unschedulable(message)(pod)
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{runningStatus("agent")}
+		}, pluginsdk.JobRunning, "", "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			profile := api.profile(t)
+			api.set(func() { api.kubelet = test.kubelet })
+			pod := api.agentPod(t, profile, "scheduling", nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			job, err := profile.Lookup(ctx, "run-scheduling")
+			if test.wait {
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("lookup = %+v, %v; want a wait cut short", job, err)
+				}
+				return
+			}
+			if err != nil || job.State != test.state || job.Class != test.class || job.Reason != test.reason ||
+				job.Handle.Name != pod.Name || job.Attempt != 2 || job.Agent != "coder" {
+				t.Fatalf("lookup = %+v, %v; want state %v, class %q, reason %q", job, err, test.state, test.class, test.reason)
+			}
+		})
+	}
+}
+
+// TestStopDeletesAnUnscheduledPod: an unscheduled pod may yet be placed, so Stop deletes it.
+func TestStopDeletesAnUnscheduledPod(t *testing.T) {
+	fast(t)
+	api := newFakeAPI(t)
+	profile := api.profile(t)
+	api.set(func() { api.kubelet = unschedulable("0/3 nodes are available: 3 Insufficient cpu.") })
+	pod := api.agentPod(t, profile, "unscheduled", nil)
+	if err := profile.Stop(context.Background(), handleOf(pod)); err != nil {
+		t.Fatal(err)
+	}
+	if deleted := paths(api.recorded(), http.MethodDelete); len(deleted) != 1 || api.pod(pod.Name) != nil {
+		t.Fatalf("deletes %v; want the pod deleted", deleted)
 	}
 }
 
@@ -1462,20 +1576,22 @@ var capturedStates = []struct {
 	state         pluginsdk.JobState
 	settled       bool
 	class, reason string
+	// pending is Lookup's reason for a pod the scheduler cannot place; empty, an unsettled pod waits.
+	pending string
 }{
-	{"running", pluginsdk.JobRunning, true, "", ""},
-	{"exit-0", pluginsdk.JobEnded, true, "", ""},
-	{"exit-1", pluginsdk.JobEnded, true, "", "Error"},
-	{"sigterm", pluginsdk.JobEnded, true, "", "Error"},
-	{"oom", pluginsdk.JobEnded, true, "", "OOMKilled"},
-	{"image-pull-backoff", pluginsdk.JobNeverStarted, true, "image", `Back-off pulling image "registry.invalid/wherry-conformance:0": ErrImagePull: initializing source docker://registry.invalid/wherry-conformance:0: pinging container registry registry.invalid: Get "https://registry.invalid/v2/": dial tcp: lookup registry.invalid: no such host`},
-	{"create-container-config-error", pluginsdk.JobNeverStarted, true, "config", `container has runAsNonRoot and image will run as root (pod: "agent-44575cf5b285-capture-create-container-config-error_wherry-agents(6f1c0b8e)", container: agent)`},
-	{"start-error", pluginsdk.JobNeverStarted, true, "start", `failed to create containerd task: exec: "/bin/agent-run": stat /bin/agent-run: no such file or directory`},
-	{"evicted", pluginsdk.JobNeverStarted, true, "pod", "Evicted: The node was low on resource: ephemeral-storage. Threshold quantity: 4902142351, available: 3893504Ki. "},
-	{"err-image-pull", 0, false, "", ""},
-	{"unschedulable", 0, false, "", ""},
-	{"lost-node-running", pluginsdk.JobEnded, true, "", ""},
-	{"lost-node-pending", pluginsdk.JobNeverStarted, true, "pod", "the pod is being deleted"},
+	{"running", pluginsdk.JobRunning, true, "", "", ""},
+	{"exit-0", pluginsdk.JobEnded, true, "", "", ""},
+	{"exit-1", pluginsdk.JobEnded, true, "", "Error", ""},
+	{"sigterm", pluginsdk.JobEnded, true, "", "Error", ""},
+	{"oom", pluginsdk.JobEnded, true, "", "OOMKilled", ""},
+	{"image-pull-backoff", pluginsdk.JobNeverStarted, true, "image", `Back-off pulling image "registry.invalid/wherry-conformance:0": ErrImagePull: initializing source docker://registry.invalid/wherry-conformance:0: pinging container registry registry.invalid: Get "https://registry.invalid/v2/": dial tcp: lookup registry.invalid: no such host`, ""},
+	{"create-container-config-error", pluginsdk.JobNeverStarted, true, "config", `container has runAsNonRoot and image will run as root (pod: "agent-44575cf5b285-capture-create-container-config-error_wherry-agents(6f1c0b8e)", container: agent)`, ""},
+	{"start-error", pluginsdk.JobNeverStarted, true, "start", `failed to create containerd task: exec: "/bin/agent-run": stat /bin/agent-run: no such file or directory`, ""},
+	{"evicted", pluginsdk.JobNeverStarted, true, "pod", "Evicted: The node was low on resource: ephemeral-storage. Threshold quantity: 4902142351, available: 3893504Ki. ", ""},
+	{"err-image-pull", 0, false, "", "", ""},
+	{"unschedulable", 0, false, "", "", "0/6 nodes are available: 3 node(s) didn't match Pod's node affinity/selector, 3 node(s) had untolerated taint {node-role.kubernetes.io/master: }. preemption: 0/6 nodes are available: 6 Preemption is not helpful for scheduling."},
+	{"lost-node-running", pluginsdk.JobEnded, true, "", "", ""},
+	{"lost-node-pending", pluginsdk.JobNeverStarted, true, "pod", "the pod is being deleted", ""},
 }
 
 func TestLookupMapsCapturedPods(t *testing.T) {
@@ -1491,19 +1607,25 @@ func TestLookupMapsCapturedPods(t *testing.T) {
 			api.set(func() { api.kubelet = nil })
 			api.put(pod)
 			ctx, cancel := context.Background(), context.CancelFunc(func() {})
-			if !test.settled {
+			if !test.settled && test.pending == "" {
 				ctx, cancel = context.WithTimeout(ctx, 500*time.Millisecond)
 			}
 			defer cancel()
 			job, err := profile.Lookup(ctx, "capture-"+test.file)
-			if !test.settled {
+			if !test.settled && test.pending == "" {
 				if !errors.Is(err, context.DeadlineExceeded) {
-					t.Fatalf("lookup of a pending pod = %+v, %v; want the wait cut short", job, err)
+					t.Fatalf("lookup of a starting pod = %+v, %v; want the wait cut short", job, err)
 				}
 				return
 			}
-			if err != nil || job.State != test.state || job.Profile != "openshift" || job.Agent != "coder" || job.Attempt != 1 {
-				t.Fatalf("lookup = %+v, %v; want %v", job, err, test.state)
+			want := pluginsdk.Job{State: test.state, Class: test.class, Reason: test.reason}
+			if test.pending != "" {
+				want = pluginsdk.Job{State: pluginsdk.JobPending, Reason: test.pending}
+			} else if test.state != pluginsdk.JobNeverStarted {
+				want.Reason = ""
+			}
+			if err != nil || job.State != want.State || job.Class != want.Class || job.Reason != want.Reason || job.Profile != "openshift" || job.Agent != "coder" || job.Attempt != 1 {
+				t.Fatalf("lookup = %+v, %v; want %v, class %q, reason %q", job, err, want.State, want.Class, want.Reason)
 			}
 		})
 	}
@@ -1555,19 +1677,37 @@ func TestLookupWaitsForAPendingPod(t *testing.T) {
 	}
 }
 
-func TestLookupTimeoutDeletesThePod(t *testing.T) {
+// TestLookupCutShortKeepsThePod: a Lookup cut short, by its deadline or a cancel, while the pod starts returns the
+// context's error and keeps the pod, deleting nothing.
+func TestLookupCutShortKeepsThePod(t *testing.T) {
 	fast(t)
-	api := newFakeAPI(t)
-	profile := api.profile(t)
-	api.set(func() { api.kubelet = pendingKubelet })
-	pod := api.agentPod(t, profile, "stuck", nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	if _, err := profile.Lookup(ctx, "run-stuck"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("lookup = %v; want the deadline", err)
-	}
-	if api.pod(pod.Name) != nil {
-		t.Fatal("the pod of a cut-short lookup remains")
+	for name, cut := range map[string]func() (context.Context, context.CancelFunc){
+		"deadline": func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 500*time.Millisecond)
+		},
+		"cancelled": func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(300*time.Millisecond, cancel)
+			return ctx, cancel
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			profile := api.profile(t)
+			api.set(func() { api.kubelet = pendingKubelet })
+			pod := api.agentPod(t, profile, "stuck", nil)
+			ctx, cancel := cut()
+			defer cancel()
+			if _, err := profile.Lookup(ctx, "run-stuck"); err == nil || !errors.Is(err, ctx.Err()) {
+				t.Fatalf("lookup = %v; want the context's error", err)
+			}
+			if api.pod(pod.Name) == nil {
+				t.Fatal("the pod of a cut-short lookup was deleted")
+			}
+			if deleted := paths(api.recorded(), http.MethodDelete); deleted != nil {
+				t.Fatalf("deletes %v; want none", deleted)
+			}
+		})
 	}
 }
 
@@ -1592,8 +1732,8 @@ func TestRateLimitedWaitPastTheDeadlineIsTheDeadline(t *testing.T) {
 	if _, err := profile.Lookup(ctx, "run-limited"); !errors.Is(err, context.DeadlineExceeded) || errors.As(err, &failure) && failure.Class != "timeout" {
 		t.Fatalf("lookup = %v; want the deadline", err)
 	}
-	if api.pod(pod.Name) != nil {
-		t.Fatal("the pod of a lookup cut short by the rate limiter remains")
+	if api.pod(pod.Name) == nil {
+		t.Fatal("the pod of a lookup cut short by the rate limiter was deleted")
 	}
 	if samples(t, profile)["wherry_plugin_platform_errors_total/other"].Value != 0 {
 		t.Fatal("the rate limiter's refusal was counted as class other")
@@ -2952,13 +3092,36 @@ func devRun(t *testing.T, profile *Kubernetes, name string) pluginsdk.Run {
 	return run
 }
 
-// devTurn dispatches run and follows it to its end.
-func devTurn(t *testing.T, ctx context.Context, profile *Kubernetes, run pluginsdk.Run) (pluginsdk.Handle, []pluginsdk.Line, pluginsdk.Terminal) {
+// devStarted dispatches run and repeats Lookup, bounded by ctx, while the pod is pending, and returns the handle of
+// the Lookup that finds it running, ended or never started, which Follow and Collect take.
+func devStarted(t *testing.T, ctx context.Context, profile *Kubernetes, run pluginsdk.Run) pluginsdk.Handle {
 	t.Helper()
-	outcome, handle, err := profile.Dispatch(ctx, run)
+	outcome, _, err := profile.Dispatch(ctx, run)
 	if err != nil || outcome != pluginsdk.OutcomeCreated {
 		t.Fatalf("dispatch = %v, %v", outcome, err)
 	}
+	for {
+		job, err := profile.Lookup(ctx, run.ID)
+		switch {
+		case err != nil:
+			t.Fatalf("lookup: %v", err)
+		case job.State == pluginsdk.JobAbsent:
+			t.Fatal("lookup found no pod")
+		case job.State != pluginsdk.JobPending:
+			return job.Handle
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("pod still pending: %s", job.Reason)
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// devTurn dispatches run and follows it to its end.
+func devTurn(t *testing.T, ctx context.Context, profile *Kubernetes, run pluginsdk.Run) (pluginsdk.Handle, []pluginsdk.Line, pluginsdk.Terminal) {
+	t.Helper()
+	handle := devStarted(t, ctx, profile, run)
 	lines, terminal, err := followAll(t, profile, handle, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -3035,10 +3198,7 @@ func TestFetchOnKubernetes(t *testing.T) {
 // stopRunning dispatches script, waits for its first line, stops it and returns its handle.
 func stopRunning(t *testing.T, ctx context.Context, profile *Kubernetes, run pluginsdk.Run) pluginsdk.Handle {
 	t.Helper()
-	outcome, handle, err := profile.Dispatch(ctx, run)
-	if err != nil || outcome != pluginsdk.OutcomeCreated {
-		t.Fatalf("dispatch = %v, %v", outcome, err)
-	}
+	handle := devStarted(t, ctx, profile, run)
 	lines := make(chan pluginsdk.Line)
 	followCtx, cancel := context.WithCancel(ctx)
 	go func() { _, _ = profile.Follow(followCtx, handle, 0, lines) }()
@@ -3090,10 +3250,7 @@ func TestAdoptionOnKubernetes(t *testing.T) {
 	first, ctx := devProfile(t, script, nil)
 	run := devRun(t, first, "adopt")
 	run.Credentials = nil
-	outcome, handle, err := first.Dispatch(ctx, run)
-	if err != nil || outcome != pluginsdk.OutcomeCreated {
-		t.Fatalf("dispatch = %v, %v", outcome, err)
-	}
+	handle := devStarted(t, ctx, first, run)
 	lines := make(chan pluginsdk.Line)
 	followCtx, cancel := context.WithCancel(ctx)
 	go func() { _, _ = first.Follow(followCtx, handle, 0, lines) }()
@@ -3176,10 +3333,7 @@ func TestDeletingPodOnKubernetes(t *testing.T) {
 	profile, ctx := devProfile(t, `trap '' TERM; echo started; while :; do sleep 1; done`, nil)
 	run := devRun(t, profile, "deleting")
 	run.Credentials = nil
-	outcome, handle, err := profile.Dispatch(ctx, run)
-	if err != nil || outcome != pluginsdk.OutcomeCreated {
-		t.Fatalf("dispatch = %v, %v", outcome, err)
-	}
+	handle := devStarted(t, ctx, profile, run)
 	name := profile.jobName(run.ID)
 	if err := profile.pods().Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: new(int64(600))}); err != nil {
 		t.Fatal(err)

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Loads the receiver images, the checkout's and the previous release's, and the fake agent's image into kind, creates
 # the runs claim's volume and the state claim's, and deploys the receiver with the README's steps into the namespace
-# wherry, which enforces Pod Security restricted: a copy of examples/kubernetes holding the receiver's bundle and the
-# Strimzi cluster CA, with ca_file, the fsGroup patch and the image set, applied with kubectl apply -k. The state
-# volume's root is root's, so the kubelet's ownership pass gives it the fsGroup on its first mount. The receiver is then
-# restarted, and must start with its signing key still 0600. Each start must log the identity line of version e2e and
-# the checkout's protocol.
+# wherry, which enforces Pod Security restricted: a copy of examples/kubernetes holding the receiver's bundle, the
+# Strimzi cluster CA and the config.yaml, with ca_file set, that 03-provision.sh's pin gave receiver apply, with the
+# fsGroup patch and the image set, applied with kubectl apply -k. The state volume's root is root's, so the kubelet's
+# ownership pass gives it the fsGroup on its first mount. The receiver is then restarted, and must start with its
+# signing key still 0600. Each start must log the identity line of version e2e and the checkout's protocol.
 . "$(dirname "$0")/common.sh"
 kind load docker-image --name "$cluster" wherry-receiver:e2e wherry-receiver:previous wherry-e2e-agent:e2e
 
@@ -13,13 +13,14 @@ kind load docker-image --name "$cluster" wherry-receiver:e2e wherry-receiver:pre
 docker exec "$cluster-control-plane" install -d -o 1001 -g 0 -m 0700 /var/lib/wherry-runs
 docker exec "$cluster-control-plane" install -d -o 0 -g 0 -m 0755 /var/lib/wherry-state
 kubectl apply -f "$e2e/runs.yaml" -f "$e2e/state.yaml"
-kubectl create namespace "$namespace"
-kubectl label namespace "$namespace" pod-security.kubernetes.io/enforce=restricted
+# The conformance step may have made the namespace already.
+kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
+kubectl label --overwrite namespace "$namespace" pod-security.kubernetes.io/enforce=restricted
 
 cp -R "$repo/examples/kubernetes" "$deploy"
+cp "$work/receiver/config.yaml" "$deploy/config.yaml"
 cp "$operator/bundles/receivers/kind-1.bundle" "$deploy/receiver.bundle"
 cp "$work/ca.crt" "$deploy/kafka-ca.crt"
-sed -i 's|^# ca_file: |ca_file: |' "$deploy/config.yaml"
 sed -i -e 's|newName: registry.example.com/wherry-receiver, newTag: <version>}|newName: wherry-receiver, newTag: e2e}|' \
 	-e 's|^  # - {name: wherry-receiver-kafka-ca,|  - {name: wherry-receiver-kafka-ca,|' \
 	-e 's|^  # - path: fsgroup.yaml$|  - path: fsgroup.yaml|' "$deploy/kustomization.yaml"

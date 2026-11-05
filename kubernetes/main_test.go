@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -248,13 +249,17 @@ func TestFactoryNamespaceFromServiceAccount(t *testing.T) {
 	}
 }
 
-func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings) {
+func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings, pluginsdk.Settings) {
 	t.Helper()
 	dev := devConfig(t)
 	completes := settings(t, "completes", podConfig(dev.Address, dev.CAFile, dev.RunsDir, "registry.access.redhat.com/ubi9/ubi-minimal",
 		"/bin/sh", "-c", `sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`))
 	neverStarts := settings(t, "never-starts", podConfig(dev.Address, dev.CAFile, dev.RunsDir, "registry.invalid/wherry-conformance:0"))
-	for _, s := range []*pluginsdk.Settings{&completes, &neverStarts} {
+	// No node has a thousand CPUs, so the scheduler marks the pod Unschedulable and says why.
+	unplaceable := podConfig(dev.Address, dev.CAFile, dev.RunsDir, "registry.access.redhat.com/ubi9/ubi-minimal", "/bin/true")
+	unplaceable["runtime"].(map[string]any)["resources"] = map[string]any{"cpu": "1000"}
+	pending := settings(t, "pending", unplaceable)
+	for _, s := range []*pluginsdk.Settings{&completes, &neverStarts, &pending} {
 		var config map[string]any
 		_ = json.Unmarshal(s.Config, &config)
 		config["namespace"], config["runs_claim"] = dev.Namespace, dev.RunsClaim
@@ -264,29 +269,34 @@ func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings) 
 		s.Config, _ = json.Marshal(config)
 		s.Credential = devToken(t)
 	}
-	return completes, neverStarts
+	return completes, neverStarts, pending
 }
 
 func TestConformance(t *testing.T) {
-	completes, neverStarts := conformanceSettings(t)
-	pluginsdktest.Run(t, newProfile, completes, neverStarts, inlineLimit)
+	completes, neverStarts, pending := conformanceSettings(t)
+	pluginsdktest.Run(t, newProfile, completes, neverStarts, pending, inlineLimit)
 }
 
 // TestConformanceOverTheLink runs the suite against the built plugin, through the receiver's side of the link.
 func TestConformanceOverTheLink(t *testing.T) {
-	completes, neverStarts := conformanceSettings(t)
+	completes, neverStarts, pending := conformanceSettings(t)
 	binary := filepath.Join(t.TempDir(), "wherry-plugin-kubernetes")
 	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, output)
 	}
-	plugin, err := pluginsdk.Launch(func() (string, error) { return binary, nil }, io.Discard)
+	content, err := os.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checksum := sha256.Sum256(content)
+	plugin, err := pluginsdk.Launch("kubernetes", func() (string, error) { return binary, nil }, checksum[:], io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer plugin.Close()
 	pluginsdktest.Run(t, func(settings pluginsdk.Settings, _ hclog.Logger) (pluginsdk.Plugin, error) {
 		return plugin.Configure(settings)
-	}, completes, neverStarts, inlineLimit)
+	}, completes, neverStarts, pending, inlineLimit)
 }
 
 // admitted wraps a plugin profile and records, for each pod it dispatches, whether the pod was admitted as restricted.
@@ -356,7 +366,7 @@ func TestRestrictedByPlatform(t *testing.T) {
 }
 
 func TestRoleSuffices(t *testing.T) {
-	completes, neverStarts := conformanceSettings(t)
+	completes, neverStarts, pending := conformanceSettings(t)
 	checks := make(chan error, 64)
 	pluginsdktest.Run(t, func(settings pluginsdk.Settings, logger hclog.Logger) (pluginsdk.Plugin, error) {
 		built, err := newProfile(settings, logger)
@@ -364,7 +374,7 @@ func TestRoleSuffices(t *testing.T) {
 			return nil, err
 		}
 		return admitted{Plugin: built, t: t, checks: checks}, nil
-	}, completes, neverStarts, inlineLimit)
+	}, completes, neverStarts, pending, inlineLimit)
 	close(checks)
 	count := 0
 	for err := range checks {
