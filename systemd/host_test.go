@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -125,7 +126,8 @@ func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings) 
 
 func TestConformance(t *testing.T) {
 	completes, neverStarts := conformanceSettings(t)
-	pluginsdktest.Run(t, newProfile, completes, neverStarts, 0)
+	// systemd never reports pending, so the suite's pending profile is skipped.
+	pluginsdktest.Run(t, newProfile, completes, neverStarts, pluginsdk.Settings{}, 0)
 }
 
 // TestConformanceOverTheLink runs the suite against the plugin binary WHERRY_SYSTEMD_PLUGIN names, through the
@@ -136,14 +138,19 @@ func TestConformanceOverTheLink(t *testing.T) {
 	if binary == "" {
 		t.Fatal("WHERRY_SYSTEMD_PLUGIN names no plugin binary")
 	}
-	plugin, err := pluginsdk.Launch(func() (string, error) { return binary, nil }, io.Discard)
+	content, err := os.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checksum := sha256.Sum256(content)
+	plugin, err := pluginsdk.Launch("systemd", func() (string, error) { return binary, nil }, checksum[:], io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer plugin.Close()
 	pluginsdktest.Run(t, func(settings pluginsdk.Settings, _ hclog.Logger) (pluginsdk.Plugin, error) {
 		return plugin.Configure(settings)
-	}, completes, neverStarts, 0)
+	}, completes, neverStarts, pluginsdk.Settings{}, 0)
 }
 
 // TestReceiverBoundingSetOnSystemd runs the conformance suite in a process whose bounding set is the receiver unit's.

@@ -607,9 +607,10 @@ func deliverable(run pluginsdk.Run) error {
 	return nil
 }
 
-// Dispatch starts a run's unit idempotently and returns once its agent has started or its unit has ended.
+// Dispatch starts a run's unit idempotently and returns once start has, with the handle of the unit and the instance
+// its marker records; a dispatch that finds the run's unit or marker already there returns that handle at once. A unit
+// still activating is Lookup's to wait on.
 func (profile *Systemd) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
-	began := time.Now()
 	if err := deliverable(run); err != nil {
 		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, err
 	}
@@ -627,21 +628,24 @@ func (profile *Systemd) Dispatch(ctx context.Context, run pluginsdk.Run) (plugin
 	if profile.foreign(m, u) {
 		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, errNotAgent
 	}
-	started := false
 	if !u.loaded && (m == nil || m.Phase == phasePrepared && m.NeverStarted == nil) {
-		var outcome pluginsdk.Outcome
-		if started, outcome, err = profile.start(ctx, run, job); err != nil {
+		if _, outcome, err := profile.start(ctx, run, job); err != nil {
 			return outcome, pluginsdk.Handle{}, err
 		}
+		if m, err = readMarker(job); err != nil {
+			return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, profile.failed("read "+markerPath(job), err)
+		}
 	}
-	handle, _, err := profile.wait(ctx, job)
-	if err != nil {
-		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, err
+	if m == nil {
+		return pluginsdk.OutcomeUnknown, pluginsdk.Handle{}, errors.New("the run's marker is missing after its start")
 	}
-	if started {
-		profile.metrics.Placed(time.Since(began).Seconds())
-	}
-	return pluginsdk.OutcomeCreated, handle, nil
+	return pluginsdk.OutcomeCreated, unitHandle(job, m), nil
+}
+
+// unitHandle encodes the version 1 handle of the run's unit and the instance its marker m records.
+func unitHandle(job string, m *marker) pluginsdk.Handle {
+	data, _ := json.Marshal(handle{V: 1, Unit: unitName(job), Instance: m.Instance}) // strings always encode
+	return pluginsdk.Handle{Data: data, Name: unitName(job)}
 }
 
 // foreign reports whether a run's marker or unit is not this pool's agent unit.
@@ -1056,71 +1060,43 @@ func emptyFile(name string) bool {
 	return err != nil || info.Size() == 0
 }
 
-// wait returns once the run's unit is not activating; a wait cut short stops the unit and removes the marker.
-func (profile *Systemd) wait(ctx context.Context, job string) (pluginsdk.Handle, pluginsdk.JobState, error) {
-	m, err := readMarker(job)
-	if err != nil {
-		return pluginsdk.Handle{}, 0, profile.failed("read "+markerPath(job), err)
-	}
-	name := unitName(job)
+// Lookup finds a run's existing job in one observation: running, ended or never started as judge reads its marker
+// and unit, never started carrying judge's class and reason. systemd never reports pending: a unit still activating
+// waits until judge settles it, rereading both each pass; a Lookup cut short returns ctx's error and stops nothing.
+func (profile *Systemd) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
+	job := profile.jobName(runID)
 	for {
-		u, err := profile.unit(ctx, name)
+		m, err := readMarker(job)
 		if err != nil {
-			if ctx.Err() != nil {
-				return pluginsdk.Handle{}, 0, profile.stopTimedOut(ctx, job)
-			}
-			return pluginsdk.Handle{}, 0, err
+			return pluginsdk.Job{}, profile.failed("read "+markerPath(job), err)
 		}
-		if state, _, settled := profile.judge(job, m, u); settled {
+		u, err := profile.unit(ctx, unitName(job))
+		switch {
+		case ctx.Err() != nil:
+			return pluginsdk.Job{}, ctx.Err()
+		case err != nil:
+			return pluginsdk.Job{}, err
+		case profile.foreign(m, u):
+			return pluginsdk.Job{}, errNotAgent
+		case m == nil:
+			return pluginsdk.Job{}, nil
+		}
+		if state, terminal, settled := profile.judge(job, m, u); settled {
 			if state == pluginsdk.JobAbsent {
-				return pluginsdk.Handle{}, state, nil
+				return pluginsdk.Job{}, nil
 			}
-			data, _ := json.Marshal(handle{V: 1, Unit: name, Instance: m.Instance}) // strings always encode
-			return pluginsdk.Handle{Data: data, Name: name}, state, nil
+			found := pluginsdk.Job{State: state, Handle: unitHandle(job, m), Attempt: m.Attempt, Profile: m.Profile, Agent: m.Agent}
+			if state == pluginsdk.JobNeverStarted {
+				found.Class, found.Reason = terminal.Class, terminal.Reason
+			}
+			return found, nil
 		}
 		select {
 		case <-ctx.Done():
-			return pluginsdk.Handle{}, 0, profile.stopTimedOut(ctx, job)
+			return pluginsdk.Job{}, ctx.Err()
 		case <-time.After(waitPoll):
 		}
 	}
-}
-
-func (profile *Systemd) stopTimedOut(ctx context.Context, job string) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWait)
-	defer cancel()
-	err := profile.halt(cleanupCtx, unitName(job))
-	if removeErr := os.Remove(markerPath(job)); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-		err = errors.Join(err, profile.failed("remove "+markerPath(job), removeErr))
-	}
-	if err != nil {
-		return errors.Join(ctx.Err(), fmt.Errorf("stop timed-out unit: %w", err))
-	}
-	return ctx.Err()
-}
-
-// Lookup finds a run's existing job and waits for it as Dispatch does.
-func (profile *Systemd) Lookup(ctx context.Context, runID string) (pluginsdk.Job, error) {
-	job := profile.jobName(runID)
-	m, err := readMarker(job)
-	if err != nil {
-		return pluginsdk.Job{}, profile.failed("read "+markerPath(job), err)
-	}
-	u, err := profile.unit(ctx, unitName(job))
-	if err != nil {
-		return pluginsdk.Job{}, err
-	}
-	if profile.foreign(m, u) {
-		return pluginsdk.Job{}, errNotAgent
-	}
-	if m == nil {
-		return pluginsdk.Job{}, nil
-	}
-	handle, state, err := profile.wait(ctx, job)
-	if err != nil || state == pluginsdk.JobAbsent {
-		return pluginsdk.Job{}, err
-	}
-	return pluginsdk.Job{State: state, Handle: handle, Attempt: m.Attempt, Profile: m.Profile, Agent: m.Agent}, nil
 }
 
 // current decodes a handle and reads its run's marker, refusing one a later Dispatch replaced; an absent marker is nil.

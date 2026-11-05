@@ -140,6 +140,7 @@ name: host
 agent: claude
 labels:
   platform: systemd
+  host: <name>
 config:
   runtime:
     command: [/bin/sh, -c]
@@ -152,6 +153,9 @@ config:
       DISABLE_AUTOUPDATER: "1"
     resources: {cpu_quota: 100, memory_mb: 2048}
 ```
+
+Two receivers meant to share a queue carry identical labels for the profile;
+one differing label is a different signature.
 
 `DISABLE_AUTOUPDATER` keeps Claude Code from trying to update itself on
 the read-only root. Claude Code runs its shell tool through `$SHELL`.
@@ -223,6 +227,14 @@ directories:
 | `/var/lib/wherry-agents/<job>` | root | systemd's symlink to the work directory; with `runtime.user`, the work directory itself, owned by the user |
 | `/run/wherry-systemd/<unit>/` | root, 0700; files 0600 | the run's credential files from Dispatch to the end of the unit's start |
 | `/run/credentials/<unit>/` | systemd | the unit's credential store, until the unit stops |
+
+Dispatch returns once the unit's start job has, with a handle naming the
+unit and the marker's instance; a dispatch that finds the run's unit or
+marker already there returns that handle at once. Lookup reads the marker
+and the unit: running, ended or never started, never started with its class
+and reason. systemd never reports a run pending: a unit still `activating`
+is waited on, polling every 2 seconds, until it settles or the receiver
+cancels the Lookup, which stops nothing.
 
 The marker records the run's pool, plugin profile, agent, attempt and a random
 instance per dispatch, the phase (`prepared`, `starting`, `started`), and
@@ -430,14 +442,13 @@ fetch that fails or does not verify ends the run never started with class
 `fetch`, which the receiver ends `TASK_STATE_FAILED`, and the plugin logs
 `input not fetched` with the status code or failure class. The presigned
 URL never reaches a file, a unit property, a log line or an error, and
-agents need no route to the storage endpoint. The placement metric
-includes the fetch time.
+agents need no route to the storage endpoint.
 
 ### Agent environment
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
 over the runtime's `env` and removes those of
-[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.8.0-rc.2/pluginsdk/pluginsdk.go#L249)
+[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.9.0-rc.1/pluginsdk/pluginsdk.go#L264)
 from it, so no system, global or environment `git` configuration reaches
 the agent's clones. CA and proxy variables pass through as the operator
 sets them. A command the agent runs can set the variables again.
@@ -449,17 +460,19 @@ the host. Keep material out of `runtime.env`.
 
 ## Metrics
 
-The plugin speaks plugin protocol version 10, and a receiver of another
-protocol version refuses it, so upgrade it with the receiver. For each
-plugin profile it reports these families, which the receiver serves on its
-`/metrics` with the plugin profile's name as `profile`:
+The plugin speaks plugin protocol version 11, in which Dispatch returns
+once the unit's start job has. A receiver of another protocol version
+refuses it, so the receiver and its plugins upgrade together: protocol 11
+needs wherry v0.1.0-rc.29 or later. The receiver times placement itself.
+For each plugin profile the plugin reports these families, which the
+receiver serves on its `/metrics` with the plugin profile's name as
+`profile`:
 
 | Family | Type | Labels | Counts |
 | --- | --- | --- | --- |
 | `wherry_plugin_platform_errors_total` | counter | `class` | failed systemd and filesystem calls |
 | `wherry_plugin_cleanup_pending` | gauge | none | the plugin profile's ended runs the latest sweep left |
 | `wherry_plugin_sweep_deletions_total` | counter | `kind` | the plugin profile's runs a sweep purged (`job`) and stale material of a Dispatch cut short it removed (`variable`) |
-| `wherry_plugin_placement_seconds` | histogram | none | time from a Dispatch that starts the unit to its start job's end, fetches included |
 
 A D-Bus call's class comes from its error name: `AccessDenied` and
 `InteractiveAuthorizationRequired` are `denied`; `UnitExists`,
@@ -508,12 +521,12 @@ addresses only, or an `nftables` rule matching the dynamic UID range,
 Start with your operator working directory, pool and entitled tenant ready.
 Use a Linux host with systemd 252 or later and unified cgroup v2.
 Run the receiver as root.
-Give each systemd receiver a pool of its own so a restarted receiver adopts runs on the same host.
+Give each systemd receiver a `host` label of its own, so only the receiver restarted on that host serves its signature and adopts its runs.
 Clone `https://github.com/benemon/wherry-plugins` and check out the plugin's tag `systemd/<version>`, such as `systemd/v0.1.0-rc.7`.
 Run host installation commands as root from that checkout.
 
 1. In an empty directory, download `wherry_<wherry version>_linux_<arch>.tar.gz`, `checksums.txt` and `checksums.txt.sigstore.json` from `https://github.com/benemon/wherry/releases/tag/<wherry version>`.
-   `<wherry version>` carries its `v`, such as `v0.1.0-rc.28`.
+   `<wherry version>` carries its `v`, such as `v0.1.0-rc.29`.
    `<arch>` is `amd64` or `arm64`.
    Verify the signature of `checksums.txt` with the [cosign command](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image).
    Check the archive against the checksums and extract `wherry`:
@@ -563,6 +576,8 @@ Run host installation commands as root from that checkout.
        profiles:
          - name: host
            agent: claude
+           labels:
+             host: <name>
            config:
              runtime:
                command: [/bin/sh, -c]

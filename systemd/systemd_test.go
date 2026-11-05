@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1493,8 +1494,8 @@ func TestDispatchRecordsAFailedStart(t *testing.T) {
 	if m := readMarkerOf(t, run); m.NeverStarted == nil || *m.NeverStarted != (neverStarted{"exec", "systemd exit status 203/EXEC"}) {
 		t.Fatalf("marker %+v; want never started, exec", m)
 	}
-	if job, err := profile.Lookup(context.Background(), run.ID); err != nil || job.State != pluginsdk.JobNeverStarted {
-		t.Fatalf("lookup %+v, %v; want never started", job, err)
+	if job, err := profile.Lookup(context.Background(), run.ID); err != nil || job.State != pluginsdk.JobNeverStarted || job.Class != "exec" || job.Reason != "systemd exit status 203/EXEC" {
+		t.Fatalf("lookup %+v, %v; want never started, class exec, with the exit status as its reason", job, err)
 	}
 }
 
@@ -1509,6 +1510,8 @@ func TestDispatchRecordsAStartJobResult(t *testing.T) {
 	}
 }
 
+// Dispatch returns once start has, so a unit that hangs activating does not cut it short, and a Lookup cut short on it
+// stops nothing and keeps the marker.
 func TestDispatchTimeoutStopsTheUnit(t *testing.T) {
 	f := newHost(t)
 	profile := newAgent(t, agentConfig("sleep 30"))
@@ -1516,35 +1519,123 @@ func TestDispatchTimeoutStopsTheUnit(t *testing.T) {
 	run := testRun("hung")
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if _, _, err := profile.Dispatch(ctx, run); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("got %v; want the deadline", err)
+	if outcome, _, err := profile.Dispatch(ctx, run); err != nil || outcome != pluginsdk.OutcomeCreated {
+		t.Fatalf("dispatch = %d, %v; want created", outcome, err)
 	}
-	if f.unit(unitOf(run)).LoadState == "loaded" || len(f.recorded("stop")) != 1 {
-		t.Fatalf("unit %+v, stops %v; want the unit stopped", f.unit(unitOf(run)), f.recorded("stop"))
+	if _, err := profile.Lookup(ctx, run.ID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lookup = %v; want the deadline", err)
 	}
-	if exists(markerPath(jobOf(run))) {
-		t.Fatal("the marker survived")
+	if f.unit(unitOf(run)).LoadState != "loaded" || len(f.recorded("stop")) != 0 {
+		t.Fatalf("unit %+v, stops %v; want the unit left", f.unit(unitOf(run)), f.recorded("stop"))
+	}
+	if !exists(markerPath(jobOf(run))) {
+		t.Fatal("the marker was removed")
 	}
 }
 
-func TestDispatchReportsPlacement(t *testing.T) {
-	newHost(t)
+// TestDispatchReturnsBeforeTheUnitActivates: Dispatch of a new run returns once start has, and a second Dispatch of the
+// run finds its unit and returns at once, each with the unit and instance handle; Lookup then waits on the activating
+// unit until it runs. systemd never reports pending, and no placement sample is reported.
+func TestDispatchReturnsBeforeTheUnitActivates(t *testing.T) {
+	f := newHost(t)
 	profile := newAgent(t, agentConfig("sleep 30"))
-	run := testRun("placed")
-	dispatch(t, profile, run)
-	dispatch(t, profile, run)
-	dispatch(t, newAgentLike(t, profile, missingCommand()), testRun("unplaced"))
-	if got := samples(profile)["wherry_plugin_placement_seconds"].Histogram.Count; got != 1 {
-		t.Fatalf("placements %d; want 1, the started unit's", got)
+	f.set(func() { f.activating = true })
+	run := testRun("activates")
+	for _, which := range []string{"new", "existing"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		outcome, handle, err := profile.Dispatch(ctx, run)
+		cancel()
+		if err != nil || outcome != pluginsdk.OutcomeCreated || !bytes.Equal(handle.Data, handleFor(unitOf(run), readMarkerOf(t, run).Instance).Data) {
+			t.Fatalf("%s dispatch = %d, %s, %v; want created with the unit and the marker's instance", which, outcome, handle.Data, err)
+		}
+		if active := f.unit(unitOf(run)).ActiveState; active != "activating" {
+			t.Fatalf("%s dispatch returned with the unit %s; want activating", which, active)
+		}
+	}
+	if starts := f.recorded("start"); len(starts) != 1 {
+		t.Fatalf("starts %v; want one", starts)
+	}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		f.edit(unitOf(run), func(c *captured) { *c = capturedUnitState("running") })
+	}()
+	began := time.Now()
+	job, err := profile.Lookup(context.Background(), run.ID)
+	if err != nil || job.State != pluginsdk.JobRunning || time.Since(began) < 100*time.Millisecond {
+		t.Fatalf("lookup %+v, %v after %v; want running once activated", job, err, time.Since(began))
+	}
+	for family := range samples(profile) {
+		if strings.HasPrefix(family, "wherry_plugin_placement_seconds") {
+			t.Fatalf("sample %s; want no placement family", family)
+		}
 	}
 }
 
-// newAgentLike builds a plugin profile of config sharing profile's metrics.
-func newAgentLike(t *testing.T, profile *Systemd, config Config) *Systemd {
-	t.Helper()
-	other := newAgent(t, config)
-	other.metrics = profile.metrics
-	return other
+// blockingReads answers a unit read with the fake manager's until block is set, then blocks it until its context ends.
+type blockingReads struct {
+	*fakeManager
+	block atomic.Bool
+}
+
+func (b *blockingReads) GetUnitPropertiesContext(ctx context.Context, name string) (map[string]any, error) {
+	if b.block.Load() {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return b.fakeManager.GetUnitPropertiesContext(ctx, name)
+}
+
+// TestInterruptedUnitReadKeepsTheUnit: a Lookup whose unit read is interrupted by its context returns the context's
+// error and stops and removes nothing.
+func TestInterruptedUnitReadKeepsTheUnit(t *testing.T) {
+	f := newHost(t)
+	profile := newAgent(t, agentConfig("exit 0"))
+	reads := &blockingReads{fakeManager: f}
+	profile.conn = reads
+	run := testRun("interrupted")
+	putMarker(t, run, phaseStarting, nil)
+	f.put(unitOf(run), capturedUnit(t, "activating"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(50*time.Millisecond, func() { reads.block.Store(true) })
+	time.AfterFunc(150*time.Millisecond, cancel)
+	if job, err := profile.Lookup(ctx, run.ID); !errors.Is(err, context.Canceled) || job.State != pluginsdk.JobAbsent {
+		t.Fatalf("lookup = %+v, %v; want the context's error", job, err)
+	}
+	if f.unit(unitOf(run)).LoadState != "loaded" || len(f.recorded("stop", "kill")) != 0 || !exists(markerPath(jobOf(run))) {
+		t.Fatalf("unit %+v, stops %v, marker kept %t; want the unit and its marker left", f.unit(unitOf(run)), f.recorded("stop", "kill"), exists(markerPath(jobOf(run))))
+	}
+}
+
+// TestCancelledLookupKeepsAnActivatingUnit: a Lookup cut short while the unit activates, by a cancel or its deadline,
+// returns the context's error and stops nothing.
+func TestCancelledLookupKeepsAnActivatingUnit(t *testing.T) {
+	for name, cut := range map[string]func() (context.Context, context.CancelFunc){
+		"cancelled": func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(100*time.Millisecond, cancel)
+			return ctx, cancel
+		},
+		"deadline": func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 100*time.Millisecond)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newHost(t)
+			profile := newAgent(t, agentConfig("exit 0"))
+			run := testRun("activating")
+			putMarker(t, run, phaseStarting, nil)
+			f.put(unitOf(run), capturedUnit(t, "activating"))
+			ctx, cancel := cut()
+			defer cancel()
+			if job, err := profile.Lookup(ctx, run.ID); err == nil || !errors.Is(err, ctx.Err()) || job.State != pluginsdk.JobAbsent {
+				t.Fatalf("lookup = %+v, %v; want the context's error", job, err)
+			}
+			if f.unit(unitOf(run)).LoadState != "loaded" || len(f.recorded("stop", "kill")) != 0 || !exists(markerPath(jobOf(run))) {
+				t.Fatalf("unit %+v, stops %v, marker kept %t; want the unit and its marker left", f.unit(unitOf(run)), f.recorded("stop", "kill"), exists(markerPath(jobOf(run))))
+			}
+		})
+	}
 }
 
 func sha(data []byte) string {
