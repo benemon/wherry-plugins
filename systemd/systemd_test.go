@@ -1510,9 +1510,9 @@ func TestDispatchRecordsAStartJobResult(t *testing.T) {
 	}
 }
 
-// Dispatch returns once start has, so a unit that hangs activating does not cut it short, and a Lookup cut short on it
-// stops nothing and keeps the marker.
-func TestDispatchTimeoutStopsTheUnit(t *testing.T) {
+// TestDispatchTimeoutKeepsTheUnit: Dispatch returns once start has, so a unit that hangs activating does not cut it
+// short, and a Lookup cut short on it keeps the unit loaded, stops nothing and keeps the marker.
+func TestDispatchTimeoutKeepsTheUnit(t *testing.T) {
 	f := newHost(t)
 	profile := newAgent(t, agentConfig("sleep 30"))
 	f.set(func() { f.activating = true })

@@ -1219,9 +1219,9 @@ func pendingKubelet(pod *corev1.Pod) {
 	setStatus(pod, corev1.PodPending, waiting("agent", "ContainerCreating", ""))
 }
 
-// Dispatch returns once the pod is created, before its agent starts, so a short context does not cut it short, and a
-// Lookup cut short while the pod starts removes nothing.
-func TestDispatchTimeoutDeletesThePod(t *testing.T) {
+// TestDispatchTimeoutKeepsThePod: Dispatch returns once the pod is created, before its agent starts, so a short context
+// does not cut it short, and a Lookup cut short while the pod starts keeps the pod and its Secret.
+func TestDispatchTimeoutKeepsThePod(t *testing.T) {
 	fast(t)
 	api := newFakeAPI(t)
 	profile := api.profile(t)
@@ -1677,8 +1677,9 @@ func TestLookupWaitsForAPendingPod(t *testing.T) {
 	}
 }
 
-// A Lookup cut short, by its deadline or a cancel, while the pod starts returns the context's error and deletes nothing.
-func TestLookupTimeoutDeletesThePod(t *testing.T) {
+// TestLookupCutShortKeepsThePod: a Lookup cut short, by its deadline or a cancel, while the pod starts returns the
+// context's error and keeps the pod, deleting nothing.
+func TestLookupCutShortKeepsThePod(t *testing.T) {
 	fast(t)
 	for name, cut := range map[string]func() (context.Context, context.CancelFunc){
 		"deadline": func() (context.Context, context.CancelFunc) {

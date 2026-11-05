@@ -563,7 +563,9 @@ func TestLookupMissingRun(t *testing.T) {
 	}
 }
 
-func TestLookupWaitsForUnplacedJob(t *testing.T) {
+// TestLookupReportsUnplacedJobPending: on dev Nomad, a job no node can take is pending with the scheduler's reason once
+// Nomad has evaluated it; Stop with the pending handle leaves it never started, class stopped, and Purge removes it.
+func TestLookupReportsUnplacedJobPending(t *testing.T) {
 	profile, ctx := devProfile(t)
 	run := testRun("lookup-unplaced")
 	profile.datacenters = []string{"wherry-no-such-datacenter"}
@@ -799,8 +801,9 @@ func TestStopAfterPurgeSucceeds(t *testing.T) {
 	}
 }
 
-// Dispatch returns at registration, so a short context does not cut it short: the unplaceable job stays registered.
-func TestDispatchTimeoutDeregisters(t *testing.T) {
+// TestDispatchTimeoutKeepsTheJob: Dispatch returns at registration, so a short context does not cut it short, and the
+// unplaceable job stays registered and unstopped, after a cancelled Lookup too.
+func TestDispatchTimeoutKeepsTheJob(t *testing.T) {
 	profile, ctx := devProfile(t)
 	run := testRun("dispatch-timeout")
 	profile.datacenters = []string{"wherry-no-such-datacenter"}
@@ -824,9 +827,10 @@ func TestDispatchTimeoutDeregisters(t *testing.T) {
 	}
 }
 
-// A Lookup cut short while it waits on a placed allocation whose task is starting, or while a read is in flight,
-// returns the context's error and removes nothing: no request but reads.
-func TestDeregisterTimedOutPurgesJob(t *testing.T) {
+// TestCancelledLookupOnlyReadsTheJob: a Lookup cut short, by a cancel or its deadline, while it waits on a placed
+// allocation whose task is starting, or while a read is in flight, returns the context's error and removes nothing: no
+// request but reads.
+func TestCancelledLookupOnlyReadsTheJob(t *testing.T) {
 	const id = poolPrefix + "capture-clean"
 	starting := edited(t, "clean.allocations.json", func(alloc *api.AllocationListStub) {
 		alloc.ClientStatus = api.AllocClientStatusPending
