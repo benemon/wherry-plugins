@@ -525,7 +525,7 @@ Clone `https://github.com/benemon/wherry-plugins` and check out the plugin's tag
 Run host installation commands as root from that checkout.
 
 1. In an empty directory, download `wherry_<wherry version>_linux_<arch>.tar.gz`, `checksums.txt` and `checksums.txt.sigstore.json` from `https://github.com/benemon/wherry/releases/tag/<wherry version>`.
-   `<wherry version>` carries its `v`, such as `v0.1.0-rc.29`.
+   `<wherry version>` carries its `v`, such as `v0.1.0-rc.31`.
    `<arch>` is `amd64` or `arm64`.
    Verify the signature of `checksums.txt` with the [cosign command](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image).
    Check the archive against the checksums and extract `wherry`:
