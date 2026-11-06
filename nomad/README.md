@@ -498,7 +498,7 @@ system, global or environment `git` configuration reaches the agent's
 clones. It removes them from the runtime's `env` only. A `raw_exec` task
 also inherits the Nomad client's environment, a container keeps its
 image's `ENV`, and Nomad offers no way to unset either. Add the variables
-of [`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.9.0-rc.1/pluginsdk/pluginsdk.go#L264)
+of [`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.9.0/pluginsdk/pluginsdk.go#L264)
 to the client's `env.denylist`, and keep them out of agent images. CA and
 proxy variables pass through as the operator sets them. A command the
 agent runs can set the variables again.
@@ -510,7 +510,7 @@ registration and Lookup reports a job Nomad has not placed as pending. A
 receiver of another protocol version refuses it at its start, as
 [Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
 the receiver and its plugins upgrade together: protocol 11 needs wherry
-v0.1.0-rc.29 or later. The receiver times placement itself. For each plugin
+v0.1.0 or later. The receiver times placement itself. For each plugin
 profile the plugin reports these families, which the receiver serves on its
 `/metrics` with the plugin profile's name as `profile`:
 
@@ -586,7 +586,7 @@ Start with your [operator working directory](https://benemon.github.io/wherry/op
 Run one receiver job with count 1 per receiver identity.
 Use the container under the docker driver as the primary deployment.
 Follow the [Nomad job documentation](https://developer.hashicorp.com/nomad/docs/job-specification) for platform settings.
-Clone `https://github.com/benemon/wherry-plugins` and check out the plugin's tag `nomad/<version>`, such as `nomad/v0.1.0-rc.18`.
+Clone `https://github.com/benemon/wherry-plugins` and check out the plugin's tag `nomad/<version>`, such as `nomad/v0.1.0`.
 Run these steps from that checkout unless a step names your operator working directory.
 
 1. Build the receiver image from the checkout and push it to a registry your clients can pull from:
@@ -597,9 +597,9 @@ Run these steps from that checkout unless a step names your operator working dir
    docker push registry.example.com/wherry-receiver:<image tag>
    ```
 
-   `<plugin version>` is the version of the tag you checked out, such as `v0.1.0-rc.18`.
-   `<wherry version>` is the wherry release the image holds, such as `v0.1.0-rc.31`.
-   `<image tag>` is the tag you give the image in your registry, such as `v0.1.0-rc.18`.
+   `<plugin version>` is the version of the tag you checked out, such as `v0.1.0`.
+   `<wherry version>` is the wherry release the image holds, such as `v0.1.0`.
+   `<image tag>` is the tag you give the image in your registry, such as `v0.1.0`.
    The [Containerfile](https://github.com/benemon/wherry-plugins/blob/main/examples/nomad/Containerfile) builds the plugin and verifies the downloaded wherry release.
    It runs as UID 1001 with group 0.
    The [receiver job reference](https://github.com/benemon/wherry-plugins/blob/main/nomad/README.md#receiver-job) describes the image and the job.
@@ -708,7 +708,7 @@ Run these steps from that checkout unless a step names your operator working dir
 ### The exec driver (example only)
 
 1. In an empty directory, download `wherry_<wherry version>_linux_<arch>.tar.gz`, `checksums.txt` and `checksums.txt.sigstore.json` from `https://github.com/benemon/wherry/releases/tag/<wherry version>`.
-   `<wherry version>` carries its `v`, such as `v0.1.0-rc.31`.
+   `<wherry version>` carries its `v`, such as `v0.1.0`.
    `<arch>` is `amd64` or `arm64`.
    Verify the signature of `checksums.txt` with the [cosign command](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image).
    Check the archive against the checksums and extract `wherry`:
