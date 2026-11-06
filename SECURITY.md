@@ -1,21 +1,22 @@
 # Security policy
 
-## Supported versions
-
-Security fixes go into the latest release of each plugin: `nomad`,
-`kubernetes` and `systemd` v0.1.x. Release candidates and older releases
-receive none.
+This is an independent community project, maintained on a best-effort basis.
+There is no commercial support and no guaranteed response time, but security
+reports are taken seriously and handled as promptly as circumstances allow.
 
 ## Reporting a vulnerability
 
-Report a vulnerability privately through
-[GitHub private vulnerability reporting](https://github.com/benemon/wherry-plugins/security/advisories/new).
-Do not open a public issue, pull request or discussion for it.
+Please report vulnerabilities privately through GitHub's private vulnerability
+reporting: open the **Security** tab and choose **Report a vulnerability**, or
+go to <https://github.com/benemon/wherry-plugins/security/advisories/new>.
 
-Include the plugin and its version, the platform and its version, the steps
-that reproduce it, and what an attacker gains. A vulnerability in wherry
-itself or the plugin SDK belongs in
-[wherry](https://github.com/benemon/wherry/security/advisories/new).
+Do not open a public issue for a suspected vulnerability.
 
-[Security](https://benemon.github.io/wherry/security) describes the
-credential, signing and key custody model that reports are judged against.
+Include enough detail to reproduce the problem — affected version or commit,
+configuration, and the impact you observed. A proof of concept helps but is not
+required.
+
+## Supported versions
+
+Fixes land on `main` and ship in the next tagged release. Only the latest
+release is supported; there are no backports to earlier tags.
