@@ -224,8 +224,8 @@ withdraws its offer and takes no new work. Readiness checks nothing else:
   with the scheduler's message, holds the replica loop that claimed it and
   stops the whole receiver claiming new tasks (held runs keep renewing),
   until the pod is placed or the run's start bound, `task_started_by`,
-  passes. The receiver then stops
-  the pod and the run fails `not started by task_started_by`.
+  passes. The receiver then stops the pod and the run fails `not started
+  by task_started_by`.
 - Quota. A ResourceQuota in the namespace that is full refuses pod
   creation with 403. Each refusal counts a `dispatch` start failure, and
   the task spends its delivery budget.
@@ -467,10 +467,10 @@ below `runs_dir`, created by the receiver's UID at 0700.
 The claim's capacity is shared by every run of the receiver, so size it at
 the sum of the receiver's profile `replicas` times the inputs and the pool's
 output limit per run (`output_limit` times the files), plus headroom. The
-pool's output limits are checked only at collection, so a runaway agent fills the claim
-for every run on that receiver. Below `runs_floor` free the plugin profile
-is not ready, and the receiver takes no new work until space returns;
-`wherry_plugin_storage_free_bytes` reports the free space.
+pool's output limits are checked only at collection, so a runaway agent
+fills the claim for every run on that receiver. Below `runs_floor` free the
+plugin profile is not ready, and the receiver takes no new work until space
+returns; `wherry_plugin_storage_free_bytes` reports the free space.
 
 The plugin reads the agent's standard output from the logs API, which
 interleaves standard error with it. A line the agent writes to standard

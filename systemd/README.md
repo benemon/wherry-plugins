@@ -355,11 +355,12 @@ directories; `ProtectProc=invisible` hides only other users' processes.
 Set it only for an agent that needs a provisioned identity.
 
 Disk use for standard output, standard error and the work directory is
-unbounded. Size the filesystem holding `/var/lib` for the sum of the receiver's
-profile `replicas` times the outputs and transcript of a run. That sizing does not bound a hostile
-tenant, whose outputs share a filesystem with the receiver's signing key.
-A separate filesystem mounted at `/var/lib/private/wherry-agents`, or an
-XFS project quota on it, bounds them.
+unbounded. Size the filesystem holding `/var/lib` for the sum of the
+receiver's profile `replicas` times the outputs and transcript of a run.
+That sizing does not bound a hostile tenant, whose outputs share a
+filesystem with the receiver's signing key. A separate filesystem mounted at
+`/var/lib/private/wherry-agents`, or an XFS project quota on it, bounds
+them.
 
 ### Credential targets
 
