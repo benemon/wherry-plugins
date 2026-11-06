@@ -15,7 +15,7 @@ permissions:
 env:
   # The wherry release the nomad-image job builds with and the systemd-host job installs; e2e.yml pins the same
   # release, so change both together.
-  WHERRY_VERSION: v0.1.0-rc.31
+  WHERRY_VERSION: v0.1.0
 
 jobs:
   nomad-image:

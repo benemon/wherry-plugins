@@ -47,6 +47,9 @@ sdk v10 VersionedPlugins '' $'\treturn map[int]plugin.PluginSet{10: {pluginName:
 sdk v9-10 VersionedPlugins '' $'\treturn map[int]plugin.PluginSet{9: {pluginName: p}, 10: {pluginName: p}}'
 sdk v10-11 VersionedPlugins '' $'\treturn map[int]plugin.PluginSet{\n\t\t11: {pluginName: p},\n\t\t10: {pluginName: p},\n\t}'
 sdk v11 VersionedPlugins '' $'\treturn map[int]plugin.PluginSet{11: {pluginName: p}}'
+# pluginsdk v0.9.0 declares versionedPlugins as a variable holding a function.
+cp -R "$tmp/v11" "$tmp/v11-var"
+sed 's/^func versionedPlugins(/var versionedPlugins = func(/' "$tmp/v11/link.go" >"$tmp/v11-var/link.go"
 # Unknown or ambiguous forms.
 sdk h-const Plugins $'\tProtocolVersion: protocolVersion,\n'
 sdk h-none Plugins ''
@@ -96,6 +99,10 @@ for plugin in "${plugins[@]}"; do
 	expect "$plugin" run v9-10 v10-11
 	expect "$plugin" skip h9 v10 9 10
 	expect "$plugin" skip v9-10 v11 '9 10' 11
+	expect "$plugin" run v11 v11-var
+	expect "$plugin" run v11-var v11
+	expect "$plugin" skip h9 v11-var 9 11
+	expect "$plugin" skip v11-var h9 11 9
 	for bad in h-const h-none h-two v-const v-empty v-built v-nofunc both neither no-serve twice; do
 		expect "$plugin" fail h10 "$bad"
 		expect "$plugin" fail "$bad" h10

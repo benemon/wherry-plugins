@@ -630,7 +630,7 @@ certificate` and each S3 output with `not uploaded: request failed`.
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
 over the runtime's `env` and removes those of
-[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.9.0-rc.1/pluginsdk/pluginsdk.go#L264)
+[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.9.0/pluginsdk/pluginsdk.go#L264)
 from it, so no system, global or environment `git` configuration reaches
 the agent's clones. It removes them from the runtime's `env` only; keep
 them out of agent images' `ENV`. CA and proxy variables pass through as the
@@ -643,7 +643,7 @@ creation and Lookup reports a pod the scheduler cannot place as pending. A
 receiver of another protocol version refuses it at its start, as
 [Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
 the receiver and its plugins upgrade together: protocol 11 needs wherry
-v0.1.0-rc.29 or later. The receiver times placement itself. For each
+v0.1.0 or later. The receiver times placement itself. For each
 plugin profile the plugin reports these families, which the receiver serves
 on its `/metrics` with the plugin profile's name as `profile`:
 
@@ -700,7 +700,7 @@ podSelector:
 Start with your [operator working directory](https://benemon.github.io/wherry/operations-operator#set-up-wherry-operator), pool and entitled tenant ready.
 Use one receiver identity per Deployment.
 Keep the receiver and its agent pods in the same namespace.
-Clone `https://github.com/benemon/wherry-plugins` and check out the plugin's tag `kubernetes/<version>`, such as `kubernetes/v0.1.0-rc.10`.
+Clone `https://github.com/benemon/wherry-plugins` and check out the plugin's tag `kubernetes/<version>`, such as `kubernetes/v0.1.0`.
 Run the repository commands from that checkout and the operator commands from your operator working directory.
 
 1. Build the image from the checkout and push it to a registry your cluster can pull from:
@@ -710,8 +710,8 @@ Run the repository commands from that checkout and the operator commands from yo
    podman push registry.example.com/wherry-receiver:<plugin version>
    ```
 
-   `<plugin version>` is the plugin's tag version, such as `v0.1.0-rc.10`.
-   `<wherry version>` is the wherry release the image holds, such as `v0.1.0-rc.31`.
+   `<plugin version>` is the plugin's tag version, such as `v0.1.0`.
+   `<wherry version>` is the wherry release the image holds, such as `v0.1.0`.
    Set `CONTAINER=docker` to run Docker.
    The [Containerfile](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/Containerfile) builds the plugin and verifies the wherry release.
    The [image reference](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image) describes the image's contents and its verification.
