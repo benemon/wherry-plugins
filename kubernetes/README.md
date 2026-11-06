@@ -221,11 +221,11 @@ withdraws its offer and takes no new work. Readiness checks nothing else:
 - Nodes. Nodes are cluster-scoped, and the plugin does not read the
   cluster's topology. A pod no node can take, such as one whose
   `node_selector` no node matches, is pending: the run reports `placing`
-  with the scheduler's message, holds the replica loop that claimed it and
-  stops the whole receiver claiming new tasks (held runs keep renewing),
-  until the pod is placed or the run's start bound, `task_started_by`,
-  passes. The receiver then stops the pod and the run fails `not started
-  by task_started_by`.
+  with the scheduler's message and stays a
+  [pending run](https://benemon.github.io/wherry/operations-receivers#a-receiver-with-a-pending-run),
+  which stops the receiver claiming, until the pod is placed or the run's
+  start bound, `task_started_by`, passes. The receiver then stops the pod
+  and the run fails `not started by task_started_by`.
 - Quota. A ResourceQuota in the namespace that is full refuses pod
   creation with 403. Each refusal counts a `dispatch` start failure, and
   the task spends its delivery budget.
