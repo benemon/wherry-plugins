@@ -3,7 +3,6 @@
 # lane submits no run, so the plugin profile's command is /bin/true; the plugin checks the profile when the receiver
 # configures it, before the identity line.
 pool: e2e
-capacity: 2
 plugins:
   systemd:
     profiles:

@@ -84,8 +84,7 @@ func TestReadmeReceiverConfigures(t *testing.T) {
 		t.Fatal("README.md does not hold testdata/receiver.yaml")
 	}
 	var receiver struct {
-		Capacity int64 `yaml:"capacity"`
-		Plugins  map[string]struct {
+		Plugins map[string]struct {
 			Labels   map[string]string `yaml:"labels"`
 			Config   map[string]any    `yaml:"config"`
 			Profiles []struct {

@@ -1,4 +1,3 @@
-capacity: 2
 plugins:
   systemd:
     # Every plugin profile of this plugin inherits these keys and can override them.

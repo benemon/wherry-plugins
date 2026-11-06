@@ -171,7 +171,6 @@ plugin profile's own merge onto them: `provisioned` replaces the
 merged, through the plugin's decoding and checks.
 
 ```yaml
-capacity: 2
 plugins:
   systemd:
     # Every plugin profile of this plugin inherits these keys and can override them.
@@ -356,11 +355,12 @@ directories; `ProtectProc=invisible` hides only other users' processes.
 Set it only for an agent that needs a provisioned identity.
 
 Disk use for standard output, standard error and the work directory is
-unbounded. Size the filesystem holding `/var/lib` for `capacity` times the
-outputs and transcript of a run. That sizing does not bound a hostile
-tenant, whose outputs share a filesystem with the receiver's signing key.
-A separate filesystem mounted at `/var/lib/private/wherry-agents`, or an
-XFS project quota on it, bounds them.
+unbounded. Size the filesystem holding `/var/lib` for the sum of the
+receiver's profile `replicas` times the outputs and transcript of a run.
+That sizing does not bound a hostile tenant, whose outputs share a
+filesystem with the receiver's signing key. A separate filesystem mounted at
+`/var/lib/private/wherry-agents`, or an XFS project quota on it, bounds
+them.
 
 ### Credential targets
 
@@ -526,7 +526,7 @@ Clone `https://github.com/benemon/wherry-plugins` and check out the plugin's tag
 Run host installation commands as root from that checkout.
 
 1. In an empty directory, download `wherry_<wherry version>_linux_<arch>.tar.gz`, `checksums.txt` and `checksums.txt.sigstore.json` from `https://github.com/benemon/wherry/releases/tag/<wherry version>`.
-   `<wherry version>` carries its `v`, such as `v0.1.0-rc.29`.
+   `<wherry version>` carries its `v`, such as `v0.1.0-rc.31`.
    `<arch>` is `amd64` or `arm64`.
    Verify the signature of `checksums.txt` with the [cosign command](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image).
    Check the archive against the checksums and extract `wherry`:

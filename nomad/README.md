@@ -185,7 +185,6 @@ variables of the plugin protocol's `AgentEnvironment` over `env`. [Agent jobs](#
 job it builds.
 
 ```yaml
-capacity: 2
 plugins:
   nomad:
     config:
@@ -227,7 +226,6 @@ the plugin's as wherry does and configures the plugin profile from it
 through the plugin's decoding and checks.
 
 ```yaml
-capacity: 4
 plugins:
   nomad:
     # Every plugin profile of this plugin inherits these keys and can override them.
@@ -600,7 +598,7 @@ Run these steps from that checkout unless a step names your operator working dir
    ```
 
    `<plugin version>` is the version of the tag you checked out, such as `v0.1.0-rc.18`.
-   `<wherry version>` is the wherry release the image holds, such as `v0.1.0-rc.29`.
+   `<wherry version>` is the wherry release the image holds, such as `v0.1.0-rc.31`.
    `<image tag>` is the tag you give the image in your registry, such as `v0.1.0-rc.18`.
    The [Containerfile](https://github.com/benemon/wherry-plugins/blob/main/examples/nomad/Containerfile) builds the plugin and verifies the downloaded wherry release.
    It runs as UID 1001 with group 0.
@@ -622,7 +620,6 @@ Run these steps from that checkout unless a step names your operator working dir
    pool: build
    plugin_sha256:
      nomad: <the image's plugin pin>
-   capacity: 2
    plugins:
      nomad:
        config:
@@ -711,7 +708,7 @@ Run these steps from that checkout unless a step names your operator working dir
 ### The exec driver (example only)
 
 1. In an empty directory, download `wherry_<wherry version>_linux_<arch>.tar.gz`, `checksums.txt` and `checksums.txt.sigstore.json` from `https://github.com/benemon/wherry/releases/tag/<wherry version>`.
-   `<wherry version>` carries its `v`, such as `v0.1.0-rc.29`.
+   `<wherry version>` carries its `v`, such as `v0.1.0-rc.31`.
    `<arch>` is `amd64` or `arm64`.
    Verify the signature of `checksums.txt` with the [cosign command](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image).
    Check the archive against the checksums and extract `wherry`:

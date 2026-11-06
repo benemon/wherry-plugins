@@ -31,7 +31,7 @@ spec:
   accessModes: [ReadWriteOnce]
   resources: {requests: {storage: 1Gi}}
 ---
-# Every run's inputs and outputs; size it for the receiver's capacity and the pool's output limits.
+# Every run's inputs and outputs; size it for the sum of the receiver's profile replicas and the pool's output limits.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: wherry-runs}
