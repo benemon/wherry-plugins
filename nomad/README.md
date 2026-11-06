@@ -185,7 +185,6 @@ variables of the plugin protocol's `AgentEnvironment` over `env`. [Agent jobs](#
 job it builds.
 
 ```yaml
-capacity: 2
 plugins:
   nomad:
     config:
@@ -227,7 +226,6 @@ the plugin's as wherry does and configures the plugin profile from it
 through the plugin's decoding and checks.
 
 ```yaml
-capacity: 4
 plugins:
   nomad:
     # Every plugin profile of this plugin inherits these keys and can override them.
@@ -622,7 +620,6 @@ Run these steps from that checkout unless a step names your operator working dir
    pool: build
    plugin_sha256:
      nomad: <the image's plugin pin>
-   capacity: 2
    plugins:
      nomad:
        config:

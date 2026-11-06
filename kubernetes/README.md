@@ -221,8 +221,8 @@ withdraws its offer and takes no new work. Readiness checks nothing else:
 - Nodes. Nodes are cluster-scoped, and the plugin does not read the
   cluster's topology. A pod no node can take, such as one whose
   `node_selector` no node matches, is pending: the run reports `placing`
-  with the scheduler's message, holds one of the receiver's `capacity`
-  slots and stops the receiver claiming, until the pod is placed or the
+  with the scheduler's message, holds its profile's claim loop and stops
+  the receiver claiming, until the pod is placed or the
   run's start bound, `task_started_by`, passes. The receiver then stops
   the pod and the run fails `not started by task_started_by`.
 - Quota. A ResourceQuota in the namespace that is full refuses pod
@@ -276,7 +276,6 @@ plugin profile's, takes out the `credential` key, and configures each
 plugin profile through the plugin's decoding and checks.
 
 ```yaml
-capacity: 4
 plugins:
   kubernetes:
     # Every plugin profile of this plugin inherits these keys and can override
@@ -465,7 +464,7 @@ OpenShift, ODF CephFS. The plugin keeps each run's directory in `runs/`
 below `runs_dir`, created by the receiver's UID at 0700.
 
 The claim's capacity is shared by every run of the receiver, so size it at
-the receiver's `capacity` times the inputs and the pool's output limit per
+the sum of the receiver's profile `replicas` times the inputs and the pool's output limit per
 run (`output_limit` times the files), plus headroom. The pool's output
 limits are checked only at collection, so a runaway agent fills the claim
 for every run on that receiver. Below `runs_floor` free the plugin profile

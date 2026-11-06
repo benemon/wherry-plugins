@@ -2,4 +2,3 @@
 # reaches Kafka at the internal bootstrap address, which Strimzi's broker certificates name.
 pool: e2e
 broker: wherry-kafka-kafka-bootstrap.kafka.svc:9093
-capacity: 4

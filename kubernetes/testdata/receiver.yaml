@@ -1,4 +1,3 @@
-capacity: 4
 plugins:
   kubernetes:
     # Every plugin profile of this plugin inherits these keys and can override

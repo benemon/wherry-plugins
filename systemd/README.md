@@ -171,7 +171,6 @@ plugin profile's own merge onto them: `provisioned` replaces the
 merged, through the plugin's decoding and checks.
 
 ```yaml
-capacity: 2
 plugins:
   systemd:
     # Every plugin profile of this plugin inherits these keys and can override them.
@@ -356,8 +355,8 @@ directories; `ProtectProc=invisible` hides only other users' processes.
 Set it only for an agent that needs a provisioned identity.
 
 Disk use for standard output, standard error and the work directory is
-unbounded. Size the filesystem holding `/var/lib` for `capacity` times the
-outputs and transcript of a run. That sizing does not bound a hostile
+unbounded. Size the filesystem holding `/var/lib` for the sum of the receiver's
+profile `replicas` times the outputs and transcript of a run. That sizing does not bound a hostile
 tenant, whose outputs share a filesystem with the receiver's signing key.
 A separate filesystem mounted at `/var/lib/private/wherry-agents`, or an
 XFS project quota on it, bounds them.
