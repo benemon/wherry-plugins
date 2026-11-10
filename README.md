@@ -1,5 +1,12 @@
 # wherry-plugins
 
+[![CI](https://github.com/benemon/wherry-plugins/actions/workflows/ci.yml/badge.svg)](https://github.com/benemon/wherry-plugins/actions/workflows/ci.yml)
+[![E2E](https://github.com/benemon/wherry-plugins/actions/workflows/e2e.yml/badge.svg)](https://github.com/benemon/wherry-plugins/actions/workflows/e2e.yml)
+[![CodeQL](https://github.com/benemon/wherry-plugins/actions/workflows/codeql.yml/badge.svg)](https://github.com/benemon/wherry-plugins/actions/workflows/codeql.yml)
+[![Scorecard](https://github.com/benemon/wherry-plugins/actions/workflows/scorecard.yml/badge.svg)](https://github.com/benemon/wherry-plugins/actions/workflows/scorecard.yml)
+[![govulncheck](https://github.com/benemon/wherry-plugins/actions/workflows/govulncheck.yml/badge.svg)](https://github.com/benemon/wherry-plugins/actions/workflows/govulncheck.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/benemon/wherry-plugins/badge)](https://securityscorecards.dev/viewer/?uri=github.com/benemon/wherry-plugins)
+
 Plugins for [wherry](https://github.com/benemon/wherry) receivers, each the
 plugin for one kind of platform. A receiver ships with no plugins; it runs
 `wherry-plugin-<type>` from its plugin directory for each plugin type in its

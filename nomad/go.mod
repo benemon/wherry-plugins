@@ -6,7 +6,7 @@ require (
 	github.com/benemon/wherry/pluginsdk v0.9.0
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/nomad/api v0.0.0-20261029144823-d0f210429976
-	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v3 v3.0.6
 )
 
 require (
