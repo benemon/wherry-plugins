@@ -110,9 +110,9 @@ protocols() {
 	VersionedPlugins)
 		grep -E '^[[:space:]]*VersionedPlugins:[[:space:]]*versionedPlugins\(.*\),$' <<<"$serve" >/dev/null ||
 			fail "$dir/serve.go: ServeConfig's VersionedPlugins is not versionedPlugins(...)"
-		defined '^func versionedPlugins\(' link.go
+		defined '^(func versionedPlugins\(|var versionedPlugins = func\()' link.go
 		# The function's body must be a single return of a map literal whose keys are decimal literals.
-		awk '/^func versionedPlugins\(/ { body = 1; next } body && /^\}$/ { exit } body && !/^[[:space:]]*\/\// { print }' \
+		awk '/^(func versionedPlugins\(|var versionedPlugins = func\()/ { body = 1; next } body && /^\}$/ { exit } body && !/^[[:space:]]*\/\// { print }' \
 			"$dir/link.go" | tr '\n' ' ' | awk -v dir="$dir" '
 			{
 				s = $0

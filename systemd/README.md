@@ -448,7 +448,7 @@ agents need no route to the storage endpoint.
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
 over the runtime's `env` and removes those of
-[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.9.0-rc.1/pluginsdk/pluginsdk.go#L264)
+[`AgentUnset`](https://github.com/benemon/wherry/blob/pluginsdk/v0.9.0/pluginsdk/pluginsdk.go#L264)
 from it, so no system, global or environment `git` configuration reaches
 the agent's clones. CA and proxy variables pass through as the operator
 sets them. A command the agent runs can set the variables again.
@@ -463,7 +463,7 @@ the host. Keep material out of `runtime.env`.
 The plugin speaks plugin protocol version 11, in which Dispatch returns
 once the unit's start job has. A receiver of another protocol version
 refuses it, so the receiver and its plugins upgrade together: protocol 11
-needs wherry v0.1.0-rc.29 or later. The receiver times placement itself.
+needs wherry v0.1.0 or later. The receiver times placement itself.
 For each plugin profile the plugin reports these families, which the
 receiver serves on its `/metrics` with the plugin profile's name as
 `profile`:
@@ -522,11 +522,11 @@ Start with your operator working directory, pool and entitled tenant ready.
 Use a Linux host with systemd 252 or later and unified cgroup v2.
 Run the receiver as root.
 Give each systemd receiver a `host` label of its own, so only the receiver restarted on that host serves its signature and adopts its runs.
-Clone `https://github.com/benemon/wherry-plugins` and check out the plugin's tag `systemd/<version>`, such as `systemd/v0.1.0-rc.7`.
+Clone `https://github.com/benemon/wherry-plugins` and check out the plugin's tag `systemd/<version>`, such as `systemd/v0.1.0`.
 Run host installation commands as root from that checkout.
 
 1. In an empty directory, download `wherry_<wherry version>_linux_<arch>.tar.gz`, `checksums.txt` and `checksums.txt.sigstore.json` from `https://github.com/benemon/wherry/releases/tag/<wherry version>`.
-   `<wherry version>` carries its `v`, such as `v0.1.0-rc.31`.
+   `<wherry version>` carries its `v`, such as `v0.1.0`.
    `<arch>` is `amd64` or `arm64`.
    Verify the signature of `checksums.txt` with the [cosign command](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image).
    Check the archive against the checksums and extract `wherry`:
@@ -645,7 +645,7 @@ Run host installation commands as root from that checkout.
    ```
 
    Check for `plugin systemd: version <plugin version> protocol <n>`.
-   `<plugin version>` is the version of the plugin tag, such as `v0.1.0-rc.7`.
+   `<plugin version>` is the version of the plugin tag, such as `v0.1.0`.
    A source build without version metadata reports `unreported`.
    From your entitled tenant's host, run `wherry host receivers` and wait for `systemd-1` to show `live`.
 
