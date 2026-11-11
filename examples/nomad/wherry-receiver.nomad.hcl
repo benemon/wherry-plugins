@@ -1,5 +1,7 @@
-# The wherry receiver as a Nomad service job: the image examples/nomad/Containerfile builds, under the docker driver.
-# The receiver reaches the Nomad API through the task API socket and Kafka through the group's bridge network.
+# The wherry receiver as a Nomad service job: the image examples/nomad/Containerfile builds, under the docker or podman
+# driver.
+# The receiver reaches the Nomad API through the task API socket, or the plugin's address, and Kafka through the
+# group's bridge network.
 # The receiver's bundle and its local configuration, examples/nomad/config.yaml, are the items bundle and config of the
 # Nomad variable nomad/jobs/wherry-receiver, which the job's workload identity reads. Its state directory is on the
 # dynamic host volume examples/nomad/wherry-receiver.volume.hcl specifies. nomad/README.md has the commands that create
@@ -8,6 +10,12 @@
 variable "image" {
   type        = string
   description = "The receiver image examples/nomad/Containerfile builds."
+}
+
+variable "driver" {
+  type        = string
+  default     = "docker"
+  description = "The task driver that runs the image: docker or podman."
 }
 
 job "wherry-receiver" {
@@ -43,7 +51,7 @@ job "wherry-receiver" {
     }
 
     task "receiver" {
-      driver = "docker"
+      driver = var.driver
       # config.yaml's drain_timeout, 20 seconds, stays at least 10 seconds below this window.
       kill_timeout = "30s"
 
@@ -85,6 +93,15 @@ job "wherry-receiver" {
         destination = "secrets/kafka-ca.pem"
         data        = <<-EOT
           {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .ca }}{{ end }}
+        EOT
+      }
+
+      # The Nomad API's CA, for the plugin's ca_file when it reaches the API at an HTTPS address; empty without the item
+      # nomad_ca.
+      template {
+        destination = "secrets/nomad-ca.pem"
+        data        = <<-EOT
+          {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .nomad_ca }}{{ end }}
         EOT
       }
 
