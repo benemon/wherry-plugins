@@ -47,7 +47,7 @@ jobs:
             ref=$(gh api -H 'Accept: application/vnd.github.raw+json' \
               "repos/$GITHUB_REPOSITORY/contents/.github/workflows/$workflow?ref=$sha" | sed -n 's/^  WHERRY_REF: //p')
             if [ "$ref" != "''" ]; then
-              echo "$workflow at $sha sets WHERRY_REF '$ref'; tag a pre-release, or a commit that sets WHERRY_REF ''." >&2
+              echo "$workflow at $sha sets WHERRY_REF ${ref:-(no line read)}, not ''; tag a pre-release, or a commit that sets ''." >&2
               exit 1
             fi
           done
