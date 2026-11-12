@@ -1,4 +1,5 @@
-# delivery_limit 2 ends a run at its first start failure, so the start-failure run fails at once.
+# delivery_limit 2 spends a start-failure run's budget on its first release; 05-runs.sh gives that run a short start
+# bound, which ends it during its in-place retries.
 agents:
   - name: fake
 default_agent: fake
