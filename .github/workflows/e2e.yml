@@ -15,7 +15,7 @@ permissions:
 env:
   # The wherry release whose CLI provisions and submits, and which the receiver image holds.
   # ci.yml pins the same release for its nomad-image and systemd-host jobs; change both together.
-  WHERRY_VERSION: v0.1.0
+  WHERRY_VERSION: v0.1.2-rc.1
   KIND_VERSION: v0.33.0
   KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
   # A Nomad CE release; NOMAD_SHA256 is its linux_amd64 zip's line in the release's SHA256SUMS.
@@ -165,6 +165,21 @@ jobs:
       - name: Fetch the wherry CLI and build the images
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/02-wherry.sh
+      # The read inside the agent task runs after 02, which builds the fake agent's image its docker subtest runs.
+      - name: Read the working file inside the agent task
+        if: steps.changes.outputs.changed == 'true'
+        timeout-minutes: 10
+        working-directory: nomad
+        env:
+          WHERRY_NOMAD_DEV_ADDR: http://127.0.0.1:4646
+        shell: bash
+        run: |
+          go test -count=1 -p 1 -v -run '^TestReadWorkingInTheTask$' . | tee "$RUNNER_TEMP/nomad-working.log"
+          # A skipped test passes too, so it and each subtest must have run.
+          grep -x -- "--- PASS: TestReadWorkingInTheTask ([0-9.]*s)" "$RUNNER_TEMP/nomad-working.log" >/dev/null
+          for subtest in Swap Nothing/FIFO Nothing/directory Nothing/over_1_KiB Docker; do
+            grep -E -- "^ +--- PASS: TestReadWorkingInTheTask/$subtest " "$RUNNER_TEMP/nomad-working.log" >/dev/null
+          done
       - name: Provision the pool, tenant, host and receiver
         if: steps.changes.outputs.changed == 'true'
         run: nomad/test/e2e/03-provision.sh

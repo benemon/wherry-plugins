@@ -252,7 +252,7 @@ func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings, 
 	t.Helper()
 	dev := devConfig(t)
 	completes := settings(t, "completes", podConfig(dev.Address, dev.CAFile, dev.RunsDir, "registry.access.redhat.com/ubi9/ubi-minimal",
-		"/bin/sh", "-c", `sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`))
+		"/bin/sh", "-c", `mkdir -p "$WHERRY_OUTPUT_DIR/.wherry" && echo conformance working > "$WHERRY_OUTPUT_DIR/.wherry/working.tmp" && mv "$WHERRY_OUTPUT_DIR/.wherry/working.tmp" "$WHERRY_OUTPUT_DIR/.wherry/working" || exit 1; sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`))
 	neverStarts := settings(t, "never-starts", podConfig(dev.Address, dev.CAFile, dev.RunsDir, "registry.invalid/wherry-conformance:0"))
 	// No node has a thousand CPUs, so the scheduler marks the pod Unschedulable and says why.
 	unplaceable := podConfig(dev.Address, dev.CAFile, dev.RunsDir, "registry.access.redhat.com/ubi9/ubi-minimal", "/bin/true")

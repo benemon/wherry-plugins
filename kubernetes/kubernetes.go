@@ -137,6 +137,7 @@ type Kubernetes struct {
 	fetcher       *http.Client
 	metrics       *PlatformMetrics
 	logger        hclog.Logger
+	working       WorkingReads
 }
 
 // fetchFailed is a fetch that failed, in words that never quote the URL. Its class ends the run before any pod exists.
@@ -1195,6 +1196,21 @@ func read(root *os.Root, name string, size int64) ([]byte, error) {
 		return nil, errors.New("an output read back at another length than its listing")
 	}
 	return data, nil
+}
+
+// ReadWorking reads the working file beneath the run's directory on the runs claim, all the agent pod mounts, as
+// pluginsdk.ReadWorkingFile does. A pod name is per run, so an old handle reads only its own run's newer attempt; a
+// purged run's directory is gone, and reads as nothing.
+func (profile *Kubernetes) ReadWorking(ctx context.Context, encoded pluginsdk.Handle) ([]byte, error) {
+	h, err := decodeHandle(encoded)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(h.Pod, profile.jobName("")) || len(validation.IsDNS1123Label(h.Pod)) > 0 {
+		return nil, errors.New("the handle names no agent pod of this pool")
+	}
+	data, err := profile.working.Read(ctx, h.Pod, filepath.Join(profile.runs, h.Pod), "outputs/"+pluginsdk.WorkingFile)
+	return data, profile.failed("read working file", err)
 }
 
 // Release deletes the run's Secret.

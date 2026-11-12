@@ -106,6 +106,10 @@ type Nomad struct {
 	runVariable *regexp.Regexp
 	metrics     metrics
 	logger      hclog.Logger
+	// reading holds the allocations with a ReadWorking exec in flight, and imageWarning warns once of an agent image
+	// that cannot run the read.
+	reading      inFlight
+	imageWarning sync.Once
 }
 
 // metrics holds the values Metrics reports: API errors by class, sweep deletions by kind, and the dead jobs the latest
@@ -1174,6 +1178,141 @@ func fileMode(text string) fs.FileMode {
 	return mode
 }
 
+// workingEnd follows the working file in the read's output, so a stdout the driver cuts short reads as nothing.
+const workingEnd = "wherry-working-end\n"
+
+// workingCommand reads the working file inside the agent task, whose environment holds NOMAD_TASK_DIR on every
+// driver. Nomad does not end an exec'd process when its session closes, so timeout ends a read blocked on a FIFO, well
+// inside the receiver's deadline.
+var workingCommand = []string{"sh", "-c", `timeout -s KILL 2 head -c ` + strconv.Itoa(pluginsdk.MaxWorking+1) +
+	` -- "$NOMAD_TASK_DIR/outputs/` + pluginsdk.WorkingFile + `" && echo ` + strings.TrimSuffix(workingEnd, "\n")}
+
+// ReadWorking reads the working file with alloc exec inside the running agent task, with the task's own isolation and
+// user: the allocation filesystem API checks a path and opens it again by name, so an agent swapping the file between
+// the two would have the client read outside the allocation. A missing file, a FIFO or a directory exits non-zero and
+// reads as nothing. A second call while a run's read is in flight reads nothing, since the exec's dial does not honour
+// ctx. Requires the alloc-exec capability, and alloc-node-exec on a driver without filesystem isolation.
+func (profile *Nomad) ReadWorking(ctx context.Context, encoded pluginsdk.Handle) ([]byte, error) {
+	handle, err := decodeHandle(encoded)
+	if err != nil {
+		return nil, err
+	}
+	if handle.Alloc == "" {
+		return nil, nil
+	}
+	alloc, running, err := profile.running(ctx, handle.Alloc)
+	if err != nil || !running {
+		return nil, profile.failed("read allocation", err)
+	}
+	if !profile.reading.start(handle.Alloc) {
+		return nil, nil
+	}
+	type result struct {
+		data []byte
+		err  error
+	}
+	read := make(chan result, 1)
+	go func() {
+		defer profile.reading.done(handle.Alloc)
+		data, err := profile.readWorking(ctx, alloc)
+		read <- result{data, err}
+	}()
+	select {
+	case result := <-read:
+		return result.data, profile.failed("exec "+taskName, result.err)
+	case <-ctx.Done():
+		return nil, profile.failed("exec "+taskName, ctx.Err())
+	}
+}
+
+// running reads the allocation and reports whether its agent task runs: an allocation pulling its image can report its
+// job running, and a stopping or ended task cannot be exec'd. A missing allocation does not run.
+func (profile *Nomad) running(ctx context.Context, id string) (*api.Allocation, bool, error) {
+	alloc, _, err := profile.client.Allocations().Info(id, (&api.QueryOptions{}).WithContext(ctx))
+	switch {
+	case notFound(err):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, err
+	}
+	state := alloc.TaskStates[taskName]
+	return alloc, alloc.ClientStatus == api.AllocClientStatusRunning && alloc.DesiredStatus == api.AllocDesiredStatusRun && state != nil && state.State == "running", nil
+}
+
+// readWorking runs workingCommand in alloc's agent task; ReadWorking counts the error it returns.
+func (profile *Nomad) readWorking(ctx context.Context, alloc *api.Allocation) ([]byte, error) {
+	stdout := &boundedWriter{limit: pluginsdk.MaxWorking + 1 + len(workingEnd)}
+	code, err := profile.client.Allocations().Exec(ctx, alloc, taskName, false, workingCommand, strings.NewReader(""), stdout, io.Discard, nil, (&api.QueryOptions{}).WithContext(ctx))
+	switch {
+	case err != nil:
+		// The task may have ended since the allocation was read.
+		if _, running, infoErr := profile.running(ctx, alloc.ID); infoErr == nil && !running {
+			return nil, nil
+		}
+		return nil, err
+	case code == 126 || code == 127:
+		profile.imageWarning.Do(func() {
+			profile.logger.Warn("the agent image cannot run the working file read; it needs sh, timeout and head", "profile", profile.name, "exit_code", code)
+		})
+		return nil, fmt.Errorf("the working file read exited %d: the agent image needs sh, timeout and head", code)
+	case code != 0:
+		return nil, nil
+	}
+	data, ended := bytes.CutSuffix(stdout.bytes(), []byte(workingEnd))
+	if !ended || len(data) > pluginsdk.MaxWorking {
+		return nil, nil
+	}
+	return data, nil
+}
+
+// boundedWriter keeps the first limit bytes written to it; output past the limit loses the terminator, so it reads as
+// nothing. The exec's receiving goroutine can still write after ReadWorking returns.
+type boundedWriter struct {
+	mu    sync.Mutex
+	data  []byte
+	limit int
+}
+
+func (writer *boundedWriter) Write(p []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	keep := min(len(p), writer.limit-len(writer.data))
+	writer.data = append(writer.data, p[:keep]...)
+	return len(p), nil
+}
+
+func (writer *boundedWriter) bytes() []byte {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return slices.Clone(writer.data)
+}
+
+// inFlight is the set of keys with a read in progress.
+type inFlight struct {
+	mu   sync.Mutex
+	keys map[string]bool
+}
+
+// start adds key, reporting false when it is already in progress.
+func (reads *inFlight) start(key string) bool {
+	reads.mu.Lock()
+	defer reads.mu.Unlock()
+	if reads.keys[key] {
+		return false
+	}
+	if reads.keys == nil {
+		reads.keys = map[string]bool{}
+	}
+	reads.keys[key] = true
+	return true
+}
+
+func (reads *inFlight) done(key string) {
+	reads.mu.Lock()
+	defer reads.mu.Unlock()
+	delete(reads.keys, key)
+}
+
 // Purge deregisters the run's job with purge, then deletes its variables.
 func (profile *Nomad) Purge(ctx context.Context, runID string) error {
 	return profile.purge(ctx, profile.jobID(runID))
@@ -1309,6 +1448,9 @@ func (profile *Nomad) failed(op string, err error) error {
 		case code >= 500:
 			class = "unavailable"
 		}
+	// alloc exec reports a missing capability only in its websocket close text.
+	case strings.Contains(err.Error(), "Permission denied"):
+		class = "denied"
 	case errors.As(err, &network) && network.Timeout():
 		class = "timeout"
 	case errors.As(err, &network):
