@@ -84,6 +84,11 @@ func TestReadWorkingRefusalsReadNothingUncounted(t *testing.T) {
 		"FIFO": func(outputs string) error {
 			return syscall.Mkfifo(filepath.Join(outputs, pluginsdk.WorkingFile), 0o644)
 		},
+		"unreadable run directory": func(outputs string) error {
+			run := filepath.Dir(outputs)
+			t.Cleanup(func() { os.Chmod(run, 0o755) })
+			return os.Chmod(run, 0)
+		},
 		"unreadable": func(outputs string) error {
 			if err := os.WriteFile(filepath.Join(outputs, pluginsdk.WorkingFile), []byte("step\n"), 0o644); err != nil {
 				return err
@@ -92,7 +97,7 @@ func TestReadWorkingRefusalsReadNothingUncounted(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if name == "unreadable" && os.Geteuid() == 0 {
+			if strings.HasPrefix(name, "unreadable") && os.Geteuid() == 0 {
 				t.Skip("root reads a file whatever its mode")
 			}
 			pod := poolPrefix + "run-" + strings.ReplaceAll(strings.ToLower(name), " ", "-")

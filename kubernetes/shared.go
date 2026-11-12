@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"slices"
 	"strings"
 	"sync"
@@ -189,7 +190,8 @@ func (reads *WorkingReads) Read(ctx context.Context, run, root, name string) ([]
 	}()
 	select {
 	case result := <-read:
-		if errors.Is(result.err, pluginsdk.ErrRefused) {
+		// The agent runs as the receiver's user and owns its run directory, so it alone can make the root unreadable.
+		if errors.Is(result.err, pluginsdk.ErrRefused) || errors.Is(result.err, fs.ErrPermission) {
 			return nil, nil
 		}
 		return result.data, result.err

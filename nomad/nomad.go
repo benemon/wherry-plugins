@@ -1258,21 +1258,19 @@ func (profile *Nomad) readWorking(ctx context.Context, alloc *api.Allocation) ([
 	case code != 0:
 		return nil, nil
 	}
-	data, overflow := stdout.bytes()
-	data, ended := bytes.CutSuffix(data, []byte(workingEnd))
-	if overflow || !ended || len(data) > pluginsdk.MaxWorking {
+	data, ended := bytes.CutSuffix(stdout.bytes(), []byte(workingEnd))
+	if !ended || len(data) > pluginsdk.MaxWorking {
 		return nil, nil
 	}
 	return data, nil
 }
 
-// boundedWriter keeps the first limit bytes written to it and records whether more came. The exec's receiving
-// goroutine can still write after ReadWorking returns.
+// boundedWriter keeps the first limit bytes written to it; output past the limit loses the terminator, so it reads as
+// nothing. The exec's receiving goroutine can still write after ReadWorking returns.
 type boundedWriter struct {
-	mu       sync.Mutex
-	data     []byte
-	limit    int
-	overflow bool
+	mu    sync.Mutex
+	data  []byte
+	limit int
 }
 
 func (writer *boundedWriter) Write(p []byte) (int, error) {
@@ -1280,14 +1278,13 @@ func (writer *boundedWriter) Write(p []byte) (int, error) {
 	defer writer.mu.Unlock()
 	keep := min(len(p), writer.limit-len(writer.data))
 	writer.data = append(writer.data, p[:keep]...)
-	writer.overflow = writer.overflow || keep < len(p)
 	return len(p), nil
 }
 
-func (writer *boundedWriter) bytes() ([]byte, bool) {
+func (writer *boundedWriter) bytes() []byte {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
-	return slices.Clone(writer.data), writer.overflow
+	return slices.Clone(writer.data)
 }
 
 // inFlight is the set of keys with a read in progress.

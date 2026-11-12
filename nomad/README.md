@@ -526,7 +526,8 @@ Nomad client, usually root, read a file outside the allocation. On Nomad
 The agent image needs `sh`, `timeout` and `head`, from busybox or
 coreutils. An image without them makes the command exit with code 126 or
 127, which the plugin counts as a failed call of class `other` and logs once
-for each plugin profile as a warning naming the image's missing commands.
+for each plugin profile as a warning that the image needs `sh`, `timeout`
+and `head`.
 The receiver then publishes no working status for the profile's runs.
 
 Each read costs a read of the allocation, a read of its node, a websocket
