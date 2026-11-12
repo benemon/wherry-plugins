@@ -139,11 +139,10 @@ func TestReadWorkingReturnsOnTheContextWithOneReadInFlight(t *testing.T) {
 	_, handle := workingRun(t, "hung", "step\n")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	start := time.Now()
-	if data, err := profile.ReadWorking(ctx, handle); data != nil || !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
-		t.Fatalf("read = %q, %v after %s; want the deadline's error at once", data, err, time.Since(start))
+	if data, err := readWithin(t, ctx, profile, handle); data != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("read = %q, %v; want the deadline's error", data, err)
 	}
-	if data, err := profile.ReadWorking(context.Background(), handle); data != nil || err != nil {
+	if data, err := readWithin(t, context.Background(), profile, handle); data != nil || err != nil {
 		t.Fatalf("second read = %q, %v; want nothing while the first is in flight", data, err)
 	}
 	if n := reads.Load(); n != 1 {
@@ -169,5 +168,26 @@ func TestReadWorkingCountsAFailedRead(t *testing.T) {
 	}
 	if counted := platformErrors(profile); counted[failure.Class] != 1 {
 		t.Fatalf("errors counted %v; want one", counted)
+	}
+}
+
+// readWithin calls ReadWorking, failing the test unless it returns within 2 s.
+func readWithin(t *testing.T, ctx context.Context, profile *Systemd, encoded pluginsdk.Handle) ([]byte, error) {
+	t.Helper()
+	type result struct {
+		data []byte
+		err  error
+	}
+	read := make(chan result, 1)
+	go func() {
+		data, err := profile.ReadWorking(ctx, encoded)
+		read <- result{data, err}
+	}()
+	select {
+	case result := <-read:
+		return result.data, result.err
+	case <-time.After(2 * time.Second):
+		t.Fatal("the read did not return within 2 s")
+		return nil, nil
 	}
 }

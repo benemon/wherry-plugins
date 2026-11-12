@@ -278,13 +278,11 @@ func TestReadWorkingReturnsOnTheContextWithOneExecInFlight(t *testing.T) {
 	defer close(release)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	start := time.Now()
-	data, err := profile.ReadWorking(ctx, workingHandle)
-	if !errors.Is(err, context.DeadlineExceeded) || data != nil || time.Since(start) > 2*time.Second {
-		t.Fatalf("read = %q, %v after %s; want the deadline's error at once", data, err, time.Since(start))
+	if data, err := readWithin(t, ctx, profile, workingHandle); !errors.Is(err, context.DeadlineExceeded) || data != nil {
+		t.Fatalf("read = %q, %v; want the deadline's error", data, err)
 	}
 	<-held
-	if data, err := profile.ReadWorking(context.Background(), workingHandle); data != nil || err != nil {
+	if data, err := readWithin(t, context.Background(), profile, workingHandle); data != nil || err != nil {
 		t.Fatalf("second read = %q, %v; want nothing while the first is in flight", data, err)
 	}
 	if execs := slices.DeleteFunc(requests(), func(request string) bool { return !strings.HasSuffix(request, "/exec") }); len(execs) != 1 {
@@ -407,4 +405,25 @@ sleep 300`, ""))
 		handle := dispatch(t, docker, ctx, testRun("docker"))
 		devRead(t, ctx, docker, handle, func(data []byte, _ time.Duration) bool { return string(data) == "in the container\n" })
 	})
+}
+
+// readWithin calls ReadWorking, failing the test unless it returns within 2 s.
+func readWithin(t *testing.T, ctx context.Context, profile *Nomad, encoded pluginsdk.Handle) ([]byte, error) {
+	t.Helper()
+	type result struct {
+		data []byte
+		err  error
+	}
+	read := make(chan result, 1)
+	go func() {
+		data, err := profile.ReadWorking(ctx, encoded)
+		read <- result{data, err}
+	}()
+	select {
+	case result := <-read:
+		return result.data, result.err
+	case <-time.After(2 * time.Second):
+		t.Fatal("the read did not return within 2 s")
+		return nil, nil
+	}
 }
