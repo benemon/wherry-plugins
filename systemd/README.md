@@ -444,6 +444,23 @@ fetch that fails or does not verify ends the run never started with class
 URL never reaches a file, a unit property, a log line or an error, and
 agents need no route to the storage endpoint.
 
+### Working status
+
+While the agent unit runs, the receiver asks the plugin for the agent's
+current step, the line the agent keeps in `.wherry/working` beneath its
+output directory. The plugin reads `outputs/.wherry/working` in the run's
+work directory, `/var/lib/private/wherry-agents/<job>`, or
+`/var/lib/wherry-agents/<job>` with `runtime.user`. It opens each component
+without following a link, opens the file without blocking, and reads at
+most 1025 bytes. It reads nothing for a handle a later dispatch of the run
+replaced, when the run's marker, work directory or file is missing, as
+after a purge, or when the agent has made the file unreadable: a link in
+any component, a FIFO, a device, a directory, a file with more than one
+link, or a file over 1 KiB. None of these counts as a failed call. A read
+that fails otherwise counts by its class. A read whose 5-second deadline
+passes returns with class `timeout`, and the plugin starts no other read of
+that run until it ends.
+
 ### Agent environment
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
@@ -460,10 +477,11 @@ the host. Keep material out of `runtime.env`.
 
 ## Metrics
 
-The plugin speaks plugin protocol version 11, in which Dispatch returns
-once the unit's start job has. A receiver of another protocol version
-refuses it, so the receiver and its plugins upgrade together: protocol 11
-needs wherry v0.1.0 or later. The receiver times placement itself.
+The plugin speaks plugin protocol version 12, in which Dispatch returns
+once the unit's start job has and ReadWorking reads the agent's
+[working status](#working-status). A receiver of another protocol version
+refuses it, so the receiver and its plugins upgrade together: protocol 12
+needs wherry v0.1.2 or later. The receiver times placement itself.
 For each plugin profile the plugin reports these families, which the
 receiver serves on its `/metrics` with the plugin profile's name as
 `profile`:

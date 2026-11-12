@@ -78,7 +78,7 @@ The plugin's calls need this policy, with the namespace adjusted:
 
 ```hcl
 namespace "agents" {
-  capabilities = ["submit-job", "list-jobs", "read-job", "read-logs", "read-fs"]
+  capabilities = ["submit-job", "list-jobs", "read-job", "read-logs", "read-fs", "alloc-exec"]
 
   variables {
     path "nomad/jobs/agent-*" {
@@ -106,6 +106,10 @@ node_pool "default" {
 - `read-logs`: stream the agent task's standard output.
 - `read-fs`: list and read the agent task's outputs directory once the job
   has stopped.
+- `alloc-exec`: read the agent's [working status](#working-status) inside
+  the running agent task. A profile whose `runtime.driver` is `raw_exec`
+  needs `alloc-node-exec` as well, since `raw_exec` does not isolate the
+  task's file system.
 - Variables `write`, `read` and `destroy`: hold each run's prompt,
   credentials and input files, and sweep them after the job
   ends. The sweep
@@ -490,6 +494,50 @@ The URL is the artifact's source for the job's lifetime and appears in the
 task event of a failed fetch, so anyone who can read the job can read it
 until it expires. Purging the job removes it.
 
+### Working status
+
+While the agent task runs, the receiver asks the plugin for the agent's
+current step, the line the agent keeps in `.wherry/working` beneath its
+output directory. The plugin first reads the allocation, and reads nothing
+unless the allocation and its agent task are running and Nomad has not been
+asked to stop it. It then runs this command inside the agent task with
+[alloc exec](https://developer.hashicorp.com/nomad/api-docs/allocations#exec-allocation),
+with the task's own isolation and user, and no TTY:
+
+```sh
+sh -c 'timeout -s KILL 2 head -c 1025 -- "$NOMAD_TASK_DIR/outputs/.wherry/working" && echo wherry-working-end'
+```
+
+The read has the agent's own access, so a link in the agent's outputs reaches
+only what the agent could print itself. A missing file, a FIFO or a
+directory makes the command exit with a non-zero code, and the plugin reads
+nothing; so does a file over 1 KiB, or output that does not end in the
+terminator, which the docker driver can cut short. `timeout` ends a read
+blocked on a FIFO after 2 seconds, inside the receiver's 5-second deadline,
+since Nomad does not end an exec'd process when its session closes. A task
+that ends during the read reads as nothing.
+
+The plugin does not read the file through the allocation file system API
+while the task runs: that API checks a path and then opens it again by name,
+so an agent that swaps the file for a link between the two would have the
+Nomad client, usually root, read a file outside the allocation. On Nomad
+2.1.1 a live swap won about 1 read in 70.
+
+The agent image needs `sh`, `timeout` and `head`, from busybox or
+coreutils. An image without them makes the command exit with code 126 or
+127, which the plugin counts as a failed call of class `other` and logs once
+for each plugin profile as a warning naming the image's missing commands.
+The receiver then publishes no working status for the profile's runs.
+
+Each read costs a read of the allocation, a read of its node, a websocket
+dial to the node, or through a server when the receiver cannot reach the
+node, and one exec session, which the Nomad client logs at `INFO` as
+`task exec session starting`. The receiver reads every 10 seconds while a
+run's line is unchanged, after its first 60 seconds. At most one read of a
+run is in flight: a call while one is still running reads nothing. A client
+with [`disable_remote_exec`](https://developer.hashicorp.com/nomad/docs/configuration/client#disable_remote_exec)
+refuses every read, and each counts as a failed call of class `denied`.
+
 ### Agent environment
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
@@ -505,12 +553,13 @@ agent runs can set the variables again.
 
 ## Metrics
 
-The plugin speaks plugin protocol version 11, in which Dispatch returns at
-registration and Lookup reports a job Nomad has not placed as pending. A
+The plugin speaks plugin protocol version 12, in which Dispatch returns at
+registration, Lookup reports a job Nomad has not placed as pending, and
+ReadWorking reads the agent's [working status](#working-status). A
 receiver of another protocol version refuses it at its start, as
 [Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
-the receiver and its plugins upgrade together: protocol 11 needs wherry
-v0.1.0 or later. The receiver times placement itself. For each plugin
+the receiver and its plugins upgrade together: protocol 12 needs wherry
+v0.1.2 or later. The receiver times placement itself. For each plugin
 profile the plugin reports these families, which the receiver serves on its
 `/metrics` with the plugin profile's name as `profile`:
 
@@ -523,7 +572,8 @@ profile the plugin reports these families, which the receiver serves on its
 An API call's class comes from its status code: 401 and 403 are `denied`,
 409 `conflict`, 408 and 504 `timeout`, and other 5xx codes `unavailable`. A
 call that cannot connect is `unavailable`, one that runs past its deadline
-`timeout`, and any other failure `other`. A 404, which the plugin reads as
+`timeout`, and any other failure `other`. An exec that Nomad refuses with
+`Permission denied` is `denied`. A 404, which the plugin reads as
 absence, and a call the receiver cancels count nothing.
 
 A failed call the plugin returns reaches the receiver with its operation,
@@ -1001,7 +1051,13 @@ protocol's conformance suite,
 the built plugin, with a pending profile whose `memory_mb` no dev node has.
 The `nomad` lane of the `e2e` workflow runs those two against its dev agent
 once the agent is up, and fails unless each ran and passed its pending
-profile.
+profile. Once it has built the fake agent's image, the lane runs
+`TestReadWorkingInTheTask`, and fails unless it and each subtest ran and
+passed: a `raw_exec` job running as `nobody` swaps its working file with a
+link to a file only root reads, and no read may return that file while at
+least 10 return the job's own line; a FIFO, a directory and a file over
+1 KiB each read as nothing within 3 seconds; and a `docker` job on the fake
+agent's busybox image reads its line.
 
 ### End to end on Nomad
 

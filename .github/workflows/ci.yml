@@ -15,7 +15,7 @@ permissions:
 env:
   # The wherry release the nomad-image job builds with and the systemd-host job installs; e2e.yml pins the same
   # release, so change both together.
-  WHERRY_VERSION: v0.1.0
+  WHERRY_VERSION: v0.1.2-rc.1
 
 jobs:
   nomad-image:
@@ -165,9 +165,15 @@ jobs:
       - name: Run the real-host suite as root
         if: steps.changes.outputs.changed == 'true'
         working-directory: systemd
-        run: >-
-          sudo env WHERRY_SYSTEMD_DEV=1 WHERRY_SYSTEMD_PLUGIN="$RUNNER_TEMP/wherry-plugin-systemd"
-          "$RUNNER_TEMP/systemd.test" -test.count=1 -test.v -test.run 'OnSystemd|Conformance|Transient|DaemonReload|TwoRuns|UnitPropertiesOn'
+        shell: bash
+        run: |
+          sudo env WHERRY_SYSTEMD_DEV=1 WHERRY_SYSTEMD_PLUGIN="$RUNNER_TEMP/wherry-plugin-systemd" \
+            "$RUNNER_TEMP/systemd.test" -test.count=1 -test.v -test.run 'OnSystemd|Conformance|Transient|DaemonReload|TwoRuns|UnitPropertiesOn' |
+            tee "$RUNNER_TEMP/systemd-host.log"
+          # A skipped suite passes too, so each must have run.
+          for test in TestConformance TestConformanceOverTheLink; do
+            grep -x -- "--- PASS: $test ([0-9.]*s)" "$RUNNER_TEMP/systemd-host.log" >/dev/null
+          done
       # The steps below need the tags for the previous release, which fetch-depth: 0 fetched, Go, for the plugin
       # protocol check's download of pluginsdk, and cosign, which verifies the wherry and plugin releases as the
       # README's commands do. 05 and 06 skip, with the check's notice, and 04 installs the checkout's plugin, when the
