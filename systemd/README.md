@@ -863,12 +863,22 @@ export WHERRY_VERSION=$(sed -n 's/^  WHERRY_VERSION: //p' .github/workflows/ci.y
 for step in systemd/test/e2e/0*.sh; do "$step" || { systemd/test/e2e/collect.sh; break; }; done
 ```
 
+When the workflow sets `WHERRY_REF`, check out benemon/wherry at that commit
+in `wherry-src` at the repository root first; `02-fetch.sh` then builds wherry
+there in place of the release:
+
+```sh
+export WHERRY_REF=$(sed -n "s/^  WHERRY_REF: //p" .github/workflows/ci.yml | tr -d "'")
+git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src checkout "$WHERRY_REF"
+```
+
 1. `01-broker.sh`, harness, starts a single-broker Kafka with TLS and SCRAM
    on `127.0.0.1:9093` through `test/kafka/up.sh` of `WHERRY_VERSION`,
    pinned by SHA-256.
 2. `02-fetch.sh` first runs the plugin protocol check below. It then
    downloads and verifies, each in an empty directory, wherry of
-   `WHERRY_VERSION` with step 1's commands, and the plugin of the previous
+   `WHERRY_VERSION` with step 1's commands, or with `WHERRY_REF` builds it
+   from `wherry-src` instead, and the plugin of the previous
    release, the latest `systemd/v*` tag before `HEAD`, with the
    [Install plugins](https://benemon.github.io/wherry/operations-receivers#install-plugins)
    commands. The plugin's version is the tag less `systemd/`, with its `v`,

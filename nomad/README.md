@@ -1078,6 +1078,15 @@ export WHERRY_VERSION=$(sed -n 's/^  WHERRY_VERSION: //p' .github/workflows/e2e.
 for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; break; }; done
 ```
 
+When the workflow sets `WHERRY_REF`, check out benemon/wherry at that commit
+in `wherry-src` at the repository root first; `02-wherry.sh` then builds wherry
+there in place of the release:
+
+```sh
+export WHERRY_REF=$(sed -n "s/^  WHERRY_REF: //p" .github/workflows/e2e.yml | tr -d "'")
+git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src checkout "$WHERRY_REF"
+```
+
 1. `01-nomad.sh` replaces the systemd unit `wherry-nomad` with a Nomad dev
    agent and the docker driver, waits for it to fingerprint the CNI
    plugins, and starts a single-broker Kafka with TLS and SCRAM through
@@ -1088,7 +1097,8 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
    receiver image's verifying fetch stage, and builds the receiver image
    from the checkout and from the latest `nomad/v*` tag before `HEAD`, both
    with `WHERRY_VERSION`, and the fake agent's image. It fails when there is
-   no such tag.
+   no such tag. With `WHERRY_REF`, it builds the CLI from `wherry-src` and
+   puts it in both images.
 3. `03-provision.sh` provisions as the operator guide does, in an operator
    working directory: `wherry operator init` with the broker's Kafka super
    user, `operator pool apply -f`, `tenant add`, `tenant pool add`, `tenant host add`, and
@@ -1115,7 +1125,7 @@ for step in nomad/test/e2e/0*.sh; do "$step" || { nomad/test/e2e/collect.sh; bre
    slow run, and rolls the job to the checkout's image once the run's agent
    task runs. The new receiver adopts the agent job and completes the run,
    and its metrics, on the client port the allocation maps the `metrics`
-   port to, count the adoption. Both images hold `WHERRY_VERSION`, so the
+   port to, count the adoption. Both images hold the same wherry, so the
    step upgrades the plugin.
 7. `07-rollback.sh` rolls the job back to the previous release's image and
    completes a run on it.
