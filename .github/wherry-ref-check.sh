@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: wherry-ref-check.sh PLUGIN...
-# Checks WHERRY_REF in .github/workflows/ci.yml and e2e.yml: the same in both, and '' or a full commit SHA in single
-# quotes. When it is set, it must be the commit of the pluginsdk tag each PLUGIN/go.mod requires, as go mod download
+# Checks WHERRY_REF in .github/workflows/ci.yml and e2e.yml: the same in both, and '' or a full commit SHA, quoted or
+# not. When it is set, it must be the commit of the pluginsdk tag each PLUGIN/go.mod requires, as go mod download
 # reports it in Origin: the tag keeps the commit fetchable once wherry squash-merges its pull request, and wherry and
 # the plugins then build from the same pluginsdk. Needs go and jq when it is set.
 set -euo pipefail
@@ -16,7 +16,7 @@ fail() {
 ref() { sed -n 's/^  WHERRY_REF: //p' ".github/workflows/$1"; }
 ref=$(ref ci.yml)
 [ "$ref" = "$(ref e2e.yml)" ] || fail "ci.yml sets WHERRY_REF $ref and e2e.yml $(ref e2e.yml); change both together"
-[[ $ref =~ ^\'([0-9a-f]{40})?\'$ ]] || fail "WHERRY_REF is $ref, not '' or a full commit SHA in single quotes"
+[[ $ref =~ ^\'([0-9a-f]{40})?\'$ || $ref =~ ^([0-9a-f]{40})$ ]] || fail "WHERRY_REF is $ref, not '' or a full commit SHA"
 want=${BASH_REMATCH[1]}
 if [ -z "$want" ]; then
 	echo "WHERRY_REF is empty"

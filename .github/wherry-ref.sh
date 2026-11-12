@@ -24,7 +24,7 @@ head=$(git -C "$src" rev-parse HEAD) || fail "$src is not a checkout of benemon/
 build() {
 	local out=$1
 	shift
-	(cd "$src" && env CGO_ENABLED=0 GOTOOLCHAIN=local "$@" go build -trimpath -o "$out" ./cmd/wherry)
+	(cd "$src" && env CGO_ENABLED=0 GOTOOLCHAIN=local GOWORK=off "$@" go build -trimpath -o "$out" ./cmd/wherry)
 }
 
 # reports fails unless the wherry version output on standard input, named $1 in errors, has revision WHERRY_REF.
@@ -39,8 +39,9 @@ build "$bin/wherry"
 "$bin/wherry" version | reports "$bin/wherry"
 
 for image in "$@"; do
+	arch=$(docker image inspect -f '{{.Architecture}}' "$image")
 	ctx=$(mktemp -d)
-	build "$ctx/wherry" GOOS=linux GOARCH="$(docker image inspect -f '{{.Architecture}}' "$image")"
+	build "$ctx/wherry" GOOS=linux GOARCH="$arch"
 	printf 'FROM %s\nCOPY --chown=0:0 --chmod=0755 wherry /usr/local/bin/wherry\n' "$image" | docker build -t "$image" -f - "$ctx"
 	rm -rf "$ctx"
 	docker run --rm "$image" version | reports "$image"

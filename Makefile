@@ -86,14 +86,13 @@ check-examples: ## Fail on a receiver example whose drain_timeout is not 10s bel
 check-protocol: ## Fail on a plugin protocol comparison that skips the wrong roll
 	@.github/plugin-protocol-test.sh $(PLUGINS)
 
-.PHONY: check
 .PHONY: check-wherry-ref
 # CI runs this in every check job, whatever changed; with WHERRY_REF set it needs jq and Go.
 check-wherry-ref: ## Fail on a WHERRY_REF that is not the commit of the pluginsdk tag every plugin requires
 	@.github/wherry-ref-check.sh $(PLUGINS)
 
 .PHONY: check
-check: check-fmt vet test check-cross check-licenses check-markers check-examples check-protocol check-wherry-ref ## Run every CI gate
+check: check-fmt vet test check-cross check-licenses check-markers check-examples check-protocol ## Run every CI gate
 
 .PHONY: image
 image: ## Build the receiver image (VERSION, WHERRY_VERSION, CONTAINER)

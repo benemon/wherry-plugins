@@ -17,7 +17,7 @@ env:
   # release, so change both together.
   WHERRY_VERSION: v0.1.2-rc.1
   # '', or, between a wherry plugin protocol change and its release, the full commit SHA of the pluginsdk tag the
-  # plugins require, in single quotes; wherry's CONTRIBUTING.md gives the order. The systemd-host job and e2e.yml's
+  # plugins require, quoted or not; wherry's README, "Changing the plugin protocol", gives the order. The systemd-host job and e2e.yml's
   # lanes then build wherry at that commit and use it in place of WHERRY_VERSION's, which must still be a release: the
   # nomad-image job and the receiver image builds fetch it. The check jobs fail on any other commit, and release.yml
   # refuses a stable tag while it is set. e2e.yml sets the same; change both together.
