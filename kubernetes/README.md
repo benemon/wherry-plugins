@@ -1213,6 +1213,15 @@ export WHERRY_VERSION=$(sed -n 's/^  WHERRY_VERSION: //p' .github/workflows/e2e.
 for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/collect.sh; break; }; done
 ```
 
+When the workflow sets `WHERRY_REF`, check out benemon/wherry at that commit
+in `wherry-src` at the repository root first; `02-wherry.sh` then builds wherry
+there in place of the release:
+
+```sh
+export WHERRY_REF=$(sed -n "s/^  WHERRY_REF: //p" .github/workflows/e2e.yml | tr -d "'")
+git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src checkout "$WHERRY_REF"
+```
+
 1. `01-cluster.sh` replaces the kind cluster `wherry-e2e`, installs
    Strimzi and a single-node Kafka 4.3 (KRaft, share groups, TLS with
    SCRAM-SHA-512, simple authorization, `kafka-admin` the Kafka super
@@ -1223,7 +1232,8 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    with `make image` from the checkout as `wherry-receiver:e2e`, and from
    the latest `kubernetes/v*` tag before `HEAD`, through `git archive`, as
    `wherry-receiver:previous`, both with `WHERRY_VERSION`, and the fake
-   agent's image. It fails when there is no such tag.
+   agent's image. It fails when there is no such tag. With `WHERRY_REF`, it
+   builds the CLI from `wherry-src` and puts it in both images.
 3. `03-provision.sh` provisions as the operator guide does, in an operator
    working directory: `wherry operator init` with `kafka-admin`,
    `operator pool apply -f`, `tenant add`, `tenant pool add`, `tenant host add`, and
@@ -1262,8 +1272,8 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    selector goes to the signature with the lowest topic name, the same
    profile on every run, and ends completed or failed.
 6. `06-upgrade.sh` rolls the receiver to the previous release's image, then
-   upgrades it to the checkout's, and completes a run. Both images hold
-   `WHERRY_VERSION`, so the step upgrades the plugin.
+   upgrades it to the checkout's, and completes a run. Both images hold the
+   same wherry, so the step upgrades the plugin.
 7. `07-rollback.sh` rolls the receiver back to the previous release's image
    and completes a run on it.
 

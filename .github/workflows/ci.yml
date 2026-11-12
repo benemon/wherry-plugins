@@ -16,6 +16,12 @@ env:
   # The wherry release the nomad-image job builds with and the systemd-host job installs; e2e.yml pins the same
   # release, so change both together.
   WHERRY_VERSION: v0.1.2-rc.1
+  # '', or, between a wherry plugin protocol change and its release, the full commit SHA of the pluginsdk tag the
+  # plugins require, quoted or not; wherry's README, "Changing the plugin protocol", gives the order. The systemd-host job and e2e.yml's
+  # lanes then build wherry at that commit and use it in place of WHERRY_VERSION's, which must still be a release: the
+  # nomad-image job and the receiver image builds fetch it. The check jobs fail on any other commit, and release.yml
+  # refuses a stable tag while it is set. e2e.yml sets the same; change both together.
+  WHERRY_REF: ''
 
 jobs:
   nomad-image:
@@ -55,15 +61,18 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: >-
           .github/changed.sh "$BASE"
-          "^($PLUGIN/|examples/$PLUGIN/|Makefile\$|\.github/(check-examples|plugin-protocol(-test)?)\.sh\$|\.github/workflows/ci\.yml\$|\.github/changed\.sh\$)"
+          "^($PLUGIN/|examples/$PLUGIN/|Makefile\$|\.github/(check-examples|plugin-protocol(-test)?|wherry-ref-check)\.sh\$|\.github/workflows/ci\.yml\$|\.github/changed\.sh\$)"
       - name: Set up Go
-        if: steps.changes.outputs.changed == 'true'
+        if: steps.changes.outputs.changed == 'true' || env.WHERRY_REF != ''
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           check-latest: true
           cache: true
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
+      # Whatever changed, since WHERRY_REF must follow the pluginsdk tag the plugin requires; it needs Go only when set.
+      - name: Require WHERRY_REF to be the commit of the pluginsdk tag the plugin requires
+        run: make check-wherry-ref PLUGINS="$PLUGIN"
       - name: Run the plugin's gates
         if: steps.changes.outputs.changed == 'true'
         run: make check PLUGINS="$PLUGIN"
@@ -140,7 +149,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: >-
           .github/changed.sh "$BASE"
-          "^(systemd/|examples/systemd/|Makefile\$|\.github/workflows/ci\.yml\$|\.github/changed\.sh\$|\.github/plugin-protocol\.sh\$)"
+          "^(systemd/|examples/systemd/|Makefile\$|\.github/workflows/ci\.yml\$|\.github/(changed|plugin-protocol|wherry-ref)\.sh\$)"
       - name: Set up Go
         if: steps.changes.outputs.changed == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -149,6 +158,14 @@ jobs:
           check-latest: true
           cache: true
           cache-dependency-path: systemd/go.sum
+      - name: Check out wherry at WHERRY_REF
+        if: steps.changes.outputs.changed == 'true' && env.WHERRY_REF != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: benemon/wherry
+          ref: ${{ env.WHERRY_REF }}
+          path: wherry-src
+          persist-credentials: false
       - name: Prepare the host as the plugin's README installs it
         if: steps.changes.outputs.changed == 'true'
         run: |
