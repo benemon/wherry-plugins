@@ -15,7 +15,7 @@ permissions:
 env:
   # The wherry release whose CLI provisions and submits, and which the receiver image holds.
   # ci.yml pins the same release for its nomad-image and systemd-host jobs; change both together.
-  WHERRY_VERSION: v0.1.2-rc.1
+  WHERRY_VERSION: v0.1.2
   # '' or a full commit SHA in single quotes, as ci.yml sets it; change both together. When set, the lanes build wherry
   # at that commit and put it in the CLI and both receiver images in place of WHERRY_VERSION's.
   WHERRY_REF: ''
