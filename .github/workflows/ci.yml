@@ -15,7 +15,7 @@ permissions:
 env:
   # The wherry release the nomad-image job builds with and the systemd-host job installs; e2e.yml pins the same
   # release, so change both together.
-  WHERRY_VERSION: v0.1.2-rc.1
+  WHERRY_VERSION: v0.1.2
   # '', or, between a wherry plugin protocol change and its release, the full commit SHA of the pluginsdk tag the
   # plugins require, quoted or not; wherry's README, "Changing the plugin protocol", gives the order. The systemd-host job and e2e.yml's
   # lanes then build wherry at that commit and use it in place of WHERRY_VERSION's, which must still be a release: the
