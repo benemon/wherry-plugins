@@ -182,7 +182,7 @@ func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings, 
 		t.Skip("WHERRY_NOMAD_DEV_ADDR not set")
 	}
 	// The completing job exits 0 only with pluginsdktest.Credentials delivered at their targets.
-	return settings(t, "completes", execConfig(address, "/bin/sh", "-c", `sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`)),
+	return settings(t, "completes", execConfig(address, "/bin/sh", "-c", `mkdir -p "$WHERRY_OUTPUT_DIR/.wherry" && echo conformance working > "$WHERRY_OUTPUT_DIR/.wherry/working.tmp" && mv "$WHERRY_OUTPUT_DIR/.wherry/working.tmp" "$WHERRY_OUTPUT_DIR/.wherry/working" || exit 1; sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`)),
 		settings(t, "never-starts", execConfig(address, "/nonexistent/wherry-conformance")),
 		// No dev node has a terabyte of memory, so Nomad blocks the job's evaluation and never places it.
 		settings(t, "pending", merge(execConfig(address, "/bin/true"), map[string]any{"runtime": map[string]any{"resources": map[string]any{"memory_mb": 1 << 20}}}))

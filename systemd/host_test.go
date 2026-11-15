@@ -118,7 +118,7 @@ func conformanceSettings(t *testing.T) (pluginsdk.Settings, pluginsdk.Settings) 
 	t.Helper()
 	onSystemd(t)
 	pool := hostPool(t)
-	completes := settings(t, "completes", unitConfig("/bin/sh", "-c", `sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`))
+	completes := settings(t, "completes", unitConfig("/bin/sh", "-c", `mkdir -p "$WHERRY_OUTPUT_DIR/.wherry" && echo conformance working > "$WHERRY_OUTPUT_DIR/.wherry/working.tmp" && mv "$WHERRY_OUTPUT_DIR/.wherry/working.tmp" "$WHERRY_OUTPUT_DIR/.wherry/working" || exit 1; sleep 10; test "$CONFORMANCE_TOKEN" = conformance-env-value && test "$(cat "$WHERRY_CREDENTIALS_DIR/conformance-key")" = conformance-file-value || exit 1; echo '{"type":"result","result":"done"}'`))
 	neverStarts := settings(t, "never-starts", unitConfig("/nonexistent/wherry-conformance"))
 	completes.Pool, neverStarts.Pool = pool, pool
 	return completes, neverStarts

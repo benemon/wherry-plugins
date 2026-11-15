@@ -25,7 +25,7 @@ jobs:
       actions: read
       contents: read
     steps:
-      - name: Require a green ci run for the tagged commit
+      - name: Require a green ci run for the tagged commit, and no WHERRY_REF for a stable tag
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
@@ -41,6 +41,16 @@ jobs:
             exit 1
           fi
           echo "ci for $sha concluded success"
+          # A stable release takes wherry from a release alone; ci.yml documents WHERRY_REF.
+          case "$RELEASE_TAG" in (*-*) exit 0;; esac
+          for workflow in ci.yml e2e.yml; do
+            ref=$(gh api -H 'Accept: application/vnd.github.raw+json' \
+              "repos/$GITHUB_REPOSITORY/contents/.github/workflows/$workflow?ref=$sha" | sed -n 's/^  WHERRY_REF: //p')
+            if [ "$ref" != "''" ]; then
+              echo "$workflow at $sha sets WHERRY_REF ${ref:-(no line read)}, not ''; tag a pre-release, or a commit that sets ''." >&2
+              exit 1
+            fi
+          done
 
   publish:
     needs: validate

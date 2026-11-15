@@ -7,3 +7,4 @@ go.work.sum
 /nomad/nomad
 /kubernetes/kubernetes
 /systemd/systemd
+/wherry-src/

@@ -153,6 +153,7 @@ type Systemd struct {
 	fetcher          *http.Client
 	metrics          *PlatformMetrics
 	logger           hclog.Logger
+	working          WorkingReads
 
 	mu    sync.Mutex
 	conn  manager
@@ -1248,6 +1249,20 @@ func (profile *Systemd) stop(ctx context.Context, name string) error {
 		return err
 	}
 	return errors.New("the agent outlived SIGKILL")
+}
+
+// ReadWorking reads the working file beneath the run's work directory, as pluginsdk.ReadWorkingFile does; a replaced or
+// purged run reads as nothing.
+func (profile *Systemd) ReadWorking(ctx context.Context, encoded pluginsdk.Handle) ([]byte, error) {
+	job, m, err := profile.current(encoded)
+	switch {
+	case errors.Is(err, errReplaced) || err == nil && m == nil:
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	data, err := profile.working.Read(ctx, job, profile.workDir(job), "outputs/"+pluginsdk.WorkingFile)
+	return data, profile.failed("read working file", err)
 }
 
 // Collect reads the outputs tree once no process of the unit is left, and reads what Select chooses.

@@ -4,6 +4,8 @@
 name      = "wherry-receiver"
 type      = "host"
 plugin_id = "mkdir"
+# The job's node pool: a volume without one goes to a client in any pool.
+node_pool = "default"
 
 capability {
   access_mode     = "single-node-single-writer"

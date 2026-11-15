@@ -5,8 +5,8 @@ set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 e2e=$repo/systemd/test/e2e
 work=${E2E_WORK:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/wherry-systemd-e2e}
-# The operator's working directory, and the host's own paths under $E2E_WORK/host. $E2E_WORK/bin holds the verified
-# wherry CLI that provisions and lists the host's receivers.
+# The operator's working directory, and the host's own paths under $E2E_WORK/host. $E2E_WORK/bin holds the wherry
+# CLI that provisions and lists the host's receivers.
 operator=$work/operator
 libexec=/usr/local/libexec/wherry
 export PATH=$work/bin:$PATH XDG_CONFIG_HOME=$work/host/config XDG_STATE_HOME=$work/host/state

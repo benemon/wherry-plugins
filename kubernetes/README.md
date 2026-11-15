@@ -626,6 +626,28 @@ no CA for it ([Image](#image)). Against an endpoint whose certificate the
 receiver does not trust, each S3 input fails with `fetch <name>:
 certificate` and each S3 output with `not uploaded: request failed`.
 
+### Working status
+
+While the agent pod runs, the receiver asks the plugin for the agent's
+current step, the line the agent keeps in `.wherry/working` beneath its
+output directory. The plugin reads `outputs/.wherry/working` in the run's
+directory on the runs claim, the only directory the agent pod mounts there.
+It opens each component without following a link, opens the file without
+blocking, and reads at most 1025 bytes. It reads nothing when the run's
+directory or the file is missing, as after a purge, or when the agent has
+made the file unreadable: a link in any component, a FIFO, a device, a
+directory, a file with more than one link, a file the receiver's UID cannot
+open, or a file over 1 KiB. None of these counts as a failed call. A read
+that fails otherwise, such as an I/O error on the claim, counts by its
+class. The plugin checks that the handle names a pod of the receiver's pool
+before it reads.
+
+A read whose 5-second deadline passes returns with class `timeout`, and the
+plugin starts no other read of that run until it ends, so a read hung on a
+network file system holds one goroutine. A pod's name is the run's, so a
+handle of an earlier attempt reads the run's current attempt, which the
+plugin protocol permits.
+
 ### Agent environment
 
 The plugin sets the variables of the plugin protocol's `AgentEnvironment`
@@ -638,12 +660,13 @@ operator sets them. A command the agent runs can set the variables again.
 
 ## Metrics
 
-The plugin speaks plugin protocol version 11, in which Dispatch returns at
-creation and Lookup reports a pod the scheduler cannot place as pending. A
+The plugin speaks plugin protocol version 12, in which Dispatch returns at
+creation, Lookup reports a pod the scheduler cannot place as pending, and
+ReadWorking reads the agent's [working status](#working-status). A
 receiver of another protocol version refuses it at its start, as
 [Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
-the receiver and its plugins upgrade together: protocol 11 needs wherry
-v0.1.0 or later. The receiver times placement itself. For each
+the receiver and its plugins upgrade together: protocol 12 needs wherry
+v0.1.2 or later. The receiver times placement itself. For each
 plugin profile the plugin reports these families, which the receiver serves
 on its `/metrics` with the plugin profile's name as `profile`:
 
@@ -1190,6 +1213,15 @@ export WHERRY_VERSION=$(sed -n 's/^  WHERRY_VERSION: //p' .github/workflows/e2e.
 for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/collect.sh; break; }; done
 ```
 
+When the workflow sets `WHERRY_REF`, check out benemon/wherry at that commit
+in `wherry-src` at the repository root first; `02-wherry.sh` then builds wherry
+there in place of the release:
+
+```sh
+export WHERRY_REF=$(sed -n "s/^  WHERRY_REF: //p" .github/workflows/e2e.yml | tr -d "'")
+git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src checkout "$WHERRY_REF"
+```
+
 1. `01-cluster.sh` replaces the kind cluster `wherry-e2e`, installs
    Strimzi and a single-node Kafka 4.3 (KRaft, share groups, TLS with
    SCRAM-SHA-512, simple authorization, `kafka-admin` the Kafka super
@@ -1200,7 +1232,8 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    with `make image` from the checkout as `wherry-receiver:e2e`, and from
    the latest `kubernetes/v*` tag before `HEAD`, through `git archive`, as
    `wherry-receiver:previous`, both with `WHERRY_VERSION`, and the fake
-   agent's image. It fails when there is no such tag.
+   agent's image. It fails when there is no such tag. With `WHERRY_REF`, it
+   builds the CLI from `wherry-src` and puts it in both images.
 3. `03-provision.sh` provisions as the operator guide does, in an operator
    working directory: `wherry operator init` with `kafka-admin`,
    `operator pool apply -f`, `tenant add`, `tenant pool add`, `tenant host add`, and
@@ -1239,8 +1272,8 @@ for step in kubernetes/test/e2e/0*.sh; do "$step" || { kubernetes/test/e2e/colle
    selector goes to the signature with the lowest topic name, the same
    profile on every run, and ends completed or failed.
 6. `06-upgrade.sh` rolls the receiver to the previous release's image, then
-   upgrades it to the checkout's, and completes a run. Both images hold
-   `WHERRY_VERSION`, so the step upgrades the plugin.
+   upgrades it to the checkout's, and completes a run. Both images hold the
+   same wherry, so the step upgrades the plugin.
 7. `07-rollback.sh` rolls the receiver back to the previous release's image
    and completes a run on it.
 

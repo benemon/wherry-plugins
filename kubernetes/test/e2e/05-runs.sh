@@ -40,7 +40,8 @@ input=$(submit e2e=fake --prompt 'e2e: input' --input "$work/input.bin")
 finish "$input" TASK_STATE_COMPLETED
 replied "$input" "file input.bin 600 1001 $(sha256 "$work/input.bin")"
 
-broken=$(submit e2e=broken --prompt 'e2e: start failure')
+# A start failure is retried in place for up to 5 minutes, so the run's short start bound ends it FAILED first.
+broken=$(submit e2e=broken --start-by 90s --prompt 'e2e: start failure')
 finish "$broken" TASK_STATE_FAILED
 kubectl logs -n "$namespace" deployment/wherry-receiver >"$work/receiver.log"
 grep -F "run $broken: job never started (image): " "$work/receiver.log" >/dev/null ||
@@ -50,7 +51,7 @@ grep -F "run $broken: job never started (image): " "$work/receiver.log" >/dev/nu
 # signatures have equal spare capacity and the host takes the lowest topic name: either profile may run it, and the
 # winner is fixed by the two signatures' digests, so it is the same profile on every run. It is accepted and ends
 # terminal within the budget, completed on 10-fake.yaml or failed on 20-broken.yaml.
-unselected=$(submit '' --prompt 'e2e: no selector')
+unselected=$(submit '' --start-by 90s --prompt 'e2e: no selector')
 code=0
 host wait "$unselected" --timeout 5m --outputs-dir "$work/outputs/$unselected" >"$work/$unselected.reply" || code=$?
 host logs "$unselected" >"$work/$unselected.log"

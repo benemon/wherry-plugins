@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -145,5 +146,56 @@ func (reader *LineReader) emit(ctx context.Context, data []byte, advance int64) 
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// readWorkingFile is pluginsdk.ReadWorkingFile, which a test replaces to hold a read.
+var readWorkingFile = pluginsdk.ReadWorkingFile
+
+// WorkingReads runs ReadWorkingFile, which takes no context, at most once at a time per run, so a read hung on a
+// network file system holds one goroutine rather than one a call.
+type WorkingReads struct {
+	mu      sync.Mutex
+	reading map[string]bool
+}
+
+// Read reads name beneath root for run, returning once ctx ends with its error. A refusal, and a call while the run's
+// read is in flight, read as nothing; any other error is returned for the caller to count.
+func (reads *WorkingReads) Read(ctx context.Context, run, root, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	reads.mu.Lock()
+	if reads.reading[run] {
+		reads.mu.Unlock()
+		return nil, nil
+	}
+	if reads.reading == nil {
+		reads.reading = map[string]bool{}
+	}
+	reads.reading[run] = true
+	reads.mu.Unlock()
+	type result struct {
+		data []byte
+		err  error
+	}
+	read := make(chan result, 1)
+	go func() {
+		defer func() {
+			reads.mu.Lock()
+			delete(reads.reading, run)
+			reads.mu.Unlock()
+		}()
+		data, err := readWorkingFile(root, name)
+		read <- result{data, err}
+	}()
+	select {
+	case result := <-read:
+		if errors.Is(result.err, pluginsdk.ErrRefused) {
+			return nil, nil
+		}
+		return result.data, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }

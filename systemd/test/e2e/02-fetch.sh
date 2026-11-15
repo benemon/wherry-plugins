@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Fetches and verifies the binaries the install and the upgrade install, each in an empty directory of its own:
 # - wherry of the release WHERRY_VERSION, with step 1's commands of systemd/README.md's Run the receiver as a systemd
-#   service, into $E2E_WORK/wherry, and, as the harness's CLI, into $E2E_WORK/bin;
+#   service, or, with WHERRY_REF set, built from that commit by .github/wherry-ref.sh, into $E2E_WORK/wherry, and, as
+#   the harness's CLI, into $E2E_WORK/bin;
 # - the systemd plugin of the previous release, the latest systemd/v* tag before HEAD, with the commands of Install
 #   plugins that step 1 names, into $E2E_WORK/previous, keeping its version, the tag less its systemd/ prefix, in
 #   $E2E_WORK/previous-version; the full tag selects the release's download route alone;
@@ -15,18 +16,22 @@ arch=$(arch)
 protocol_check
 
 # Step 1: wherry.
-mkdir "$work/wherry"
-(
-	cd "$work/wherry"
-	base=https://github.com/benemon/wherry/releases/download/$WHERRY_VERSION
-	archive=wherry_${WHERRY_VERSION}_linux_$arch.tar.gz
-	curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
-	cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
-		--certificate-identity-regexp '^https://github\.com/benemon/wherry/\.github/workflows/release\.yml@refs/tags/v' \
-		--certificate-oidc-issuer https://token.actions.githubusercontent.com
-	sha256sum --ignore-missing -c checksums.txt
-	tar -xzf "$archive" --strip-components=1 "${archive%.tar.gz}/wherry"
-)
+if [ -n "${WHERRY_REF:-}" ]; then
+	"$repo/.github/wherry-ref.sh" "$work/wherry"
+else
+	mkdir "$work/wherry"
+	(
+		cd "$work/wherry"
+		base=https://github.com/benemon/wherry/releases/download/$WHERRY_VERSION
+		archive=wherry_${WHERRY_VERSION}_linux_$arch.tar.gz
+		curl -fsSL --remote-name-all "$base/$archive" "$base/checksums.txt" "$base/checksums.txt.sigstore.json"
+		cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+			--certificate-identity-regexp '^https://github\.com/benemon/wherry/\.github/workflows/release\.yml@refs/tags/v' \
+			--certificate-oidc-issuer https://token.actions.githubusercontent.com
+		sha256sum --ignore-missing -c checksums.txt
+		tar -xzf "$archive" --strip-components=1 "${archive%.tar.gz}/wherry"
+	)
+fi
 install -m 0755 "$work/wherry/wherry" "$work/bin/wherry"
 wherry version
 
