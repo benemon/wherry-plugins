@@ -1245,6 +1245,11 @@ func (profile *Nomad) readWorking(ctx context.Context, alloc *api.Allocation) ([
 	code, err := profile.client.Allocations().Exec(ctx, alloc, taskName, false, workingCommand, strings.NewReader(""), stdout, io.Discard, nil, (&api.QueryOptions{}).WithContext(ctx))
 	switch {
 	case err != nil:
+		// The client drops a task's exec handler before the server's allocation shows the task ended; the API keeps
+		// only the text of the client's answer.
+		if err.Error() == fmt.Sprintf("task %q is not running.", taskName) {
+			return nil, nil
+		}
 		// The task may have ended since the allocation was read.
 		if _, running, infoErr := profile.running(ctx, alloc.ID); infoErr == nil && !running {
 			return nil, nil

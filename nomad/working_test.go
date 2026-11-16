@@ -99,7 +99,7 @@ func closeWith(text string) http.HandlerFunc {
 			return
 		}
 		defer conn.Close()
-		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, text))
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, text))
 	}
 }
 
@@ -239,14 +239,21 @@ func TestReadWorkingExecErrors(t *testing.T) {
 		alloc []http.HandlerFunc
 		text  string
 		class string
+		// reads is the allocation reads the call makes, when set.
+		reads int
 	}{
-		"task ended":        {[]http.HandlerFunc{runningAllocation, stopped}, `task "agent" is not running.`, ""},
-		"desired stop":      {[]http.HandlerFunc{runningAllocation, allocation(api.AllocClientStatusRunning, api.AllocDesiredStatusStop, "running")}, `task "agent" is not running.`, ""},
-		"task still runs":   {[]http.HandlerFunc{runningAllocation}, "exec failed", "other"},
-		"permission denied": {[]http.HandlerFunc{runningAllocation}, "Permission denied", "denied"},
+		"task ended":                {[]http.HandlerFunc{runningAllocation, stopped}, "exec failed", "", 2},
+		"desired stop":              {[]http.HandlerFunc{runningAllocation, allocation(api.AllocClientStatusRunning, api.AllocDesiredStatusStop, "running")}, "exec failed", "", 2},
+		"task still runs":           {[]http.HandlerFunc{runningAllocation}, "exec failed", "other", 0},
+		"permission denied":         {[]http.HandlerFunc{runningAllocation}, "Permission denied", "denied", 0},
+		"client ended, server lags": {[]http.HandlerFunc{runningAllocation}, `task "agent" is not running.`, "", 1},
+		"another task's text":       {[]http.HandlerFunc{runningAllocation}, `task "other" is not running.`, "other", 0},
+		"prefixed text":             {[]http.HandlerFunc{runningAllocation}, `exec failed: task "agent" is not running.`, "other", 0},
+		"suffixed text":             {[]http.HandlerFunc{runningAllocation}, `task "agent" is not running. (retry)`, "other", 0},
+		"not started yet":           {[]http.HandlerFunc{runningAllocation}, `task "agent" not started yet.`, "other", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
-			profile, _ := workingServer(t, closeWith(test.text), test.alloc...)
+			profile, requests := workingServer(t, closeWith(test.text), test.alloc...)
 			data, err := profile.ReadWorking(context.Background(), workingHandle)
 			var failure *pluginsdk.Error
 			switch {
@@ -261,6 +268,9 @@ func TestReadWorkingExecErrors(t *testing.T) {
 			}
 			if got := samples(t, profile); len(got) != want {
 				t.Fatalf("samples %v; want %d", got, want)
+			}
+			if reads := slices.DeleteFunc(requests(), func(request string) bool { return request != "GET /v1/allocation/"+workingAlloc }); test.reads != 0 && len(reads) != test.reads {
+				t.Fatalf("allocation reads %d; want %d", len(reads), test.reads)
 			}
 		})
 	}
