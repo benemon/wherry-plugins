@@ -242,10 +242,10 @@ func TestReadWorkingExecErrors(t *testing.T) {
 		// reads is the allocation reads the call makes, when set.
 		reads int
 	}{
-		"task ended":        {[]http.HandlerFunc{runningAllocation, stopped}, "exec failed", "", 2},
-		"desired stop":      {[]http.HandlerFunc{runningAllocation, allocation(api.AllocClientStatusRunning, api.AllocDesiredStatusStop, "running")}, "exec failed", "", 2},
-		"task still runs":   {[]http.HandlerFunc{runningAllocation}, "exec failed", "other", 0},
-		"permission denied": {[]http.HandlerFunc{runningAllocation}, "Permission denied", "denied", 0},
+		"task ended":                {[]http.HandlerFunc{runningAllocation, stopped}, "exec failed", "", 2},
+		"desired stop":              {[]http.HandlerFunc{runningAllocation, allocation(api.AllocClientStatusRunning, api.AllocDesiredStatusStop, "running")}, "exec failed", "", 2},
+		"task still runs":           {[]http.HandlerFunc{runningAllocation}, "exec failed", "other", 0},
+		"permission denied":         {[]http.HandlerFunc{runningAllocation}, "Permission denied", "denied", 0},
 		"client ended, server lags": {[]http.HandlerFunc{runningAllocation}, `task "agent" is not running.`, "", 1},
 		"another task's text":       {[]http.HandlerFunc{runningAllocation}, `task "other" is not running.`, "other", 0},
 		"prefixed text":             {[]http.HandlerFunc{runningAllocation}, `exec failed: task "agent" is not running.`, "other", 0},
