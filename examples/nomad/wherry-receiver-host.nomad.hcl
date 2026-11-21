@@ -12,7 +12,9 @@
 #   nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle config=@config.yaml
 #   nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl   # with ACLs enabled
 #   nomad job run -var uid=<UID> -var gid=<GID> examples/nomad/wherry-receiver-host.nomad.hcl
-# policy.hcl is the plugin ACL policy. config.yaml is the local configuration provided to receiver apply.
+# policy.hcl is the plugin ACL policy. config.yaml is the local configuration provided to receiver apply. The bundle
+# carries the broker's CA; a receiver whose record names another broker address adds ca=@<CA file> to the put and sets
+# ca_file in config.yaml.
 # Upgrade: install a new version beside the old on every client, apply its pin, repoint current, then restart the job.
 # Rollback: apply the previous pin, repoint current to the previous version and restart. Preserve the state volume.
 # CI validates this job but does not run it.
@@ -85,7 +87,9 @@ job "wherry-receiver" {
         destination = "/var/lib/wherry"
       }
 
-      # A private CA the broker's certificate chains to, the variable's item ca; empty without it.
+      # The broker's CA for a receiver whose record names another broker address than the operator's, whose bundle
+      # carries no CA, or an explicit override: the variable's item ca, which config-host.yaml's ca_file then names.
+      # Empty without the item, as for a receiver on the operator's broker, whose bundle carries the CA.
       template {
         destination = "secrets/kafka-ca.pem"
         data        = <<-EOT

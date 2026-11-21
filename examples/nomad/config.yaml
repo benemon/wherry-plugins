@@ -3,8 +3,11 @@
 # /secrets/receiver.bundle from the item bundle. state_dir is on the job's host volume at /var/lib/wherry. The image
 # installs the plugin in plugin_dir.
 bundle: /secrets/receiver.bundle
-# For a broker under a private CA: the variable's item ca, which the job renders to /secrets/kafka-ca.pem. Unset, the
-# system roots.
+# Unset, the receiver trusts the broker through the ca its bundle carries, else the system roots: wherry operator
+# receiver apply writes the operator's CA into the bundle when the record names the operator's broker and operator.yaml
+# names a ca_file. Set it only for a receiver whose record names another broker address, whose bundle carries no CA, or
+# as an explicit override: the variable's item ca, which the job renders to /secrets/kafka-ca.pem. A ca_file overrides
+# the bundle's ca, so a stale file hides a refreshed CA.
 # ca_file: /secrets/kafka-ca.pem
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins

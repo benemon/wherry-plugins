@@ -11,7 +11,7 @@ plugins:
     profiles:
       # Claude Code, each run as a dynamic user of its own.
       - name: host
-        agent: claude
+        agent: claude-code
         config:
           runtime:
             command: [/bin/sh, -c]

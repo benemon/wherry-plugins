@@ -761,7 +761,8 @@ Run the repository commands from that checkout and the operator commands from yo
    Add `storageClassName` to the runs claim `wherry-runs` in the copy's `receiver.yaml`.
    Name a storage class that provisions ReadWriteMany volumes.
    Follow the [runs claim reference](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#runs-claim) for storage requirements.
-   For a private broker CA, copy the certificates into `kafka-ca.crt`, enable the CA ConfigMap generator and set `ca_file` in the copy's [config.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/config.yaml).
+   The bundle carries the broker's CA when the record names the operator's broker and `operator.yaml` names a `ca_file`, so the copy needs no CA file for the broker ([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
+   For a receiver whose record sets `broker` to an in-cluster listener, step 4's exception, whose bundle carries no CA: copy the broker's CA into `kafka-ca.crt`, enable the ConfigMap generator in the copy's [kustomization.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/kustomization.yaml), enable the `kafka-ca` mount and volume in its [receiver.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/receiver.yaml), and set `ca_file` in its [config.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/config.yaml).
    The [receiver deployment reference](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#receiver-deployment) gives the command that copies Strimzi's cluster CA.
    For a private storage CA, enable the CA mount in [receiver.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/receiver.yaml) and supply a full system trust bundle.
    The [image reference](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image) describes both ways to supply that bundle.
@@ -773,7 +774,6 @@ Run the repository commands from that checkout and the operator commands from yo
    pool: build
    plugin_sha256:
      kubernetes: <the image's plugin pin>
-   broker: wherry-kafka-kafka-bootstrap.kafka.svc:9093
    plugins:
      kubernetes:
        config:
@@ -783,7 +783,7 @@ Run the repository commands from that checkout and the operator commands from yo
            user: "1001"
        profiles:
          - name: container
-           agent: claude
+           agent: claude-code
            config:
              runtime:
                image: registry.example.com/claude-agent:1.0
@@ -795,7 +795,12 @@ Run the repository commands from that checkout and the operator commands from yo
                  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
    ```
 
-   Set your pool, broker and agent image.
+   Set your pool and agent image.
+   `claude-code` is Claude Code's [credential catalog id](https://benemon.github.io/wherry/configuration-operator#catalog-agents), from which `wherry operator pool apply` derives the agent's `CLAUDE_CODE_OAUTH_TOKEN` credential.
+   An agent of a non-catalog name, such as `claude`, keeps working with the credentials the pool's terms list for it; the profile's `agent` must be one of the pool's agents either way.
+   Without a `broker` line, the bundle names the address `wherry operator init` recorded and carries the operator's CA.
+   To reach Kafka through an in-cluster listener instead, add `broker: wherry-kafka-kafka-bootstrap.kafka.svc:9093`, the internal bootstrap address Strimzi's broker certificates name.
+   The operator knows no CA for another address, so that bundle carries none: the receiver then trusts the broker through step 3's `kafka-ca.crt` and `ca_file` ([Bundle and Kafka](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#bundle-and-kafka)).
    The service account supplies the API credential.
    Leave platform credentials unset for this deployment.
    On OpenShift, omit `runtime.user` and `runtime.group` so restricted-v2 assigns them.
@@ -847,7 +852,16 @@ Run the repository commands from that checkout and the operator commands from yo
    ```
 
    Check for `plugin kubernetes: version <version> protocol <n>` with the expected version.
-   From your entitled tenant's host, run `wherry host receivers` and wait for `kubernetes-1` to show `live`.
+
+8. In your operator working directory, check that the receiver is up:
+
+   ```sh
+   wherry operator receiver show kubernetes-1
+   ```
+
+   The first line is `status: live` once the receiver's first advertisement is verified against its key topic, with `last_advertised` on the next.
+   `status: silent` means it has not advertised yet; `stale` means its last advertisement is more than 120 seconds old, and `ended` that the receiver was revoked.
+   [`receiver show`](https://benemon.github.io/wherry/commands#wherry-operator-receiver-show-receiver) describes each status.
 
 ### Upgrade
 
@@ -858,7 +872,7 @@ Run the repository commands from that checkout and the operator commands from yo
 3. Immediately set the new image in your Kustomize copy and run `kubectl apply -k ~/wherry-receiver-kubernetes-1`.
    Copy any changed bundle or local configuration into the Kustomize directory before applying.
    Keep the state and runs claims.
-4. Wait for rollout completion, check the identity line and wait for the receiver to show `live`.
+4. Wait for rollout completion, check the identity line and wait for `wherry operator receiver show kubernetes-1` to report `status: live`.
    To roll back, apply the previous pin, restore the previous image reference and apply the Kustomize directory again.
 
 ### Uninstall
@@ -990,7 +1004,7 @@ That image is the reference that `kustomization.yaml`'s `images` names.
 `docker run` reads the pin as `podman run` does.
 After you apply a new pin, the receiver's restarts refuse the old binary until the new image runs.
 
-For a broker under Strimzi's cluster CA, this command copies the CA into the copy as `kafka-ca.crt`:
+For a receiver whose record names the in-cluster listener, whose bundle carries no CA ([Bundle and Kafka](#bundle-and-kafka)), this command copies Strimzi's cluster CA into the copy as `kafka-ca.crt`:
 
 ```sh
 kubectl get secret -n kafka wherry-kafka-cluster-ca-cert -o jsonpath='{.data.ca\.crt}' |
@@ -1062,16 +1076,34 @@ the listener sets `networkPolicyPeers`, they admit the receiver's
 namespace.
 
 The bundle `operator receiver apply` writes names the receiver file's
-`broker`, the internal bootstrap address, such as
-`wherry-kafka-kafka-bootstrap.kafka.svc:9093`, while hosts use the address
-in `operator.yaml`; Strimzi's broker certificates carry the internal
-Service names. The bundle carries no CA: the receiver trusts the broker
-through `config.yaml`'s `ca_file`, the Strimzi cluster CA
-(`<cluster>-cluster-ca-cert`, key `ca.crt`) copied in as `kafka-ca.crt`.
+`broker`, else the address in `operator.yaml`, and carries the operator's CA
+as `ca` when that broker is the operator's own and `operator.yaml` names a
+`ca_file`. The receiver trusts the broker through `config.yaml`'s `ca_file`,
+else the bundle's `ca`, else the system roots
+([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
+A receiver on the operator's broker therefore needs no CA file, and the
+example's `kafka-ca` ConfigMap generator, mount and volume stay commented
+out.
+
+The exception is a record whose `broker` names the internal bootstrap
+address, such as `wherry-kafka-kafka-bootstrap.kafka.svc:9093`, while hosts
+use the address in `operator.yaml`; Strimzi's broker certificates carry the
+internal Service names. The operator knows nothing of another address's CA,
+so that bundle carries none, and `receiver apply` asks for no CA: the
+receiver trusts the broker through `config.yaml`'s `ca_file`, the Strimzi
+cluster CA (`<cluster>-cluster-ca-cert`, key `ca.crt`) copied in as
+`kafka-ca.crt`, which the enabled generator, mount and volume carry. A
+`ca_file` overrides the bundle's `ca`, so keep the file current, or remove
+the line once the record is back on the operator's broker.
 
 Strimzi renews its cluster CA
-([Certificate renewal](https://strimzi.io/docs/operators/latest/deploying#con-certificate-renewal-str)),
-and nothing renews the receiver's copy:
+([Certificate renewal](https://strimzi.io/docs/operators/latest/deploying#con-certificate-renewal-str)).
+A receiver on the operator's broker takes the renewed CA from a refreshed
+bundle, as [Renew the broker CA](https://benemon.github.io/wherry/security#renew-the-broker-ca)
+describes: put the new certificate in the operator's `ca_file`, run
+`wherry operator receiver apply kubernetes-1`, copy the bundle into the
+Kustomize copy and apply it. Nothing renews the copy a receiver on the
+in-cluster listener holds in `kafka-ca.crt`:
 
 1. When the renewal begins, Strimzi keeps the old certificate in
    `<cluster>-cluster-ca-cert` beside the new `ca.crt`. Write both
@@ -1252,9 +1284,11 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
    node marked `ReadWriteMany` and owned by UID 1001, and the state claim's,
    [`state.yaml`](test/e2e/state.yaml), a local volume whose root is
    root's, and deploys the receiver as
-   [Run the receiver in the cluster](#run-the-receiver-in-the-cluster) says, with the
-   Strimzi cluster CA and `fsgroup.yaml`, into a namespace enforcing Pod
-   Security `restricted`. The kubelet's ownership pass gives the state
+   [Run the receiver in the cluster](#run-the-receiver-in-the-cluster) says, into a
+   namespace enforcing Pod Security `restricted`, with `fsgroup.yaml` and,
+   since the receiver's record names the in-cluster listener and its bundle
+   carries no CA, the Strimzi cluster CA: the `kafka-ca` ConfigMap
+   generator, mount and volume enabled and `config.yaml`'s `ca_file` set. The kubelet's ownership pass gives the state
    volume the fsGroup on its first mount; the step checks it, restarts the
    receiver, and checks that it starts with its signing key still 0600. The namespace
    may exist already, from the conformance step.
