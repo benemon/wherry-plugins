@@ -11,8 +11,8 @@ example sets its platform's stop window and keeps `drain_timeout` at least
 ([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration-receiver#drain-timeout-and-the-stop-window)).
 `make check-examples` checks it.
 
-No example needs a separate file for the broker's CA. `wherry operator
-receiver apply` writes the operator's CA into the bundle when the receiver's
+On the default path, no example needs a separate file for the broker's CA.
+`wherry operator receiver apply` writes the operator's CA into the bundle when the receiver's
 record names the operator's broker and `operator.yaml` names a `ca_file`, and
 the receiver trusts the broker through the `ca_file` its local configuration
 names, else the bundle's `ca`, else the system roots

@@ -798,7 +798,8 @@ Run the repository commands from that checkout and the operator commands from yo
    Set your pool and agent image.
    `claude-code` is Claude Code's [credential catalog id](https://benemon.github.io/wherry/configuration-operator#catalog-agents), from which `wherry operator pool apply` derives the agent's `CLAUDE_CODE_OAUTH_TOKEN` credential.
    An agent of a non-catalog name, such as `claude`, keeps working with the credentials the pool's terms list for it; the profile's `agent` must be one of the pool's agents either way.
-   Without a `broker` line, the bundle names the address `wherry operator init` recorded and carries the operator's CA.
+   Without a `broker` line, the bundle names the address `wherry operator init` recorded, and carries the operator's CA
+   when `operator.yaml` names a `ca_file`.
    To reach Kafka through an in-cluster listener instead, add `broker: wherry-kafka-kafka-bootstrap.kafka.svc:9093`, the internal bootstrap address Strimzi's broker certificates name.
    The operator knows no CA for another address, so that bundle carries none: the receiver then trusts the broker through step 3's `kafka-ca.crt` and `ca_file` ([Bundle and Kafka](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#bundle-and-kafka)).
    The service account supplies the API credential.
