@@ -11,8 +11,10 @@ secretGenerator:
   - {name: wherry-receiver-bundle, files: [bundle.yaml=receiver.bundle]}
 configMapGenerator:
   - {name: wherry-receiver-config, files: [config.yaml]}
-  # For a broker under a private CA, such as Strimzi's cluster CA, copied in as kafka-ca.crt; config.yaml's ca_file
-  # names it.
+  # For a receiver whose record names an in-cluster listener, another broker address than operator.yaml's, whose
+  # bundle therefore carries no CA: the broker's CA, such as Strimzi's cluster CA, copied in as kafka-ca.crt.
+  # receiver.yaml's kafka-ca mount and volume take it, and config.yaml's ca_file names it. A receiver on the
+  # operator's broker takes the CA from its bundle and needs none of the three.
   # - {name: wherry-receiver-kafka-ca, files: [ca.crt=kafka-ca.crt]}
 patches:
   # On Kubernetes, for a state claim whose volume root neither UID 1001 nor group 0 can write. Not on OpenShift, whose

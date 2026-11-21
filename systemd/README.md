@@ -137,7 +137,7 @@ A plugin profile file in a receiver configuration directory, such as
 
 ```yaml
 name: host
-agent: claude
+agent: claude-code
 labels:
   platform: systemd
   host: <name>
@@ -184,7 +184,7 @@ plugins:
     profiles:
       # Claude Code, each run as a dynamic user of its own.
       - name: host
-        agent: claude
+        agent: claude-code
         config:
           runtime:
             command: [/bin/sh, -c]
@@ -593,7 +593,7 @@ Run host installation commands as root from that checkout.
      systemd:
        profiles:
          - name: host
-           agent: claude
+           agent: claude-code
            labels:
              host: <name>
            config:
@@ -612,6 +612,8 @@ Run host installation commands as root from that checkout.
    ```
 
    Use the [receiver configuration reference](https://github.com/benemon/wherry-plugins/blob/main/systemd/README.md#receiver-configuration) for agent commands and limits.
+   `claude-code` is Claude Code's [credential catalog id](https://benemon.github.io/wherry/configuration-operator#catalog-agents), from which `wherry operator pool apply` derives the agent's `CLAUDE_CODE_OAUTH_TOKEN` credential.
+   An agent of a non-catalog name, such as `claude`, keeps working with the credentials the pool's terms list for it; the profile's `agent` must be one of the pool's agents either way.
    The plugin takes no platform credential.
    Copy [the example config.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/systemd/config.yaml) to `receivers/systemd-1.config.yaml` before applying:
 
@@ -621,7 +623,8 @@ Run host installation commands as root from that checkout.
 
    You can instead provide `config.yaml` in the configuration directory passed with `-f DIR`.
    See [receiver local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration).
-   Set `ca_file` in the supplied file when your broker uses a private CA.
+   The bundle carries the broker's CA when the record names the operator's broker and `operator.yaml` names a `ca_file`, so the supplied file needs no `ca_file` ([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
+   Set `ca_file` only for a receiver whose record sets `broker` to another address, whose bundle carries no CA, or as an explicit override; it overrides the bundle's CA, so a stale file hides a refreshed one.
    Keep the bundle and local configuration outside version control.
 
 4. Create the agents' state roots and install the units and tmpfiles configuration:
@@ -646,7 +649,8 @@ Run host installation commands as root from that checkout.
    install -m 0600 <operator directory>/receivers/systemd-1.config.yaml /etc/wherry/config.yaml
    ```
 
-   For a private broker CA, install its certificates at the configured `ca_file` path.
+   A receiver on the operator's broker takes the broker's CA from its bundle and installs no CA file.
+   For a receiver whose record sets `broker` to another address, or an explicit override, also install the broker's certificates at the path its `ca_file` names, `/etc/wherry/kafka-ca.pem` in the example.
    The unit loads the bundle as a [systemd credential](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Credentials).
    The configuration names `/run/credentials/wherry-receiver.service/bundle` as its bundle.
    Its `plugin_dir` is `/usr/local/libexec/wherry/current/plugins`.
@@ -665,7 +669,16 @@ Run host installation commands as root from that checkout.
    Check for `plugin systemd: version <plugin version> protocol <n>`.
    `<plugin version>` is the version of the plugin tag, such as `v0.1.0`.
    A source build without version metadata reports `unreported`.
-   From your entitled tenant's host, run `wherry host receivers` and wait for `systemd-1` to show `live`.
+
+7. In your operator working directory, check that the receiver is up:
+
+   ```sh
+   wherry operator receiver show systemd-1
+   ```
+
+   The first line is `status: live` once the receiver's first advertisement is verified against its key topic, with `last_advertised` on the next.
+   `status: silent` means it has not advertised yet; `stale` means its last advertisement is more than 120 seconds old, and `ended` that the receiver was revoked.
+   [`receiver show`](https://benemon.github.io/wherry/commands#wherry-operator-receiver-show-receiver) describes each status.
 
 ### Upgrade
 
@@ -683,7 +696,7 @@ Run host installation commands as root from that checkout.
 
    Install any changed bundle and local configuration before restarting.
    Keep the receiver's state directory and agent state.
-4. Check the identity line and wait for the receiver to show `live`.
+4. Check the identity line and wait for `wherry operator receiver show systemd-1` to report `status: live`.
    To roll back, apply the previous plugin pin, repoint `current` to the previous version and restart.
 
 ### Uninstall
@@ -736,7 +749,9 @@ Every boot recreates it from the tmpfiles.d line.
 [`examples/systemd/config.yaml`](../examples/systemd/config.yaml) is the receiver's local configuration.
 It names the bundle, the state directory, the plugin directory and the metrics address.
 Its `plugin_dir` is `/usr/local/libexec/wherry/current/plugins`.
-For a broker under a private CA, its `ca_file` names `/etc/wherry/kafka-ca.pem`.
+It names no `ca_file`: the bundle carries the broker's CA when the record names the operator's broker and `operator.yaml` names a `ca_file`
+([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
+Its commented `ca_file`, `/etc/wherry/kafka-ca.pem`, is for a receiver whose record names another broker address, whose bundle carries no CA, or an explicit override; it overrides the bundle's CA.
 
 The unit takes the bundle as a systemd
 [credential](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Credentials),

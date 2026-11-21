@@ -713,12 +713,14 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
              memory_mb: 2048
        profiles:
          - name: container
-           agent: claude
+           agent: claude-code
            labels:
              isolation: container
    ```
 
    Create the Nomad namespace `agents` before running the job; the record and the ACL policy name it.
+   `claude-code` is Claude Code's [credential catalog id](https://benemon.github.io/wherry/configuration-operator#catalog-agents), from which `wherry operator pool apply` derives the agent's `CLAUDE_CODE_OAUTH_TOKEN` credential.
+   An agent of a non-catalog name, such as `claude`, keeps working with the credentials the pool's terms list for it; the profile's `agent` must be one of the pool's agents either way.
 
    Use the [receiver configuration reference](https://github.com/benemon/wherry-plugins/blob/main/nomad/README.md#receiver-configuration) for the plugin settings.
    Leave `address` unset to use the job's task API socket.
@@ -742,7 +744,8 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    To change them later, follow [Change a receiver's configuration](https://benemon.github.io/wherry/operations-operator#change-a-receiver-s-configuration).
    You can instead provide `config.yaml` in the receiver configuration directory passed with `-f DIR`.
    See [receiver local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration).
-   For a private broker CA, enable `ca_file` in your local configuration.
+   The bundle carries the broker's CA when the record names the operator's broker and `operator.yaml` names a `ca_file`, so the local configuration needs no `ca_file` ([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
+   Enable `ca_file` only for a receiver whose record sets `broker` to another address, whose bundle carries no CA, or as an explicit override; it overrides the bundle's CA, so a stale file hides a refreshed one.
    Keep the local configuration and bundle outside version control.
 
 4. Create the persistent state volume with [the example volume](https://github.com/benemon/wherry-plugins/blob/main/examples/nomad/wherry-receiver.volume.hcl):
@@ -769,7 +772,8 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
      config=@<operator directory>/receivers/nomad-1.config.yaml
    ```
 
-   Add `ca=@<broker CA file>` for a private broker CA.
+   A receiver on the operator's broker takes the broker's CA from its bundle and puts no CA item.
+   For a receiver whose record sets `broker` to another address, or an explicit override, add `ca=@<broker CA file>`, which the job renders at the path its `ca_file` names.
    Add `nomad_ca=@<Nomad CA file>` for the Nomad API's private CA from step 3.
    To change an item later, put every item again with `-force`.
    A put replaces the whole variable.
@@ -805,11 +809,20 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    ```
 
    Check for `plugin nomad: version <plugin version> protocol <n>`.
-   From your entitled tenant's host, run `wherry host receivers` and wait for `nomad-1` to show `live`.
    A receiver that exits at once can leave no logs.
    `nomad alloc status <allocation ID>` shows the task's events and exit code.
    Under Podman, set `logging = { driver = "journald" }` in the task's `config`.
    Then read the receiver's output in the client's journal.
+
+8. In your operator working directory, check that the receiver is up:
+
+   ```sh
+   wherry operator receiver show nomad-1
+   ```
+
+   The first line is `status: live` once the receiver's first advertisement is verified against its key topic, with `last_advertised` on the next.
+   `status: silent` means it has not advertised yet; `stale` means its last advertisement is more than 120 seconds old, and `ended` that the receiver was revoked.
+   [`receiver show`](https://benemon.github.io/wherry/commands#wherry-operator-receiver-show-receiver) describes each status.
 
 ### The exec driver (example only)
 
@@ -837,7 +850,7 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
 3. Follow the commands in [the exec job](https://github.com/benemon/wherry-plugins/blob/main/examples/nomad/wherry-receiver-host.nomad.hcl) to create the state volume with the wherry user's UID and GID, upload the bundle and configuration, attach the ACL policy and run the job.
    Follow [the exec driver documentation](https://developer.hashicorp.com/nomad/docs/drivers/exec) for client requirements.
 4. Check the allocation logs for `plugin nomad: version <plugin version> protocol <n>`.
-   Run `wherry host receivers` and wait for `nomad-1` to show `live`.
+   In your operator working directory, run `wherry operator receiver show nomad-1` and wait for `status: live`.
 
 ### Upgrade
 
@@ -849,7 +862,7 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
 3. Immediately run the container job with the new image.
    For exec, repoint `current` on each eligible client and restart the job with `nomad job restart wherry-receiver`.
    Keep the state volume.
-4. Check the plugin identity line and wait for the receiver to show `live`.
+4. Check the plugin identity line and wait for `wherry operator receiver show nomad-1` to report `status: live`.
    To roll back, apply the previous pin and redeploy the previous image, or repoint `current` to the previous host version and restart.
 
 ### Move a receiver's state into the volume
@@ -874,7 +887,7 @@ To move a receiver whose state directory is elsewhere, such as an allocation's d
    Keep `signing.key` at mode 0600.
    Check each file's SHA-256 against the backup.
 6. Run the job as in step 6 of [Run the receiver in Nomad](https://github.com/benemon/wherry-plugins/blob/main/nomad/README.md#run-the-receiver-in-nomad).
-   Wait for `wherry host receivers` to show the receiver `live` under its old name.
+   Wait for `wherry operator receiver show nomad-1` to report `status: live` under its old name.
    A receiver that starts without its key fails every start.
 
 ### Uninstall
@@ -925,8 +938,9 @@ Its `template` blocks render the variable's items into the task:
   Setting that owner needs a Nomad client running as root.
 - The item `config`, the receiver's local configuration, goes to `/local/config.yaml`.
   [`examples/nomad/config.yaml`](../examples/nomad/config.yaml) is the example.
-- The item `ca`, for a broker under a private CA, goes to `/secrets/kafka-ca.pem`.
-  `config.yaml`'s `ca_file` names that path.
+- The item `ca`, the broker's CA for a receiver whose record names another broker address than the operator's, or an explicit override, goes to `/secrets/kafka-ca.pem`.
+  `config.yaml`'s `ca_file` then names that path.
+  A receiver on the operator's broker takes the CA from its bundle, which `receiver apply` writes when `operator.yaml` names a `ca_file`, and the item is left out ([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
 - The item `nomad_ca`, for a Nomad API under a private CA, goes to `/secrets/nomad-ca.pem`.
   The plugin's `ca_file` names that path when its `address` is an HTTPS address.
 

@@ -88,7 +88,9 @@ job "wherry-receiver" {
         destination = "/var/lib/wherry"
       }
 
-      # A private CA the broker's certificate chains to, which config.yaml's ca_file names; empty without the item ca.
+      # The broker's CA for a receiver whose record names another broker address than the operator's, whose bundle
+      # carries no CA, or an explicit override: the variable's item ca, which config.yaml's ca_file then names. Empty
+      # without the item, as for a receiver on the operator's broker, whose bundle carries the CA.
       template {
         destination = "secrets/kafka-ca.pem"
         data        = <<-EOT

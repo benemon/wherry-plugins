@@ -3,7 +3,9 @@
 # the runs claim's volume and the state claim's, and deploys the receiver with the README's steps into the namespace
 # wherry, which enforces Pod Security restricted: a copy of examples/kubernetes holding the receiver's bundle, the
 # Strimzi cluster CA and the config.yaml, with ca_file set, that 03-provision.sh's pin gave receiver apply, with the
-# fsGroup patch and the image set, applied with kubectl apply -k. The state volume's root is root's, so the kubelet's
+# fsGroup patch, the kafka-ca ConfigMap generator, mount and volume and the image set, applied with kubectl apply -k.
+# The receiver's record names the in-cluster listener, not the operator's broker, so its bundle carries no CA and the
+# receiver trusts the broker through the CA file, as the README's exception says. The state volume's root is root's, so the kubelet's
 # ownership pass gives it the fsGroup on its first mount. The receiver is then restarted, and must start with its
 # signing key still 0600. Each start must log the identity line of version e2e and the checkout's protocol.
 . "$(dirname "$0")/common.sh"
@@ -24,9 +26,15 @@ cp "$work/ca.crt" "$deploy/kafka-ca.crt"
 sed -i -e 's|newName: registry.example.com/wherry-receiver, newTag: <version>}|newName: wherry-receiver, newTag: e2e}|' \
 	-e 's|^  # - {name: wherry-receiver-kafka-ca,|  - {name: wherry-receiver-kafka-ca,|' \
 	-e 's|^  # - path: fsgroup.yaml$|  - path: fsgroup.yaml|' "$deploy/kustomization.yaml"
+sed -i -e 's|^            # - {name: kafka-ca, mountPath: |            - {name: kafka-ca, mountPath: |' \
+	-e 's|^        # - {name: kafka-ca, configMap: |        - {name: kafka-ca, configMap: |' "$deploy/receiver.yaml"
 grep -x 'ca_file: /etc/wherry/kafka-ca/ca.crt' "$deploy/config.yaml" >/dev/null || fail "config.yaml names no ca_file"
 for line in 'newTag: e2e}' '  - {name: wherry-receiver-kafka-ca,' '  - path: fsgroup.yaml'; do
 	grep -F -e "$line" "$deploy/kustomization.yaml" >/dev/null || fail "kustomization.yaml lacks '$line'"
+done
+for line in '            - {name: kafka-ca, mountPath: /etc/wherry/kafka-ca, readOnly: true}' \
+	'        - {name: kafka-ca, configMap: {name: wherry-receiver-kafka-ca}}'; do
+	grep -F -x -e "$line" "$deploy/receiver.yaml" >/dev/null || fail "receiver.yaml lacks '$line'"
 done
 kubectl apply -k "$deploy"
 kubectl rollout status -n "$namespace" deployment/wherry-receiver --timeout=5m

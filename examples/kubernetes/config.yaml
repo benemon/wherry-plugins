@@ -2,8 +2,12 @@
 # receiver.yaml mounts at /etc/wherry/config, and the Secret wherry-receiver-bundle from receiver.bundle, mounted at
 # /etc/wherry/bundle. state_dir is on the state claim at /var/lib/wherry. The image installs the plugins in plugin_dir.
 bundle: /etc/wherry/bundle/bundle.yaml
-# For a broker under a private CA: the ConfigMap wherry-receiver-kafka-ca, which kustomization.yaml generates from
-# kafka-ca.crt and receiver.yaml mounts at /etc/wherry/kafka-ca. Unset, the system roots.
+# Unset, the receiver trusts the broker through the ca its bundle carries, else the system roots: wherry operator
+# receiver apply writes the operator's CA into the bundle when the record names the operator's broker and operator.yaml
+# names a ca_file. Set it for a receiver whose record names an in-cluster listener, another broker address, whose
+# bundle therefore carries no CA, or as an explicit override: the ConfigMap wherry-receiver-kafka-ca, which
+# kustomization.yaml generates from kafka-ca.crt and receiver.yaml mounts at /etc/wherry/kafka-ca, both commented out
+# there. A ca_file overrides the bundle's ca, so a stale file hides a refreshed CA.
 # ca_file: /etc/wherry/kafka-ca/ca.crt
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
