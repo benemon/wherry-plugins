@@ -273,7 +273,9 @@ namespaces; `SystemCallFilter=`, `PrivateUsers=` or `ProcSubset=`.
 The agent sees:
 
 - the prompt in `/wherry/prompt.txt`, mode 0600;
-- each input file in `/wherry/inputs`, mode 0600, in a 0700 directory;
+- each input file in `/wherry/inputs` at its name, a file name or a
+  relative path whose parent directories the plugin creates, mode 0600, in
+  0700 directories;
 - each S3 input in `/wherry/inputs`, as described in [S3 inputs](#s3-inputs);
 - each file target as a file in `/run/wherry/credentials`, and each
   environment target in the environment variable named by its target, as
@@ -397,8 +399,8 @@ systemd 255 mounts for the store holds them. Dispatch refuses a run over
 either with `the credentials exceed systemd's 1 MiB credential limit`, and
 a run whose environment target holds a NUL byte, creating nothing. Inputs
 are files and are not bounded by it. The plugin declares no inline limit;
-the record limit binds. A delivered input name
-is at most 255 bytes.
+the record limit binds. Each segment of a delivered input name is at most
+255 bytes.
 
 Environment targets are in the agent's environment, and so in
 `/proc/<pid>/environ` of the agent and its children. `LimitCORE=1` keeps
@@ -436,8 +438,9 @@ pool's systemd plugin profiles: two would share the control directories and
 
 The plugin fetches each S3 input on the receiver's host before the unit
 exists, with a client that follows no redirect and reads at most one byte
-past the input's size. It writes the input to a temporary file in the
-inputs directory, checks its size and SHA-256, and moves it into place. A
+past the input's size. It writes the input to a temporary file in its
+directory, creating a nested name's parents, checks its size and SHA-256,
+and moves it into place. A
 fetch that fails or does not verify ends the run never started with class
 `fetch`, which the receiver ends `TASK_STATE_FAILED`, and the plugin logs
 `input not fetched` with the status code or failure class. The presigned
@@ -477,11 +480,12 @@ the host. Keep material out of `runtime.env`.
 
 ## Metrics
 
-The plugin speaks plugin protocol version 12, in which Dispatch returns
-once the unit's start job has and ReadWorking reads the agent's
-[working status](#working-status). A receiver of another protocol version
-refuses it, so the receiver and its plugins upgrade together: protocol 12
-needs wherry v0.1.2 or later. The receiver times placement itself.
+The plugin speaks plugin protocol version 13, in which an input name may
+be a relative path, Dispatch returns once the unit's start job has and
+ReadWorking reads the agent's [working status](#working-status). A
+receiver of another protocol version refuses it, so the receiver and its
+plugins upgrade together: protocol 13 needs wherry v0.1.8 or later. The
+receiver times placement itself.
 For each plugin profile the plugin reports these families, which the
 receiver serves on its `/metrics` with the plugin profile's name as
 `profile`:
