@@ -540,6 +540,9 @@ func jobState(alloc *api.AllocationListStub) pluginsdk.JobState {
 
 // buildJob builds the run's batch job, whose templates read the run's material from the variables at path.
 func (profile *Nomad) buildJob(run pluginsdk.Run, jobID, path string) (*api.Job, error) {
+	if err := inputNames(run); err != nil {
+		return nil, err
+	}
 	runtime := profile.runtime
 	env := pluginsdk.AgentEnv(runtime.Env)
 	// A task on a driver that does not isolate its filesystem keeps the user's HOME, so an agent CLI finds its login.
@@ -572,7 +575,8 @@ func (profile *Nomad) buildJob(run pluginsdk.Run, jobID, path string) (*api.Job,
 			DestPath:     new("${NOMAD_SECRETS_DIR}/wherry.env"), Envvars: new(true), ChangeMode: new("noop"),
 		})
 	}
-	// The core admits only names of letters, digits, '.', '_' and '-', so none ends a template string or path.
+	// The core admits only names whose segments are of letters, digits, '.', '_' and '-', joined by '/', so none ends a
+	// template string or path; the variable's item key and the template's destination both keep the path.
 	for _, input := range run.Inputs {
 		templates = append(templates, &api.Template{
 			EmbeddedTmpl: new(`{{ with nomadVar "` + path + inputsSuffix + `" }}{{ (index . "` + input.Name + `").Value | base64Decode }}{{ end }}`),
@@ -627,6 +631,25 @@ func (profile *Nomad) buildJob(run pluginsdk.Run, jobID, path string) (*api.Job,
 			Tasks:            tasks,
 		}},
 	}, nil
+}
+
+// inputNames refuses an input name with an empty, . or .. segment, which the core never sends.
+func inputNames(run pluginsdk.Run) error {
+	names := make([]string, 0, len(run.Inputs)+len(run.Fetches))
+	for _, input := range run.Inputs {
+		names = append(names, input.Name)
+	}
+	for _, fetch := range run.Fetches {
+		names = append(names, fetch.Name)
+	}
+	for _, name := range names {
+		for _, segment := range strings.Split(name, "/") {
+			if segment == "" || segment == "." || segment == ".." {
+				return fmt.Errorf("input %s: a segment is empty, . or ..", name)
+			}
+		}
+	}
+	return nil
 }
 
 func nodePool(name string) *string {

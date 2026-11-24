@@ -3,7 +3,7 @@ module github.com/benemon/wherry-plugins/kubernetes
 go 1.27
 
 require (
-	github.com/benemon/wherry/pluginsdk v0.10.0
+	github.com/benemon/wherry/pluginsdk v0.11.0-rc.1
 	github.com/go-logr/logr v1.4.4
 	github.com/hashicorp/go-hclog v1.6.3
 	go.yaml.in/yaml/v3 v3.0.6
@@ -48,7 +48,7 @@ require (
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect

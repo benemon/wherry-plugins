@@ -1496,6 +1496,87 @@ func TestDispatchKeepsACompleteRunDirectory(t *testing.T) {
 	}
 }
 
+func TestDispatchWritesNestedInputs(t *testing.T) {
+	api := newFakeAPI(t)
+	profile := api.profile(t)
+	files := map[string][]byte{"docs/d/e.bin": {0, 1, 2, 255}}
+	run := fetchRun("nested", newObjects(t, serveFiles(files)), files)
+	run.Inputs = []pluginsdk.File{{Name: "a/b/c.txt", Data: []byte("nested")}}
+	dispatch(t, profile, run)
+	got, err := tree(runDir(profile, profile.jobName(run.ID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{".": "drwx------", "inputs": "drwx------", "inputs/a": "drwx------", "inputs/a/b": "drwx------",
+		"inputs/a/b/c.txt": "-rw------- nested", "inputs/docs": "drwx------", "inputs/docs/d": "drwx------", "inputs/docs/d/e.bin": "-rw------- \x00\x01\x02\xff"}
+	if !maps.Equal(got, want) {
+		t.Fatalf("run directory %q; want %q", got, want)
+	}
+}
+
+func TestDispatchRefusesABadSegment(t *testing.T) {
+	for _, name := range []string{"a//b", "./a", "a/../b", "a/.", "/a", "a/", ".", ".."} {
+		t.Run(name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			profile := api.profile(t)
+			for _, run := range []pluginsdk.Run{
+				{ID: "run-inline", Profile: testProfile, Inputs: []pluginsdk.File{{Name: name, Data: []byte("x")}}},
+				{ID: "run-fetch", Profile: testProfile, Fetches: []pluginsdk.Fetch{{Name: name, URL: "https://storage.invalid/x", Size: 1}}},
+			} {
+				outcome, _, err := profile.Dispatch(context.Background(), run)
+				if outcome != pluginsdk.OutcomeNothingCreated || err == nil || !strings.Contains(err.Error(), "input "+name+": a segment is empty, . or ..") {
+					t.Fatalf("%s: dispatch = %v, %v; want nothing created and the segment named", run.ID, outcome, err)
+				}
+				if _, err := os.Stat(runDir(profile, profile.jobName(run.ID))); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("%s: run directory exists, %v", run.ID, err)
+				}
+			}
+			if created := paths(api.recorded(), http.MethodPost); created != nil {
+				t.Fatalf("created %v for a refused name", created)
+			}
+		})
+	}
+}
+
+func TestDispatchKeepsACompleteNestedRunDirectory(t *testing.T) {
+	api := newFakeAPI(t)
+	profile := api.profile(t)
+	files := map[string][]byte{"docs/d/e.bin": []byte("data")}
+	store := newObjects(t, serveFiles(files))
+	run := fetchRun("nested-again", store, files)
+	run.Inputs = []pluginsdk.File{{Name: "a/b/c.txt", Data: []byte("nested")}}
+	name := profile.jobName(run.ID)
+	dispatch(t, profile, run)
+	api.set(func() { delete(api.pods, name) })
+	dispatch(t, profile, run)
+	api.set(func() { delete(api.pods, name) })
+	if store.count("/docs/d/e.bin") != 1 {
+		t.Fatalf("fetched %d times; want the complete directory kept", store.count("/docs/d/e.bin"))
+	}
+	for _, partial := range []func(dir string) error{
+		func(dir string) error { return os.Mkdir(filepath.Join(dir, "inputs/a/stray"), 0o700) },
+		func(dir string) error { return os.Symlink("c.txt", filepath.Join(dir, "inputs/a/b/link")) },
+		func(dir string) error {
+			return os.WriteFile(filepath.Join(dir, "inputs/a/b/c.txt"), []byte("other"), 0o600)
+		},
+		func(dir string) error { return os.Remove(filepath.Join(dir, "inputs/docs/d/e.bin")) },
+	} {
+		if err := partial(runDir(profile, name)); err != nil {
+			t.Fatal(err)
+		}
+		before := store.count("/docs/d/e.bin")
+		dispatch(t, profile, run)
+		api.set(func() { delete(api.pods, name) })
+		got, err := tree(runDir(profile, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if store.count("/docs/d/e.bin") != before+1 || len(got) != 8 || got["inputs/docs/d/e.bin"] != "-rw------- data" || got["inputs/a/b/c.txt"] != "-rw------- nested" {
+			t.Fatalf("run directory %q; want it rewritten whole", got)
+		}
+	}
+}
+
 func TestFetchFailureCreatesNoPod(t *testing.T) {
 	data := []byte("data")
 	for _, test := range []struct {
@@ -3375,5 +3456,20 @@ func TestPodAdmittedUnderRestricted(t *testing.T) {
 		if fmt.Sprint(got.Capabilities.Drop) != fmt.Sprint(c.SecurityContext.Capabilities.Drop) || *got.AllowPrivilegeEscalation != *c.SecurityContext.AllowPrivilegeEscalation {
 			t.Fatalf("container %s admitted with %+v; built %+v", c.Name, got, c.SecurityContext)
 		}
+	}
+}
+
+// A run directory without its inputs directory is not written, even for a run with no inputs: the pod would start
+// with no input directory.
+func TestWrittenNeedsTheInputsDirectory(t *testing.T) {
+	if written(t.TempDir(), pluginsdk.Run{}) {
+		t.Fatal("an empty run directory counted as written")
+	}
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "inputs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !written(dir, pluginsdk.Run{}) {
+		t.Fatal("a run directory with an empty inputs directory did not count as written")
 	}
 }

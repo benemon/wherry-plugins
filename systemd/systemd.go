@@ -581,17 +581,24 @@ func (profile *Systemd) Ready(ctx context.Context) (bool, error) {
 	return value == "running" || value == "degraded" || value == "starting", nil
 }
 
-// deliverable refuses a run systemd cannot deliver: an input name over NAME_MAX, credentials over systemd's limit, and
-// a credential or model that cannot be an environment value.
+// deliverable refuses a run systemd cannot deliver: an input name with a segment over NAME_MAX, or one empty, . or ..,
+// credentials over systemd's limit, and a credential or model that cannot be an environment value.
 func deliverable(run pluginsdk.Run) error {
+	names := make([]string, 0, len(run.Inputs)+len(run.Fetches))
 	for _, input := range run.Inputs {
-		if len(input.Name) > maxName {
-			return &pluginsdk.InputTooLargeError{Name: input.Name}
-		}
+		names = append(names, input.Name)
 	}
 	for _, fetch := range run.Fetches {
-		if len(fetch.Name) > maxName {
-			return &pluginsdk.InputTooLargeError{Name: fetch.Name}
+		names = append(names, fetch.Name)
+	}
+	for _, name := range names {
+		for _, segment := range strings.Split(name, "/") {
+			if segment == "" || segment == "." || segment == ".." {
+				return fmt.Errorf("input %s: a segment is empty, . or ..", name)
+			}
+			if len(segment) > maxName {
+				return &pluginsdk.InputTooLargeError{Name: name}
+			}
 		}
 	}
 	if credentialTotal(run) > maxCredentials {
@@ -805,6 +812,9 @@ func (profile *Systemd) prepare(job string, run pluginsdk.Run, m *marker) error 
 	}
 	defer inputs.Close()
 	for _, input := range run.Inputs {
+		if err := inputs.MkdirAll(path.Dir(input.Name), 0o700); err != nil {
+			return profile.failed("create "+filepath.Join(work, "inputs", path.Dir(input.Name)), err)
+		}
 		if err := inputs.WriteFile(input.Name, input.Data, 0o600); err != nil {
 			return profile.failed("write "+filepath.Join(work, "inputs", input.Name), err)
 		}
@@ -843,8 +853,8 @@ func (profile *Systemd) fetchAll(ctx context.Context, job string, fetches []plug
 	return nil, nil
 }
 
-// fetch reads one input, refusing a redirect and reading at most one byte past its size, into a temporary file it
-// renames into place once its size and SHA-256 verify.
+// fetch reads one input, refusing a redirect and reading at most one byte past its size, into a temporary file in its
+// directory, which it renames into place once its size and SHA-256 verify.
 func (profile *Systemd) fetch(ctx context.Context, inputs *os.Root, fetch pluginsdk.Fetch) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fetch.URL, nil)
 	if err != nil {
@@ -867,9 +877,13 @@ func (profile *Systemd) fetch(ctx context.Context, inputs *os.Root, fetch plugin
 	if response.StatusCode != http.StatusOK {
 		return &fetchError{fetch.Name, strconv.Itoa(response.StatusCode)}
 	}
+	dir := path.Dir(fetch.Name)
+	if err := inputs.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
 	random := make([]byte, 8)
 	_, _ = rand.Read(random)
-	part := ".fetch-" + hex.EncodeToString(random)
+	part := path.Join(dir, ".fetch-"+hex.EncodeToString(random))
 	file, err := inputs.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err

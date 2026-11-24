@@ -3,8 +3,8 @@ module github.com/benemon/wherry-plugins/nomad
 go 1.27
 
 require (
-	github.com/benemon/wherry/pluginsdk v0.10.0
-	github.com/gorilla/websocket v1.5.3
+	github.com/benemon/wherry/pluginsdk v0.11.0-rc.1
+	github.com/gorilla/websocket v1.5.4-0.20240701034025-d67f41855da4
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/nomad/api v0.0.0-20261029144823-d0f210429976
 	go.yaml.in/yaml/v3 v3.0.6
@@ -24,7 +24,7 @@ require (
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/oklog/run v1.1.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1 // indirect
 	google.golang.org/grpc v1.85.0 // indirect

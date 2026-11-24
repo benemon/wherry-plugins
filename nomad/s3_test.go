@@ -63,7 +63,10 @@ func TestBuildJobFetchesEachInputAsAnArtifact(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("fetches")
-	run.Fetches = []pluginsdk.Fetch{{Name: "data.tar.gz", URL: "https://store.example.test/b/k?X-Amz-Signature=1", Size: 3, SHA256: strings.Repeat("a", 64)}}
+	run.Fetches = []pluginsdk.Fetch{
+		{Name: "data.tar.gz", URL: "https://store.example.test/b/k?X-Amz-Signature=1", Size: 3, SHA256: strings.Repeat("a", 64)},
+		{Name: "docs/d/e.bin", URL: "https://store.example.test/b/e?X-Amz-Signature=2", Size: 4, SHA256: strings.Repeat("b", 64)},
+	}
 	job, err := profile.buildJob(run, profile.jobID(run.ID), profile.variablePath(run.ID))
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +74,9 @@ func TestBuildJobFetchesEachInputAsAnArtifact(t *testing.T) {
 	want := []*api.TaskArtifact{{
 		GetterSource: new(run.Fetches[0].URL), GetterOptions: map[string]string{"checksum": "sha256:" + strings.Repeat("a", 64), "archive": "false"},
 		GetterMode: new("file"), RelativeDest: new("local/inputs/data.tar.gz"),
+	}, {
+		GetterSource: new(run.Fetches[1].URL), GetterOptions: map[string]string{"checksum": "sha256:" + strings.Repeat("b", 64), "archive": "false"},
+		GetterMode: new("file"), RelativeDest: new("local/inputs/docs/d/e.bin"),
 	}}
 	if got := job.TaskGroups[0].Tasks[0].Artifacts; !reflect.DeepEqual(got, want) {
 		t.Fatalf("artifacts %+v, want %+v", got, want)
@@ -78,19 +84,20 @@ func TestBuildJobFetchesEachInputAsAnArtifact(t *testing.T) {
 }
 
 // Fetches arrive byte for byte under their names, an archive's name included: archive=false keeps go-getter from
-// unpacking it.
+// unpacking it. A nested name lands at its path: Nomad creates the destination's parents.
 func TestFetchesArriveVerifiedOnNomad(t *testing.T) {
-	profile, ctx := scriptProfile(t, `set -e; mkdir -p "$WHERRY_OUTPUT_DIR"; cp "$WHERRY_INPUT_DIR"/* "$WHERRY_OUTPUT_DIR"/; echo '{"type":"result","result":"done"}'`)
-	dataset, archive := bytes.Repeat([]byte("dataset "), 4096), []byte("not a gzip stream")
-	store := newObjects(t, map[string][]byte{"/b/dataset.bin": dataset, "/b/data.tar.gz": archive})
+	profile, ctx := scriptProfile(t, `set -e; mkdir -p "$WHERRY_OUTPUT_DIR"; cp -R "$WHERRY_INPUT_DIR"/. "$WHERRY_OUTPUT_DIR"/; echo '{"type":"result","result":"done"}'`)
+	dataset, archive, nested := bytes.Repeat([]byte("dataset "), 4096), []byte("not a gzip stream"), []byte{0, 1, 2, 255}
+	store := newObjects(t, map[string][]byte{"/b/dataset.bin": dataset, "/b/data.tar.gz": archive, "/b/e.bin": nested})
 	run := testRun("fetches")
 	run.Fetches = []pluginsdk.Fetch{
 		{Name: "dataset.bin", URL: store.server.URL + "/b/dataset.bin?X-Amz-Signature=abc", Size: int64(len(dataset)), SHA256: sum(dataset)},
 		{Name: "data.tar.gz", URL: store.server.URL + "/b/data.tar.gz?X-Amz-Signature=abc", Size: int64(len(archive)), SHA256: sum(archive)},
+		{Name: "docs/d/e.bin", URL: store.server.URL + "/b/e.bin?X-Amz-Signature=abc", Size: int64(len(nested)), SHA256: sum(nested)},
 	}
 	outputs := runToOutputs(t, profile, ctx, run)
-	if !bytes.Equal(outputs["dataset.bin"].Data, dataset) || !bytes.Equal(outputs["data.tar.gz"].Data, archive) {
-		t.Fatalf("fetched %d and %d bytes; want both inputs whole", len(outputs["dataset.bin"].Data), len(outputs["data.tar.gz"].Data))
+	if !bytes.Equal(outputs["dataset.bin"].Data, dataset) || !bytes.Equal(outputs["data.tar.gz"].Data, archive) || !bytes.Equal(outputs["docs/d/e.bin"].Data, nested) {
+		t.Fatalf("fetched %d, %d and %d bytes; want every input whole at its path", len(outputs["dataset.bin"].Data), len(outputs["data.tar.gz"].Data), len(outputs["docs/d/e.bin"].Data))
 	}
 }
 

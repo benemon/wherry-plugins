@@ -1409,26 +1409,94 @@ func capturedUnitState(name string) captured {
 	return state
 }
 
-func TestDispatchRefusesANameOverNameMax(t *testing.T) {
+func TestDispatchRefusesASegmentOverNameMax(t *testing.T) {
 	f := newHost(t)
 	profile := newAgent(t, agentConfig("exit 0"))
-	long := strings.Repeat("n", 256)
-	for _, run := range []pluginsdk.Run{
-		{ID: "run-inline", Profile: testProfile, Inputs: []pluginsdk.File{{Name: long, Data: []byte("x")}}},
-		{ID: "run-fetch", Profile: testProfile, Fetches: []pluginsdk.Fetch{{Name: long, URL: "https://storage.invalid/x", Size: 1}}},
-	} {
-		outcome, _, err := profile.Dispatch(context.Background(), run)
-		var tooLarge *pluginsdk.InputTooLargeError
-		if outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &tooLarge) || tooLarge.Name != long {
-			t.Errorf("%s: outcome %d, %v; want input too large", run.ID, outcome, err)
+	for _, long := range []string{strings.Repeat("n", 256), "a/" + strings.Repeat("n", 256) + "/b"} {
+		for _, run := range []pluginsdk.Run{
+			{ID: "run-inline", Profile: testProfile, Inputs: []pluginsdk.File{{Name: long, Data: []byte("x")}}},
+			{ID: "run-fetch", Profile: testProfile, Fetches: []pluginsdk.Fetch{{Name: long, URL: "https://storage.invalid/x", Size: 1}}},
+		} {
+			outcome, _, err := profile.Dispatch(context.Background(), run)
+			var tooLarge *pluginsdk.InputTooLargeError
+			if outcome != pluginsdk.OutcomeNothingCreated || !errors.As(err, &tooLarge) || tooLarge.Name != long {
+				t.Errorf("%s: outcome %d, %v; want input too large", run.ID, outcome, err)
+			}
 		}
 	}
 	if got := f.recorded("start"); len(got) != 0 {
 		t.Fatalf("starts %v; want none", got)
 	}
+	// A segment of NAME_MAX, and a path of short segments past it, are deliverable.
+	long := strings.Repeat(strings.Repeat("s", 60)+"/", 4) + strings.Repeat("f", 56)
+	if len(long) != 300 {
+		t.Fatalf("path of %d bytes; want 300", len(long))
+	}
 	run := testRun("name-max")
-	run.Inputs = []pluginsdk.File{{Name: strings.Repeat("n", 255), Data: []byte("x")}}
+	run.Inputs = []pluginsdk.File{{Name: strings.Repeat("n", 255), Data: []byte("x")}, {Name: long, Data: []byte("deep")}}
 	dispatch(t, profile, run)
+	if got, err := os.ReadFile(filepath.Join(profile.workDir(jobOf(run)), "inputs", long)); err != nil || string(got) != "deep" {
+		t.Fatalf("the 300-byte path holds %q, %v; want deep", got, err)
+	}
+}
+
+func TestDispatchRefusesABadSegment(t *testing.T) {
+	f := newHost(t)
+	profile := newAgent(t, agentConfig("exit 0"))
+	for _, name := range []string{"a//b", "./a", "a/../b", "a/.", "/a", "a/", ".", ".."} {
+		for _, run := range []pluginsdk.Run{
+			{ID: "run-inline", Profile: testProfile, Inputs: []pluginsdk.File{{Name: name, Data: []byte("x")}}},
+			{ID: "run-fetch", Profile: testProfile, Fetches: []pluginsdk.Fetch{{Name: name, URL: "https://storage.invalid/x", Size: 1}}},
+		} {
+			outcome, _, err := profile.Dispatch(context.Background(), run)
+			if outcome != pluginsdk.OutcomeNothingCreated || err == nil || !strings.Contains(err.Error(), "input "+name+": a segment is empty, . or ..") {
+				t.Errorf("%s %q: outcome %d, %v; want nothing created and the segment named", run.ID, name, outcome, err)
+			}
+			if exists(filepath.Join(controlRoot, jobOf(run))) || exists(profile.workDir(jobOf(run))) {
+				t.Errorf("%s %q: material exists", run.ID, name)
+			}
+		}
+	}
+	if got := f.recorded("start"); len(got) != 0 {
+		t.Fatalf("starts %v; want none", got)
+	}
+}
+
+func TestDispatchWritesNestedInputs(t *testing.T) {
+	f := newHost(t)
+	profile := newAgent(t, agentConfig("exit 0"))
+	run := testRun("nested")
+	run.Inputs = []pluginsdk.File{{Name: "a/b/c.txt", Data: []byte("nested")}}
+	body := []byte{0, 1, 2, 255}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
+	defer server.Close()
+	run.Fetches = []pluginsdk.Fetch{{Name: "docs/d/e.bin", URL: server.URL, Size: int64(len(body)), SHA256: sha(body)}}
+	work := filepath.Join(agentRoot(true), jobOf(run))
+	var got map[string]string
+	f.set(func() {
+		f.onStart = func(string, map[string]any) {
+			got = map[string]string{}
+			_ = filepath.WalkDir(filepath.Join(work, "inputs"), func(path string, entry fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				info, _ := entry.Info()
+				name, _ := filepath.Rel(work, path)
+				got[name] = info.Mode().String()
+				if entry.Type().IsRegular() {
+					data, _ := os.ReadFile(path)
+					got[name] += " " + string(data)
+				}
+				return nil
+			})
+		}
+	})
+	dispatch(t, profile, run)
+	want := map[string]string{"inputs": "drwx------", "inputs/a": "drwx------", "inputs/a/b": "drwx------", "inputs/a/b/c.txt": "-rw------- nested",
+		"inputs/docs": "drwx------", "inputs/docs/d": "drwx------", "inputs/docs/d/e.bin": "-rw------- \x00\x01\x02\xff"}
+	if !maps.Equal(got, want) {
+		t.Fatalf("inputs %q at the start; want %q", got, want)
+	}
 }
 
 func TestDispatchRefusesCredentialsOverTheLimit(t *testing.T) {

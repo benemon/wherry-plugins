@@ -59,7 +59,7 @@ declare -A codes=([TASK_STATE_COMPLETED]=0 [TASK_STATE_FAILED]=2 [TASK_STATE_CAN
 # $work/<run>.log, and checks that it ended in the state $2 by wait's exit code.
 finish() {
 	local code=0
-	host wait "$1" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.reply" || code=$?
+	host result "$1" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.reply" || code=$?
 	host logs "$1" >"$work/$1.log"
 	[ "$code" = "${codes[$2]}" ] || fail "run $1: wait exited $code; want ${codes[$2]}, $2"
 }

@@ -425,9 +425,10 @@ The agent sees:
   pod's fsGroup;
 - each environment target in the environment variable named by the target,
   through a `secretKeyRef`, so its value never appears in the pod spec;
-- each input file in `/wherry/inputs`, mode 0600, in a 0700 directory,
-  both owned by the agent's UID, written by the plugin before it creates
-  the pod;
+- each input file in `/wherry/inputs` at its name, a file name or a
+  relative path whose parent directories the plugin creates, mode 0600, in
+  0700 directories, all owned by the agent's UID, written by the plugin
+  before it creates the pod;
 - each S3 input in `/wherry/inputs`, as described in [S3 inputs](#s3-inputs);
 - each file target as a file in `/run/wherry/credentials/files`, mode 0440,
   owned by root and the pod's fsGroup, so the agent reads it through its
@@ -547,7 +548,8 @@ The plugin writes the run directory, then the Secret, then the pod, only
 when the run's pod does not exist yet, over any Secret an earlier attempt
 left, and never rewrites either under a running pod. A run directory that
 holds the inputs directory alone, with each of the run's inputs verified
-and no other file, is kept; any other is removed and written again. A
+at its path, their parent directories and no other entry, is kept; any
+other is removed and written again. A
 receiver that restarts between the inputs and the pod finds the directory
 complete, or rewrites it.
 
@@ -609,7 +611,8 @@ agent pods need no route to the storage endpoint.
 
 The plugin fetches each input with a client that follows no redirect and
 reads at most one byte past the input's size, writes it to
-`inputs/<name>`, mode 0600, and checks its size and SHA-256. A fetch that
+`inputs/<name>`, mode 0600, creating a nested name's parent directories,
+and checks its size and SHA-256. A fetch that
 fails or does not verify fails the dispatch before any pod exists, with
 `fetch <name>: <reason>`, where the reason is a status code, `timeout`,
 `certificate`, `unreachable`, `invalid URL`, `shorter than its size`,
@@ -660,13 +663,14 @@ operator sets them. A command the agent runs can set the variables again.
 
 ## Metrics
 
-The plugin speaks plugin protocol version 12, in which Dispatch returns at
-creation, Lookup reports a pod the scheduler cannot place as pending, and
-ReadWorking reads the agent's [working status](#working-status). A
-receiver of another protocol version refuses it at its start, as
+The plugin speaks plugin protocol version 13, in which an input name may
+be a relative path, Dispatch returns at creation, Lookup reports a pod the
+scheduler cannot place as pending, and ReadWorking reads the agent's
+[working status](#working-status). A receiver of another protocol version
+refuses it at its start, as
 [Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
-the receiver and its plugins upgrade together: protocol 12 needs wherry
-v0.1.2 or later. The receiver times placement itself. For each
+the receiver and its plugins upgrade together: protocol 13 needs wherry
+v0.1.8 or later. The receiver times placement itself. For each
 plugin profile the plugin reports these families, which the receiver serves
 on its `/metrics` with the plugin profile's name as `profile`:
 

@@ -371,8 +371,9 @@ The agent task receives:
 
 - the prompt in `$NOMAD_TASK_DIR/prompt.txt`;
 - each environment target in the environment variable named by the target;
-- each input file in `$NOMAD_TASK_DIR/inputs`, rendered by a template that
-  decodes its base64, so binary files arrive intact;
+- each input file in `$NOMAD_TASK_DIR/inputs` at its name, a file name or
+  a relative path whose parent directories Nomad creates, rendered by a
+  template that decodes its base64, so binary files arrive intact;
 - each S3 input in `$NOMAD_TASK_DIR/inputs`, fetched as described in
   [S3 inputs](#s3-inputs);
 - each file target as a file in `$NOMAD_SECRETS_DIR/credentials`,
@@ -445,9 +446,9 @@ in the client's Podman plugin configuration.
 The prompt and the credentials travel in the Nomad variable
 `nomad/jobs/agent-<pool>-<run>`, which the job's own workload
 identity reads. The run's input files travel in the job's group variable,
-`nomad/jobs/agent-<pool>-<run>/agent`, one item per file holding
-its base64 encoding, since Nomad's implicit workload policy reads no deeper
-path. Nomad caps a variable's size
+`nomad/jobs/agent-<pool>-<run>/agent`, one item per file, keyed by its
+name with any `/` kept, holding its base64 encoding, since Nomad's implicit
+workload policy reads no deeper path. Nomad caps a variable's size
 ([Variables API](https://developer.hashicorp.com/nomad/api-docs/variables/variables)),
 and base64 adds a third. The plugin declares an inline limit of 45056
 bytes, which leaves room for the inputs' names, so a host sends
@@ -478,8 +479,9 @@ The plugin fetches each S3 input from the presigned URL the receiver passes
 with an [`artifact`](https://developer.hashicorp.com/nomad/docs/job-specification/artifact)
 of the agent task. It sets `options.checksum` to `sha256:<hex>`,
 `options.archive` to `false`, mode `file`, and the destination
-`local/inputs/<name>`. `archive=false` keeps Nomad from unpacking an input
-whose name ends like an archive.
+`local/inputs/<name>`, whose parent directories Nomad creates for a nested
+name. `archive=false` keeps Nomad from unpacking an input whose name ends
+like an archive.
 
 Nomad verifies the checksum after the download ends, so it bounds neither
 the redirect target nor the size. On Nomad 2.1.1, the release CI runs, the
@@ -554,13 +556,14 @@ agent runs can set the variables again.
 
 ## Metrics
 
-The plugin speaks plugin protocol version 12, in which Dispatch returns at
-registration, Lookup reports a job Nomad has not placed as pending, and
-ReadWorking reads the agent's [working status](#working-status). A
-receiver of another protocol version refuses it at its start, as
+The plugin speaks plugin protocol version 13, in which an input name may
+be a relative path, Dispatch returns at registration, Lookup reports a job
+Nomad has not placed as pending, and ReadWorking reads the agent's
+[working status](#working-status). A receiver of another protocol version
+refuses it at its start, as
 [Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
-the receiver and its plugins upgrade together: protocol 12 needs wherry
-v0.1.2 or later. The receiver times placement itself. For each plugin
+the receiver and its plugins upgrade together: protocol 13 needs wherry
+v0.1.8 or later. The receiver times placement itself. For each plugin
 profile the plugin reports these families, which the receiver serves on its
 `/metrics` with the plugin profile's name as `profile`:
 

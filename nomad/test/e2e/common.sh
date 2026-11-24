@@ -198,7 +198,7 @@ submit() {
 	local out run i selector=(--selector "${2-e2e=fake}")
 	[ -n "${2-e2e=fake}" ] || selector=()
 	for i in $(seq 60); do
-		out=$(host submit "${selector[@]}" --output echo.txt:required --prompt "$1" 2>&1) && break
+		out=$(host submit "${selector[@]}" --output echo.txt --prompt "$1" 2>&1) && break
 		[[ $out == *"has no custodian yet"* ]] || break
 		sleep 2
 	done
@@ -212,7 +212,7 @@ submit() {
 # and exits 0 for a completed run, 2 failed, 3 canceled, 4 rejected, 6 timed out.
 complete() {
 	local code=0
-	host wait "$1" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.reply" || code=$?
+	host result "$1" --timeout 5m --outputs-dir "$work/outputs/$1" >"$work/$1.reply" || code=$?
 	host logs "$1" >"$work/$1.log"
 	[ "$code" = 0 ] || fail "run $1: wait exited $code; want 0, completed"
 	grep -x -F 'uid 1001' "$work/$1.reply" >/dev/null || fail "run $1 did not reply 'uid 1001'"
