@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -479,6 +480,9 @@ func (profile *Kubernetes) buildPod(run pluginsdk.Run, name string) *corev1.Pod 
 // that finds the pod already there returns its handle at once.
 func (profile *Kubernetes) Dispatch(ctx context.Context, run pluginsdk.Run) (pluginsdk.Outcome, pluginsdk.Handle, error) {
 	name := profile.jobName(run.ID)
+	if err := inputNames(run); err != nil {
+		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, err
+	}
 	data, err := secretData(run)
 	if err != nil {
 		return pluginsdk.OutcomeNothingCreated, pluginsdk.Handle{}, err
@@ -578,7 +582,11 @@ func (profile *Kubernetes) writeInputs(ctx context.Context, name string, run plu
 		return fmt.Errorf("create the inputs directory: %w", err)
 	}
 	for _, input := range run.Inputs {
-		if err := root.WriteFile("inputs/"+input.Name, input.Data, 0o600); err != nil {
+		name := "inputs/" + input.Name
+		if err := root.MkdirAll(path.Dir(name), 0o700); err != nil {
+			return fmt.Errorf("write input %s: %w", input.Name, err)
+		}
+		if err := root.WriteFile(name, input.Data, 0o600); err != nil {
 			return fmt.Errorf("write input %s: %w", input.Name, err)
 		}
 	}
@@ -590,7 +598,27 @@ func (profile *Kubernetes) writeInputs(ctx context.Context, name string, run plu
 	return nil
 }
 
-// written reports whether dir holds the inputs directory alone, with each of the run's inputs verified and no other.
+// inputNames refuses an input name with an empty, . or .. segment, which the core never sends.
+func inputNames(run pluginsdk.Run) error {
+	names := make([]string, 0, len(run.Inputs)+len(run.Fetches))
+	for _, input := range run.Inputs {
+		names = append(names, input.Name)
+	}
+	for _, fetch := range run.Fetches {
+		names = append(names, fetch.Name)
+	}
+	for _, name := range names {
+		for _, segment := range strings.Split(name, "/") {
+			if segment == "" || segment == "." || segment == ".." {
+				return fmt.Errorf("input %s: a segment is empty, . or ..", name)
+			}
+		}
+	}
+	return nil
+}
+
+// written reports whether dir holds the inputs directory alone, with each of the run's inputs verified at its path,
+// their parent directories and no other entry.
 func written(dir string, run pluginsdk.Run) bool {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -599,23 +627,38 @@ func written(dir string, run pluginsdk.Run) bool {
 	defer root.Close()
 	want := map[string]pluginsdk.Fetch{}
 	for _, input := range run.Inputs {
-		want[input.Name] = pluginsdk.Fetch{Size: int64(len(input.Data)), SHA256: digest(input.Data)}
+		want["inputs/"+input.Name] = pluginsdk.Fetch{Size: int64(len(input.Data)), SHA256: digest(input.Data)}
 	}
 	for _, fetch := range run.Fetches {
-		want[fetch.Name] = fetch
+		want["inputs/"+fetch.Name] = fetch
 	}
-	if names, err := names(root, "."); err != nil || !slices.Equal(names, []string{"inputs"}) {
-		return false
-	}
-	if names, err := names(root, "inputs"); err != nil || !slices.Equal(names, slices.Sorted(maps.Keys(want))) {
-		return false
-	}
-	for name, input := range want {
-		if !verified(root, "inputs/"+name, input) {
-			return false
+	parents := map[string]bool{".": true, "inputs": true}
+	for name := range want {
+		for dir := path.Dir(name); dir != "."; dir = path.Dir(dir) {
+			parents[dir] = true
 		}
 	}
-	return true
+	found := 0
+	err = fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case entry.IsDir():
+			if !parents[name] {
+				return fs.ErrInvalid
+			}
+		case entry.Type().IsRegular():
+			fetch, ok := want[name]
+			if !ok || !verified(root, name, fetch) {
+				return fs.ErrInvalid
+			}
+			found++
+		default:
+			return fs.ErrInvalid
+		}
+		return nil
+	})
+	return err == nil && found == len(want)
 }
 
 func names(root *os.Root, dir string) ([]string, error) {
@@ -667,6 +710,9 @@ func (profile *Kubernetes) fetch(ctx context.Context, root *os.Root, fetch plugi
 		return fetchFailed(fetch.Name, strconv.Itoa(response.StatusCode))
 	}
 	name := "inputs/" + fetch.Name
+	if err := root.MkdirAll(path.Dir(name), 0o700); err != nil {
+		return fmt.Errorf("write input %s: %w", fetch.Name, err)
+	}
 	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("write input %s: %w", fetch.Name, err)
