@@ -2184,6 +2184,36 @@ func TestDispatchRefusesInputsOverTheVariableLimit(t *testing.T) {
 	}
 }
 
+func TestDispatchRefusesABadSegment(t *testing.T) {
+	profile, requests := nomadServer(t, nil)
+	for _, name := range []string{"a//b", "./a", "a/../b", "a/.", "/a", "a/", ".", ".."} {
+		for _, run := range []pluginsdk.Run{
+			{ID: "run-inline", Profile: testProfile, Inputs: []pluginsdk.File{{Name: name, Data: []byte("x")}}},
+			{ID: "run-fetch", Profile: testProfile, Fetches: []pluginsdk.Fetch{{Name: name, URL: "https://storage.invalid/x", Size: 1}}},
+		} {
+			outcome, _, err := profile.Dispatch(context.Background(), run)
+			if outcome != pluginsdk.OutcomeNothingCreated || err == nil || !strings.Contains(err.Error(), "input "+name+": a segment is empty, . or ..") {
+				t.Errorf("%s %q: dispatch = %v, %v; want nothing created and the segment named", run.ID, name, outcome, err)
+			}
+		}
+	}
+	if got := requests(); len(got) != 0 {
+		t.Fatalf("requests %v for refused names", got)
+	}
+}
+
+// A nested input's item key and template destination keep its path, which Nomad accepts: a variable item key may hold
+// '/', and the template renderer creates the destination's parents.
+func TestNestedInputsArriveOnNomad(t *testing.T) {
+	profile, ctx := scriptProfile(t, `set -e; mkdir -p "$WHERRY_OUTPUT_DIR"; cp -R "$WHERRY_INPUT_DIR"/. "$WHERRY_OUTPUT_DIR"/; echo '{"type":"result","result":"done"}'`)
+	run := testRun("nested")
+	run.Inputs = []pluginsdk.File{{Name: "a/b/c.txt", Data: []byte("nested-input")}, {Name: "top.txt", Data: []byte("top")}}
+	outputs := runToOutputs(t, profile, ctx, run)
+	if string(outputs["a/b/c.txt"].Data) != "nested-input" || string(outputs["top.txt"].Data) != "top" {
+		t.Fatalf("inputs came back as %q and %q; want both at their paths", outputs["a/b/c.txt"].Data, outputs["top.txt"].Data)
+	}
+}
+
 func scriptProfile(t *testing.T, script string) (*Nomad, context.Context) {
 	t.Helper()
 	profile, ctx := devProfile(t)
@@ -2331,7 +2361,7 @@ func TestBuildJobDeliversFilesThroughTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := testRun("files")
-	run.Inputs = []pluginsdk.File{{Name: "data.csv"}}
+	run.Inputs = []pluginsdk.File{{Name: "data.csv"}, {Name: "a/b/c.txt"}}
 	run.Credentials = []pluginsdk.Secret{{Name: "deploy-key", File: "id_ed25519"}}
 	path := profile.variablePath(run.ID)
 	job, err := profile.buildJob(run, profile.jobID(run.ID), path)
@@ -2344,6 +2374,7 @@ func TestBuildJobDeliversFilesThroughTemplates(t *testing.T) {
 	}
 	for destination, want := range map[string]string{
 		"local/inputs/data.csv":                       `{{ with nomadVar "` + path + `/agent" }}{{ (index . "data.csv").Value | base64Decode }}{{ end }}`,
+		"local/inputs/a/b/c.txt":                      `{{ with nomadVar "` + path + `/agent" }}{{ (index . "a/b/c.txt").Value | base64Decode }}{{ end }}`,
 		"${NOMAD_SECRETS_DIR}/credentials/id_ed25519": `{{ with nomadVar "` + path + `" }}{{ (index . "credentials/id_ed25519").Value | base64Decode }}{{ end }}`,
 	} {
 		if got, ok := templates[destination]; !ok || got != want {
