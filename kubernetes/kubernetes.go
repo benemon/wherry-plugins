@@ -625,6 +625,10 @@ func written(dir string, run pluginsdk.Run) bool {
 		return false
 	}
 	defer root.Close()
+	// A dispatch that failed between the run directory and its inputs directory leaves no inputs to mount.
+	if info, err := root.Lstat("inputs"); err != nil || !info.IsDir() {
+		return false
+	}
 	want := map[string]pluginsdk.Fetch{}
 	for _, input := range run.Inputs {
 		want["inputs/"+input.Name] = pluginsdk.Fetch{Size: int64(len(input.Data)), SHA256: digest(input.Data)}

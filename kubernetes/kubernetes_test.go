@@ -3458,3 +3458,18 @@ func TestPodAdmittedUnderRestricted(t *testing.T) {
 		}
 	}
 }
+
+// A run directory without its inputs directory is not written, even for a run with no inputs: the pod would start
+// with no input directory.
+func TestWrittenNeedsTheInputsDirectory(t *testing.T) {
+	if written(t.TempDir(), pluginsdk.Run{}) {
+		t.Fatal("an empty run directory counted as written")
+	}
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "inputs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !written(dir, pluginsdk.Run{}) {
+		t.Fatal("a run directory with an empty inputs directory did not count as written")
+	}
+}
