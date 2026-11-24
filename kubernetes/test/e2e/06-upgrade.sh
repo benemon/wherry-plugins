@@ -12,7 +12,7 @@ previous_protocol=$(protocol previous)
 current_protocol=$(protocol current)
 roll wherry-receiver:previous "$previous" "$previous_protocol"
 roll wherry-receiver:e2e e2e "$current_protocol"
-run=$(submit e2e=fake --prompt 'e2e: upgrade' --output echo.txt:required)
+run=$(submit e2e=fake --prompt 'e2e: upgrade' --output echo.txt)
 finish "$run" TASK_STATE_COMPLETED
 replied "$run" 'uid 1001'
 grep -F 'e2e: upgrade' "$work/outputs/$run/echo.txt" >/dev/null || fail "run $run returned no echo.txt"

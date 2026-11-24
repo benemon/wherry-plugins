@@ -8,7 +8,7 @@ same_protocol || exit 0
 previous=$(previous_version)
 previous_protocol=$(protocol previous)
 roll wherry-receiver:previous "$previous" "$previous_protocol"
-run=$(submit e2e=fake --prompt 'e2e: rollback' --output echo.txt:required)
+run=$(submit e2e=fake --prompt 'e2e: rollback' --output echo.txt)
 finish "$run" TASK_STATE_COMPLETED
 replied "$run" 'uid 1001'
 grep -F 'e2e: rollback' "$work/outputs/$run/echo.txt" >/dev/null || fail "run $run returned no echo.txt"

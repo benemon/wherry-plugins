@@ -22,7 +22,7 @@ host cancel "$cancelled"
 finish "$cancelled" TASK_STATE_CANCELED
 wait_for 120 gone secrets
 
-plain=$(submit e2e=fake --prompt 'e2e: plain' --output echo.txt:required)
+plain=$(submit e2e=fake --prompt 'e2e: plain' --output echo.txt)
 finish "$plain" TASK_STATE_COMPLETED
 replied "$plain" 'uid 1001'
 grep -F 'e2e: plain' "$work/outputs/$plain/echo.txt" >/dev/null || fail "run $plain returned no echo.txt"
@@ -53,7 +53,7 @@ grep -F "run $broken: job never started (image): " "$work/receiver.log" >/dev/nu
 # terminal within the budget, completed on 10-fake.yaml or failed on 20-broken.yaml.
 unselected=$(submit '' --start-by 90s --prompt 'e2e: no selector')
 code=0
-host wait "$unselected" --timeout 5m --outputs-dir "$work/outputs/$unselected" >"$work/$unselected.reply" || code=$?
+host result "$unselected" --timeout 5m --outputs-dir "$work/outputs/$unselected" >"$work/$unselected.reply" || code=$?
 host logs "$unselected" >"$work/$unselected.log"
 [ "$code" = "${codes[TASK_STATE_COMPLETED]}" ] || [ "$code" = "${codes[TASK_STATE_FAILED]}" ] ||
 	fail "run $unselected: wait exited $code; want ${codes[TASK_STATE_COMPLETED]} or ${codes[TASK_STATE_FAILED]}, a terminal state"
