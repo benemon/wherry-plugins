@@ -563,7 +563,7 @@ Nomad has not placed as pending, and ReadWorking reads the agent's
 refuses it at its start, as
 [Plugins](https://benemon.github.io/wherry/commands#plugins) describes, so
 the receiver and its plugins upgrade together: protocol 13 needs wherry
-v0.1.8 or later. The receiver times placement itself. For each plugin
+v0.1.8-rc.5 or later. The receiver times placement itself. For each plugin
 profile the plugin reports these families, which the receiver serves on its
 `/metrics` with the plugin profile's name as `profile`:
 
