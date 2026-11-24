@@ -484,7 +484,7 @@ The plugin speaks plugin protocol version 13, in which an input name may
 be a relative path, Dispatch returns once the unit's start job has and
 ReadWorking reads the agent's [working status](#working-status). A
 receiver of another protocol version refuses it, so the receiver and its
-plugins upgrade together: protocol 13 needs wherry v0.1.8 or later. The
+plugins upgrade together: protocol 13 needs wherry v0.1.8-rc.5 or later. The
 receiver times placement itself.
 For each plugin profile the plugin reports these families, which the
 receiver serves on its `/metrics` with the plugin profile's name as
