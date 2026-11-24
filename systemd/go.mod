@@ -3,7 +3,7 @@ module github.com/benemon/wherry-plugins/systemd
 go 1.27
 
 require (
-	github.com/benemon/wherry/pluginsdk v0.10.0
+	github.com/benemon/wherry/pluginsdk v0.11.0-rc.1
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/godbus/dbus/v5 v5.2.4
 	github.com/hashicorp/go-hclog v1.6.3
@@ -19,7 +19,7 @@ require (
 	github.com/mattn/go-isatty v0.0.17 // indirect
 	github.com/oklog/run v1.1.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1 // indirect
 	google.golang.org/grpc v1.85.0 // indirect
