@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Loads the receiver images, the checkout's and the previous release's, and the fake agent's image into kind, creates
 # the runs claim's volume and the state claim's, and deploys the receiver with the README's steps into the namespace
-# wherry, which enforces Pod Security restricted: a copy of examples/kubernetes holding the receiver's bundle, the
-# Strimzi cluster CA and the config.yaml, with ca_file set, that 03-provision.sh's pin gave receiver apply, with the
-# fsGroup patch, the kafka-ca ConfigMap generator, mount and volume and the image set, applied with kubectl apply -k.
-# The receiver's record names the in-cluster listener, not the operator's broker, so its bundle carries no CA and the
-# receiver trusts the broker through the CA file, as the README's exception says. The state volume's root is root's, so the kubelet's
-# ownership pass gives it the fsGroup on its first mount. The receiver is then restarted, and must start with its
-# signing key still 0600. Each start must log the identity line of version e2e and the checkout's protocol.
+# wherry, which enforces Pod Security restricted: a copy of examples/kubernetes holding the receiver's bundle and the
+# config.yaml, with the Strimzi cluster CA as ca_cert, that 03-provision.sh's pin gave receiver apply, with the fsGroup
+# patch and the image set, applied with kubectl apply -k. The image's trust store lacks the Strimzi cluster CA, so the
+# receiver trusts the broker through ca_cert, which the ConfigMap wherry-receiver-config carries with the rest of its
+# local configuration. The state volume's root is root's, so the kubelet's ownership pass gives it the fsGroup on its
+# first mount. The receiver is then restarted, and must start with its signing key still 0600. Each start must log the
+# identity line of version e2e and the checkout's protocol.
 . "$(dirname "$0")/common.sh"
 kind load docker-image --name "$cluster" wherry-receiver:e2e wherry-receiver:previous wherry-e2e-agent:e2e
 
@@ -22,19 +22,11 @@ kubectl label --overwrite namespace "$namespace" pod-security.kubernetes.io/enfo
 cp -R "$repo/examples/kubernetes" "$deploy"
 cp "$work/receiver/config.yaml" "$deploy/config.yaml"
 cp "$operator/bundles/receivers/kind-1.bundle" "$deploy/receiver.bundle"
-cp "$work/ca.crt" "$deploy/kafka-ca.crt"
 sed -i -e 's|newName: registry.example.com/wherry-receiver, newTag: <version>}|newName: wherry-receiver, newTag: e2e}|' \
-	-e 's|^  # - {name: wherry-receiver-kafka-ca,|  - {name: wherry-receiver-kafka-ca,|' \
 	-e 's|^  # - path: fsgroup.yaml$|  - path: fsgroup.yaml|' "$deploy/kustomization.yaml"
-sed -i -e 's|^            # - {name: kafka-ca, mountPath: |            - {name: kafka-ca, mountPath: |' \
-	-e 's|^        # - {name: kafka-ca, configMap: |        - {name: kafka-ca, configMap: |' "$deploy/receiver.yaml"
-grep -x 'ca_file: /etc/wherry/kafka-ca/ca.crt' "$deploy/config.yaml" >/dev/null || fail "config.yaml names no ca_file"
-for line in 'newTag: e2e}' '  - {name: wherry-receiver-kafka-ca,' '  - path: fsgroup.yaml'; do
+grep -x 'ca_cert: |' "$deploy/config.yaml" >/dev/null || fail "config.yaml sets no ca_cert"
+for line in 'newTag: e2e}' '  - path: fsgroup.yaml'; do
 	grep -F -e "$line" "$deploy/kustomization.yaml" >/dev/null || fail "kustomization.yaml lacks '$line'"
-done
-for line in '            - {name: kafka-ca, mountPath: /etc/wherry/kafka-ca, readOnly: true}' \
-	'        - {name: kafka-ca, configMap: {name: wherry-receiver-kafka-ca}}'; do
-	grep -F -x -e "$line" "$deploy/receiver.yaml" >/dev/null || fail "receiver.yaml lacks '$line'"
 done
 kubectl apply -k "$deploy"
 kubectl rollout status -n "$namespace" deployment/wherry-receiver --timeout=5m

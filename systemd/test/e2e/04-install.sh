@@ -29,13 +29,11 @@ if [ "$version" != e2e ]; then
 	[ "$pin" = "$listed" ] || fail "the installed plugin's SHA-256 $pin is not its checksums.txt entry '$listed'"
 fi
 
-# Step 3: the receiver's file with the pin, and the example config.yaml with ca_file set for the broker's private CA,
-# then receiver apply.
+# Step 3: the receiver's file with the pin, and the example config.yaml with the broker's private CA, which the host's
+# trust store lacks, appended as ca_cert, then receiver apply.
 mkdir -p "$operator/receivers"
 cp "$e2e/receiver.yaml" "$operator/receivers/systemd-1.yaml"
-sed 's|^# ca_file: |ca_file: |' "$repo/examples/systemd/config.yaml" >"$operator/receivers/systemd-1.config.yaml"
-grep -x 'ca_file: /etc/wherry/kafka-ca.pem' "$operator/receivers/systemd-1.config.yaml" >/dev/null ||
-	fail "config.yaml names no ca_file"
+with_ca_cert "$repo/examples/systemd/config.yaml" "$work/kafka/ca.crt" >"$operator/receivers/systemd-1.config.yaml"
 set_pin "$version"
 mask "$(sed -n 's/^password: *//p' "$operator/bundles/receivers/systemd-1.bundle" | tr -d "\"'")"
 
@@ -46,10 +44,9 @@ sudo install -m 0644 "$repo/examples/systemd/wherry.slice" "$repo/examples/syste
 sudo install -m 0644 "$repo/examples/systemd/wherry-tmpfiles.conf" /etc/tmpfiles.d/wherry.conf
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/wherry.conf
 
-# Step 5: the bundle, the local configuration and the broker's CA at its ca_file.
+# Step 5: the bundle and the local configuration, which carries the broker's CA as ca_cert.
 sudo install -D -m 0600 "$operator/bundles/receivers/systemd-1.bundle" /etc/wherry/receiver.bundle
 sudo install -m 0600 "$operator/receivers/systemd-1.config.yaml" /etc/wherry/config.yaml
-sudo install -m 0644 "$work/kafka/ca.crt" /etc/wherry/kafka-ca.pem
 sysctl kernel.core_pattern
 
 # Step 6: start the receiver, check its identity line in every invocation since the boundary, and wait for it to show

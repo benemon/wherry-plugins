@@ -19,6 +19,15 @@ fail() {
 	exit 1
 }
 
+# with_ca_cert prints the receiver local configuration $1 with the CA certificates of the PEM file $2 appended as
+# ca_cert, a block scalar, the form a receiver's local configuration holds a CA its machine's trust store lacks in.
+with_ca_cert() {
+	grep -q -F -- '-----BEGIN CERTIFICATE-----' "$2" || fail "$2 holds no certificate"
+	cat "$1"
+	echo 'ca_cert: |'
+	sed 's/^/  /' "$2"
+}
+
 # wait_for runs a command every 5 seconds until it succeeds, for at most the given seconds.
 wait_for() {
 	local end=$((SECONDS + $1))
