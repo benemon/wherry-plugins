@@ -765,9 +765,10 @@ Run the repository commands from that checkout and the operator commands from yo
    Add `storageClassName` to the runs claim `wherry-runs` in the copy's `receiver.yaml`.
    Name a storage class that provisions ReadWriteMany volumes.
    Follow the [runs claim reference](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#runs-claim) for storage requirements.
-   The bundle carries the broker's CA when the record names the operator's broker and `operator.yaml` names a `ca_file`, so the copy needs no CA file for the broker ([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
-   For a receiver whose record sets `broker` to an in-cluster listener, step 4's exception, whose bundle carries no CA: copy the broker's CA into `kafka-ca.crt`, enable the ConfigMap generator in the copy's [kustomization.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/kustomization.yaml), enable the `kafka-ca` mount and volume in its [receiver.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/receiver.yaml), and set `ca_file` in its [config.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/config.yaml).
-   The [receiver deployment reference](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#receiver-deployment) gives the command that copies Strimzi's cluster CA.
+   The receiver verifies the broker's certificate against the image's trust store plus the `ca_cert` of its local configuration; a bundle carries no CA ([Broker and S3 trust](https://benemon.github.io/wherry/security#broker-and-s3-trust)).
+   For a broker under a private CA the image lacks, such as Strimzi's cluster CA, put the CA's PEM in the copy's [config.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/config.yaml) as `ca_cert`, a block scalar.
+   The ConfigMap generated from that file carries the CA, so the copy needs no other file for it.
+   The [receiver deployment reference](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#receiver-deployment) gives the command that appends Strimzi's cluster CA.
    For a private storage CA, enable the CA mount in [receiver.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/kubernetes/receiver.yaml) and supply a full system trust bundle.
    The [image reference](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#image) describes both ways to supply that bundle.
    On OpenShift, use the [injected trusted CA bundle](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/networking/enable-cluster-wide-proxy#certificate-injection-using-operators_config-cluster-wide-proxy).
@@ -802,10 +803,9 @@ Run the repository commands from that checkout and the operator commands from yo
    Set your pool and agent image.
    `claude-code` is Claude Code's [credential catalog id](https://benemon.github.io/wherry/configuration-operator#catalog-agents), from which `wherry operator pool apply` derives the agent's `CLAUDE_CODE_OAUTH_TOKEN` credential.
    An agent of a non-catalog name, such as `claude`, keeps working with the credentials the pool's terms list for it; the profile's `agent` must be one of the pool's agents either way.
-   Without a `broker` line, the bundle names the address `wherry operator init` recorded, and carries the operator's CA
-   when `operator.yaml` names a `ca_file`.
+   Without a `broker` line, the bundle names the address `wherry operator init` recorded.
    To reach Kafka through an in-cluster listener instead, add `broker: wherry-kafka-kafka-bootstrap.kafka.svc:9093`, the internal bootstrap address Strimzi's broker certificates name.
-   The operator knows no CA for another address, so that bundle carries none: the receiver then trusts the broker through step 3's `kafka-ca.crt` and `ca_file` ([Bundle and Kafka](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#bundle-and-kafka)).
+   Either way the receiver trusts the broker's certificate through the image's trust store plus step 3's `ca_cert` ([Bundle and Kafka](https://github.com/benemon/wherry-plugins/blob/main/kubernetes/README.md#bundle-and-kafka)).
    The service account supplies the API credential.
    Leave platform credentials unset for this deployment.
    On OpenShift, omit `runtime.user` and `runtime.group` so restricted-v2 assigns them.
@@ -935,6 +935,7 @@ An upgrade of the plugin is a change of the receiver image.
 
 For a storage endpoint under a private CA, the receiver reads the system bundle `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`.
 That bundle takes no configuration.
+`ca_cert` in the local configuration reaches the receiver's own Kafka and S3 connections alone, not the plugin's fetches of S3 inputs, so a storage CA goes in the bundle.
 You supply the private CA in one of two ways:
 
 - On OpenShift, mount the cluster's
@@ -1009,12 +1010,15 @@ That image is the reference that `kustomization.yaml`'s `images` names.
 `docker run` reads the pin as `podman run` does.
 After you apply a new pin, the receiver's restarts refuse the old binary until the new image runs.
 
-For a receiver whose record names the in-cluster listener, whose bundle carries no CA ([Bundle and Kafka](#bundle-and-kafka)), this command copies Strimzi's cluster CA into the copy as `kafka-ca.crt`:
+For a broker under Strimzi's cluster CA, which the image's trust store lacks ([Bundle and Kafka](#bundle-and-kafka)), this command appends that CA to the copy's `config.yaml` as `ca_cert`, once, to a file with no `ca_cert` yet:
 
 ```sh
-kubectl get secret -n kafka wherry-kafka-cluster-ca-cert -o jsonpath='{.data.ca\.crt}' |
-  base64 -d >~/wherry-receiver-kubernetes-1/kafka-ca.crt
+{ echo 'ca_cert: |'; kubectl get secret -n kafka wherry-kafka-cluster-ca-cert -o jsonpath='{.data.ca\.crt}' |
+  base64 -d | sed 's/^/  /'; } >>~/wherry-receiver-kubernetes-1/config.yaml
 ```
+
+Run it before step 4 copies the file into the operator working directory, so both copies are the same. A renewal
+edits the value in place, as below.
 
 The generated Secret's and ConfigMap's names carry a hash of their content.
 `kubectl apply -k` with a new bundle or local configuration therefore rolls the Deployment.
@@ -1081,41 +1085,36 @@ the listener sets `networkPolicyPeers`, they admit the receiver's
 namespace.
 
 The bundle `operator receiver apply` writes names the receiver file's
-`broker`, else the address in `operator.yaml`, and carries the operator's CA
-as `ca` when that broker is the operator's own and `operator.yaml` names a
-`ca_file`. The receiver trusts the broker through `config.yaml`'s `ca_file`,
-else the bundle's `ca`, else the system roots
-([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
-A receiver on the operator's broker therefore needs no CA file, and the
-example's `kafka-ca` ConfigMap generator, mount and volume stay commented
-out.
+`broker`, else the address in `operator.yaml`, and carries no CA. The
+receiver verifies the broker's certificate against the image's trust store
+plus `config.yaml`'s `ca_cert`, the PEM of a CA the store lacks, as a block
+scalar ([Broker and S3 trust](https://benemon.github.io/wherry/security#broker-and-s3-trust)).
+A broker under a public CA, or under one a derived image adds with
+`update-ca-trust`, needs no `ca_cert`, and the example keeps it commented
+out. `receiver apply` asks for no CA.
 
-The exception is a record whose `broker` names the internal bootstrap
-address, such as `wherry-kafka-kafka-bootstrap.kafka.svc:9093`, while hosts
-use the address in `operator.yaml`; Strimzi's broker certificates carry the
-internal Service names. The operator knows nothing of another address's CA,
-so that bundle carries none, and `receiver apply` asks for no CA: the
-receiver trusts the broker through `config.yaml`'s `ca_file`, the Strimzi
-cluster CA (`<cluster>-cluster-ca-cert`, key `ca.crt`) copied in as
-`kafka-ca.crt`, which the enabled generator, mount and volume carry. A
-`ca_file` overrides the bundle's `ca`, so keep the file current, or remove
-the line once the record is back on the operator's broker.
+A Strimzi broker presents a chain its cluster CA signs, which no image's
+trust store holds, whether the record names the internal bootstrap address,
+such as `wherry-kafka-kafka-bootstrap.kafka.svc:9093`, whose name Strimzi's
+broker certificates carry, or the address hosts use: `ca_cert` holds the
+Strimzi cluster CA (`<cluster>-cluster-ca-cert`, key `ca.crt`). The ConfigMap
+`wherry-receiver-config`, generated from `config.yaml`, carries it with the
+rest of the local configuration; no other ConfigMap, mount or volume is
+involved, and a new CA rolls the Deployment as a new configuration does.
+`ca_cert` reaches the receiver's Kafka and S3 connections alone; the plugin's
+fetches of S3 inputs trust the image's bundle ([Image](#image)).
 
 Strimzi renews its cluster CA
 ([Certificate renewal](https://strimzi.io/docs/operators/latest/deploying#con-certificate-renewal-str)).
-A receiver on the operator's broker takes the renewed CA from a refreshed
-bundle, as [Renew the broker CA](https://benemon.github.io/wherry/security#renew-the-broker-ca)
-describes: put the new certificate in the operator's `ca_file`, run
-`wherry operator receiver apply kubernetes-1`, copy the bundle into the
-Kustomize copy and apply it. Nothing renews the copy a receiver on the
-in-cluster listener holds in `kafka-ca.crt`:
+Nothing renews the value `ca_cert` holds; a renewed CA is a new value and a
+restart ([Install a private CA](https://benemon.github.io/wherry/security#install-a-private-ca)):
 
 1. When the renewal begins, Strimzi keeps the old certificate in
    `<cluster>-cluster-ca-cert` beside the new `ca.crt`. Write both
-   certificates into `kafka-ca.crt` and run `kubectl apply -k`, which
-   rolls the Deployment.
-2. Once Strimzi has removed the old certificate, remove it from
-   `kafka-ca.crt` and apply again.
+   certificates into `ca_cert`, one after the other, copy the file to the operator working directory's
+   `receivers/kubernetes-1.config.yaml`, and run `kubectl apply -k`, which rolls the Deployment.
+2. Once Strimzi has removed the old certificate, remove it from `ca_cert`, copy the file again
+   and apply again.
 
 ## Kubernetes and Nomad together
 
@@ -1281,8 +1280,8 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
    profiles `plugins/kubernetes/profiles/10-fake.yaml`, which runs a fake
    agent, and `20-broken.yaml`, which runs a missing image. It runs
    `operator check`, then `wherry host init` with the host's bundle, the
-   Strimzi cluster CA as `ca.pem`, and a configuration giving sources for
-   a generated dummy credential and SSH private key.
+   Strimzi cluster CA through `--ca-cert`, and a configuration giving
+   sources for a generated dummy credential and SSH private key.
 4. `04-deploy.sh` loads both receiver images and the fake agent's image
    into kind, creates the runs claim's volume,
    [`runs.yaml`](test/e2e/runs.yaml), a hostPath directory on the single
@@ -1291,9 +1290,8 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
    root's, and deploys the receiver as
    [Run the receiver in the cluster](#run-the-receiver-in-the-cluster) says, into a
    namespace enforcing Pod Security `restricted`, with `fsgroup.yaml` and,
-   since the receiver's record names the in-cluster listener and its bundle
-   carries no CA, the Strimzi cluster CA: the `kafka-ca` ConfigMap
-   generator, mount and volume enabled and `config.yaml`'s `ca_file` set. The kubelet's ownership pass gives the state
+   since the image's trust store lacks the Strimzi cluster CA, that CA
+   appended to `config.yaml` as `ca_cert`. The kubelet's ownership pass gives the state
    volume the fsGroup on its first mount; the step checks it, restarts the
    receiver, and checks that it starts with its signing key still 0600. The namespace
    may exist already, from the conformance step.

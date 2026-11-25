@@ -2,15 +2,17 @@
 # Provisions as the operator guide does, from the runner in the operator working directory $E2E_WORK/operator:
 # operator init with the Kafka super user wherry-admin, the pool e2e, the tenant e2e, the host runner and the receiver
 # nomad-1, pinned to the plugin binary of wherry-receiver:e2e, then operator check. Then sets the host up from its
-# bundle with wherry host init, trusting the broker's CA through ca.pem.
+# bundle with wherry host init, trusting the broker's CA through --ca-cert. The runner's trust store lacks that CA, so
+# the operator's operator.yaml and the host's configuration hold it as ca_cert, as the receiver's local configuration
+# does.
 . "$(dirname "$0")/common.sh"
 umask 077
 kafka=$work/kafka
 mask "$(cat "$kafka/admin-password")"
 
 mkdir -p "$operator"
-wherry operator init --dir "$operator" --broker "$(cat "$work/address"):9093" --ca-file "$kafka/ca.crt" \
-	--super-user wherry-admin --super-user-password-file "$kafka/admin-password"
+wherry operator init --dir "$operator" --broker "$(cat "$work/address"):9093" --ca-cert @"$kafka/ca.crt" \
+	--super-user wherry-admin --super-user-password @"$kafka/admin-password"
 mask "$(cat "$operator/operator.password")"
 wherry operator pool apply e2e --dir "$operator" -f "$e2e/pool.yaml"
 wherry operator tenant add e2e --dir "$operator"
@@ -22,6 +24,4 @@ for bundle in "$operator/bundles/hosts/e2e/runner.bundle" "$operator/bundles/rec
 	mask "$(sed -n 's/^password: *//p' "$bundle" | tr -d "\"'")"
 done
 
-mkdir -p "$XDG_CONFIG_HOME/wherry"
-cp "$kafka/ca.crt" "$XDG_CONFIG_HOME/wherry/ca.pem"
-wherry host init "$operator/bundles/hosts/e2e/runner.bundle"
+wherry host init "$operator/bundles/hosts/e2e/runner.bundle" --ca-cert @"$kafka/ca.crt"

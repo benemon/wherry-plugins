@@ -147,7 +147,7 @@ if scripts=$(git ls-files 'examples/*.sh') && [ -n "$scripts" ]; then
 	failed "a shell script is in the deployment path; use the platform's own tool"
 fi
 
-removed="wherry ""admin|WHERRY_""TRUST|wherry ""init\\b"
+removed="wherry ""admin|WHERRY_""TRUST|wherry ""init\\b|--ca""-file|prompt""_file|--super-user-password""-file"
 if hits=$(git grep -n -P "$removed" -- . ':!*CHANGELOG*'); then
 	echo "$hits"
 	failed "tracked files name a command or variable wherry removed"
