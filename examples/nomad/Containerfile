@@ -2,7 +2,7 @@
 # docker build -f examples/nomad/Containerfile --build-arg VERSION=<version> --build-arg WHERRY_VERSION=<version> .
 # examples/nomad/wherry-receiver.nomad.hcl runs it with the arguments receiver run --config-file /local/config.yaml,
 # rendering the local configuration examples/nomad/config.yaml and the bundle it names into the task.
-FROM --platform=$BUILDPLATFORM ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d AS cosign
+FROM --platform=$BUILDPLATFORM ghcr.io/sigstore/cosign/cosign:v3.1.5@sha256:191099139868a6cd02abae63f2919e0915dcaa7bcc22bda6fbd11fd0dd5599e7 AS cosign
 
 FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e AS build
 ARG TARGETARCH
@@ -32,7 +32,7 @@ RUN test -n "$WHERRY_VERSION" && \
 FROM scratch AS wherry
 COPY --from=fetch /fetch/wherry /wherry
 
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8@sha256:f26ef64172ea61f5ac5ba4be8c5c738bf8760b22b3e5148ce7b40f7308ab32db
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.9@sha256:08d4c70f1baf6537a0728656cf7942d561e74a35916509d205b6519861266352
 COPY --from=fetch --chown=0:0 --chmod=0755 /fetch/wherry /usr/local/bin/wherry
 COPY --from=build --chown=0:0 --chmod=0755 /out/wherry-plugin-nomad /usr/local/libexec/wherry/plugins/wherry-plugin-nomad
 RUN install -d -o 0 -g 0 -m 0775 /var/lib/wherry
