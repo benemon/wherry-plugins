@@ -206,7 +206,7 @@ plugins:
             user: wherry-agent
             group: wherry-agent
             supplementary_groups: [video]
-            command: [/usr/local/bin/agent-run, --prompt, "@/wherry/prompt.txt"]
+            command: [/usr/local/bin/agent-run, --prompt-file, /wherry/prompt.txt]
 ```
 
 ## Agent units

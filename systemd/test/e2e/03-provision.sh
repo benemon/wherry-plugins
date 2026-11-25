@@ -19,5 +19,4 @@ wherry operator tenant pool add e2e e2e --dir "$operator"
 wherry operator tenant host add e2e runner --dir "$operator"
 mask "$(sed -n 's/^password: *//p' "$operator/bundles/hosts/e2e/runner.bundle" | tr -d "\"'")"
 
-mkdir -p "$XDG_CONFIG_HOME/wherry"
 wherry host init "$operator/bundles/hosts/e2e/runner.bundle" --ca-cert @"$kafka/ca.crt"

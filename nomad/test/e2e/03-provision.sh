@@ -24,5 +24,4 @@ for bundle in "$operator/bundles/hosts/e2e/runner.bundle" "$operator/bundles/rec
 	mask "$(sed -n 's/^password: *//p' "$bundle" | tr -d "\"'")"
 done
 
-mkdir -p "$XDG_CONFIG_HOME/wherry"
 wherry host init "$operator/bundles/hosts/e2e/runner.bundle" --ca-cert @"$kafka/ca.crt"

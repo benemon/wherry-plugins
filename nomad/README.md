@@ -670,7 +670,7 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    Podman reads [`containers-certs.d`](https://github.com/containers/image/blob/main/docs/containers-certs.d.5.md) and the system trust.
 
    For a storage endpoint under a private CA, the receiver trusts the image's system roots plus the `ca_cert` of its local configuration.
-   The Nomad client's fetches of S3 inputs trust the client's system roots alone, so a storage CA goes in the images and on the clients.
+   The Nomad client's own artifact fetches trust the client's system roots alone, so for those a storage CA goes on the clients.
    Build a derived image that adds the CA:
 
    ```dockerfile

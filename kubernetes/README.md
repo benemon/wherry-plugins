@@ -348,7 +348,7 @@ plugins:
           runtime:
             image: registry.example.com/reviewer:1.0
             group: "1001"
-            args: [--prompt, "@/wherry/prompt.txt"]
+            args: [--prompt-file, /wherry/prompt.txt]
             env:
               AGENT_LOG_LEVEL: warn
             resources:
@@ -1010,14 +1010,15 @@ That image is the reference that `kustomization.yaml`'s `images` names.
 `docker run` reads the pin as `podman run` does.
 After you apply a new pin, the receiver's restarts refuse the old binary until the new image runs.
 
-For a broker under Strimzi's cluster CA, which the image's trust store lacks ([Bundle and Kafka](#bundle-and-kafka)), this command appends that CA to the copy's `config.yaml` as `ca_cert`:
+For a broker under Strimzi's cluster CA, which the image's trust store lacks ([Bundle and Kafka](#bundle-and-kafka)), this command appends that CA to the copy's `config.yaml` as `ca_cert`, once, to a file with no `ca_cert` yet:
 
 ```sh
 { echo 'ca_cert: |'; kubectl get secret -n kafka wherry-kafka-cluster-ca-cert -o jsonpath='{.data.ca\.crt}' |
   base64 -d | sed 's/^/  /'; } >>~/wherry-receiver-kubernetes-1/config.yaml
 ```
 
-Run it before step 4 copies the file into the operator working directory, so both copies are the same.
+Run it before step 4 copies the file into the operator working directory, so both copies are the same. A renewal
+edits the value in place, as below.
 
 The generated Secret's and ConfigMap's names carry a hash of their content.
 `kubectl apply -k` with a new bundle or local configuration therefore rolls the Deployment.
@@ -1110,9 +1111,9 @@ restart ([Install a private CA](https://benemon.github.io/wherry/security#instal
 
 1. When the renewal begins, Strimzi keeps the old certificate in
    `<cluster>-cluster-ca-cert` beside the new `ca.crt`. Write both
-   certificates into `ca_cert`, one after the other, and run
-   `kubectl apply -k`, which rolls the Deployment.
-2. Once Strimzi has removed the old certificate, remove it from `ca_cert`
+   certificates into `ca_cert`, one after the other, copy the file to the operator working directory's
+   `receivers/kubernetes-1.config.yaml`, and run `kubectl apply -k`, which rolls the Deployment.
+2. Once Strimzi has removed the old certificate, remove it from `ca_cert`, copy the file again
    and apply again.
 
 ## Kubernetes and Nomad together
