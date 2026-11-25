@@ -669,7 +669,8 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    Docker reads [`certs.d`](https://docs.docker.com/engine/security/certificates/).
    Podman reads [`containers-certs.d`](https://github.com/containers/image/blob/main/docs/containers-certs.d.5.md) and the system trust.
 
-   For a storage endpoint under a private CA, the receiver trusts the image's system roots.
+   For a storage endpoint under a private CA, the receiver trusts the image's system roots plus the `ca_cert` of its local configuration.
+   The Nomad client's fetches of S3 inputs trust the client's system roots alone, so a storage CA goes in the images and on the clients.
    Build a derived image that adds the CA:
 
    ```dockerfile
@@ -747,8 +748,8 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    To change them later, follow [Change a receiver's configuration](https://benemon.github.io/wherry/operations-operator#change-a-receiver-s-configuration).
    You can instead provide `config.yaml` in the receiver configuration directory passed with `-f DIR`.
    See [receiver local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration).
-   The bundle carries the broker's CA when the record names the operator's broker and `operator.yaml` names a `ca_file`, so the local configuration needs no `ca_file` ([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
-   Enable `ca_file` only for a receiver whose record sets `broker` to another address, whose bundle carries no CA, or as an explicit override; it overrides the bundle's CA, so a stale file hides a refreshed one.
+   The receiver verifies the broker's certificate against the image's trust store plus the `ca_cert` of its local configuration; a bundle carries no CA ([Broker and S3 trust](https://benemon.github.io/wherry/security#broker-and-s3-trust)).
+   For a broker under a private CA the image lacks, put the CA's PEM in the copy as `ca_cert`, a block scalar, before applying.
    Keep the local configuration and bundle outside version control.
 
 4. Create the persistent state volume with [the example volume](https://github.com/benemon/wherry-plugins/blob/main/examples/nomad/wherry-receiver.volume.hcl):
@@ -775,8 +776,7 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
      config=@<operator directory>/receivers/nomad-1.config.yaml
    ```
 
-   A receiver on the operator's broker takes the broker's CA from its bundle and puts no CA item.
-   For a receiver whose record sets `broker` to another address, or an explicit override, add `ca=@<broker CA file>`, which the job renders at the path its `ca_file` names.
+   The broker's CA, when the local configuration holds one as `ca_cert`, travels in the `config` item; the variable has no CA item of its own.
    Add `nomad_ca=@<Nomad CA file>` for the Nomad API's private CA from step 3.
    To change an item later, put every item again with `-force`.
    A put replaces the whole variable.
@@ -941,9 +941,7 @@ Its `template` blocks render the variable's items into the task:
   Setting that owner needs a Nomad client running as root.
 - The item `config`, the receiver's local configuration, goes to `/local/config.yaml`.
   [`examples/nomad/config.yaml`](../examples/nomad/config.yaml) is the example.
-- The item `ca`, the broker's CA for a receiver whose record names another broker address than the operator's, or an explicit override, goes to `/secrets/kafka-ca.pem`.
-  `config.yaml`'s `ca_file` then names that path.
-  A receiver on the operator's broker takes the CA from its bundle, which `receiver apply` writes when `operator.yaml` names a `ca_file`, and the item is left out ([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
+  Its `ca_cert`, when set, is the PEM of the broker's CA the image's trust store lacks, so this item carries the CA and the variable has no CA item ([Broker and S3 trust](https://benemon.github.io/wherry/security#broker-and-s3-trust)).
 - The item `nomad_ca`, for a Nomad API under a private CA, goes to `/secrets/nomad-ca.pem`.
   The plugin's `ca_file` names that path when its `address` is an HTTPS address.
 
@@ -1124,10 +1122,10 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
    `plugins/nomad/profiles/10-fake.yaml` runs a fake agent, with the pin of
    the plugin binary in the checkout's image appended. It runs
    `operator check`, then `wherry host init` with the host's bundle and
-   the broker's CA as `ca.pem`.
-4. `04-deploy.sh` puts the receiver's bundle,
-   [`examples/nomad/config.yaml`](../examples/nomad/config.yaml) with its
-   `ca_file` uncommented, and the broker's CA in the job's Nomad variable,
+   the broker's CA through `--ca-cert`.
+4. `04-deploy.sh` puts the receiver's bundle and
+   [`examples/nomad/config.yaml`](../examples/nomad/config.yaml) with the
+   broker's CA appended as `ca_cert` in the job's Nomad variable,
    creates the state volume from
    [`examples/nomad/wherry-receiver.volume.hcl`](../examples/nomad/wherry-receiver.volume.hcl),
    validates the example job and the host paths example job, runs the

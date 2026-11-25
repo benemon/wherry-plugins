@@ -3,12 +3,15 @@
 # /secrets/receiver.bundle from the item bundle. state_dir is on the job's host volume at /var/lib/wherry. plugin_dir
 # follows current, the symlink to /usr/local/libexec/wherry/<version>/ holding wherry and plugins/.
 bundle: /secrets/receiver.bundle
-# Unset, the receiver trusts the broker through the ca its bundle carries, else the system roots: wherry operator
-# receiver apply writes the operator's CA into the bundle when the record names the operator's broker and operator.yaml
-# names a ca_file. Set it only for a receiver whose record names another broker address, whose bundle carries no CA, or
-# as an explicit override: the variable's item ca, which the job renders to /secrets/kafka-ca.pem. A ca_file overrides
-# the bundle's ca, so a stale file hides a refreshed CA.
-# ca_file: /secrets/kafka-ca.pem
+# The receiver verifies the broker's certificate against the client's trust store plus ca_cert. Unset, the trust store
+# alone: a broker under a public CA, or a CA installed on every eligible client. For a broker under a private CA the
+# clients lack, put the CA's PEM here as a block scalar; the variable's item config carries it with the rest of this
+# file, and a changed item restarts the task. Several certificates concatenate in the one value. ca_cert reaches the
+# receiver's Kafka and S3 connections alone, not the Nomad client's fetches of S3 inputs.
+# ca_cert: |
+#   -----BEGIN CERTIFICATE-----
+#   ...
+#   -----END CERTIFICATE-----
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/current/plugins
 metrics_addr: ":9464"

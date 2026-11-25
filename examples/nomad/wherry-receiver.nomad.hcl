@@ -88,18 +88,8 @@ job "wherry-receiver" {
         destination = "/var/lib/wherry"
       }
 
-      # The broker's CA for a receiver whose record names another broker address than the operator's, whose bundle
-      # carries no CA, or an explicit override: the variable's item ca, which config.yaml's ca_file then names. Empty
-      # without the item, as for a receiver on the operator's broker, whose bundle carries the CA.
-      template {
-        destination = "secrets/kafka-ca.pem"
-        data        = <<-EOT
-          {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .ca }}{{ end }}
-        EOT
-      }
-
       # The Nomad API's CA, for the plugin's ca_file when it reaches the API at an HTTPS address; empty without the item
-      # nomad_ca.
+      # nomad_ca. The broker's CA is config.yaml's ca_cert, in the item config, and has no template of its own.
       template {
         destination = "secrets/nomad-ca.pem"
         data        = <<-EOT

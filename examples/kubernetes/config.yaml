@@ -2,13 +2,15 @@
 # receiver.yaml mounts at /etc/wherry/config, and the Secret wherry-receiver-bundle from receiver.bundle, mounted at
 # /etc/wherry/bundle. state_dir is on the state claim at /var/lib/wherry. The image installs the plugins in plugin_dir.
 bundle: /etc/wherry/bundle/bundle.yaml
-# Unset, the receiver trusts the broker through the ca its bundle carries, else the system roots: wherry operator
-# receiver apply writes the operator's CA into the bundle when the record names the operator's broker and operator.yaml
-# names a ca_file. Set it for a receiver whose record names an in-cluster listener, another broker address, whose
-# bundle therefore carries no CA, or as an explicit override: the ConfigMap wherry-receiver-kafka-ca, which
-# kustomization.yaml generates from kafka-ca.crt and receiver.yaml mounts at /etc/wherry/kafka-ca, both commented out
-# there. A ca_file overrides the bundle's ca, so a stale file hides a refreshed CA.
-# ca_file: /etc/wherry/kafka-ca/ca.crt
+# The receiver verifies the broker's certificate against the image's trust store plus ca_cert. Unset, the trust store
+# alone: a broker under a public CA, or a CA added to the image. For a broker under a private CA the image lacks, such
+# as a Strimzi cluster's, put the CA's PEM here as a block scalar; the ConfigMap wherry-receiver-config carries it with
+# the rest of this file, so a new CA rolls the Deployment. Several certificates concatenate in the one value. ca_cert
+# reaches the receiver's Kafka and S3 connections alone, not the plugin's fetches of S3 inputs.
+# ca_cert: |
+#   -----BEGIN CERTIFICATE-----
+#   ...
+#   -----END CERTIFICATE-----
 state_dir: /var/lib/wherry/state
 plugin_dir: /usr/local/libexec/wherry/plugins
 metrics_addr: ":9464"

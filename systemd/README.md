@@ -206,7 +206,7 @@ plugins:
             user: wherry-agent
             group: wherry-agent
             supplementary_groups: [video]
-            command: [/usr/local/bin/agent-run, --prompt-file, /wherry/prompt.txt]
+            command: [/usr/local/bin/agent-run, --prompt, "@/wherry/prompt.txt"]
 ```
 
 ## Agent units
@@ -627,8 +627,8 @@ Run host installation commands as root from that checkout.
 
    You can instead provide `config.yaml` in the configuration directory passed with `-f DIR`.
    See [receiver local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration).
-   The bundle carries the broker's CA when the record names the operator's broker and `operator.yaml` names a `ca_file`, so the supplied file needs no `ca_file` ([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
-   Set `ca_file` only for a receiver whose record sets `broker` to another address, whose bundle carries no CA, or as an explicit override; it overrides the bundle's CA, so a stale file hides a refreshed one.
+   The receiver verifies the broker's certificate against the host's trust store plus the `ca_cert` of its local configuration; a bundle carries no CA ([Broker and S3 trust](https://benemon.github.io/wherry/security#broker-and-s3-trust)).
+   For a broker under a private CA, either install the CA on the host, on RHEL under `/etc/pki/ca-trust/source/anchors/` with `update-ca-trust`, or put its PEM in the supplied file as `ca_cert`, a block scalar, for wherry alone.
    Keep the bundle and local configuration outside version control.
 
 4. Create the agents' state roots and install the units and tmpfiles configuration:
@@ -653,8 +653,7 @@ Run host installation commands as root from that checkout.
    install -m 0600 <operator directory>/receivers/systemd-1.config.yaml /etc/wherry/config.yaml
    ```
 
-   A receiver on the operator's broker takes the broker's CA from its bundle and installs no CA file.
-   For a receiver whose record sets `broker` to another address, or an explicit override, also install the broker's certificates at the path its `ca_file` names, `/etc/wherry/kafka-ca.pem` in the example.
+   The configuration carries the broker's CA as `ca_cert` when the host's trust store lacks it, so no other file is installed for it.
    The unit loads the bundle as a [systemd credential](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Credentials).
    The configuration names `/run/credentials/wherry-receiver.service/bundle` as its bundle.
    Its `plugin_dir` is `/usr/local/libexec/wherry/current/plugins`.
@@ -721,7 +720,7 @@ Run host installation commands as root from that checkout.
    Stop them when their runs are no longer needed.
    Remove `/etc/systemd/system/wherry-receiver.service`, `/etc/systemd/system/wherry.slice` and `/etc/tmpfiles.d/wherry.conf` when no service uses them.
    Run `systemctl daemon-reload`.
-4. Remove `/etc/wherry/receiver.bundle` and `/etc/wherry/config.yaml` and any installed broker CA.
+4. Remove `/etc/wherry/receiver.bundle` and `/etc/wherry/config.yaml`, and a broker CA installed in the host's trust store for the receiver alone.
    Remove the receiver's state, agent material and credential mount point when they are no longer needed.
    Remove the version directories, `current` and `/usr/local/bin/wherry` when no receiver uses them.
    Remove the operator's local bundle and configuration copies.
@@ -753,9 +752,9 @@ Every boot recreates it from the tmpfiles.d line.
 [`examples/systemd/config.yaml`](../examples/systemd/config.yaml) is the receiver's local configuration.
 It names the bundle, the state directory, the plugin directory and the metrics address.
 Its `plugin_dir` is `/usr/local/libexec/wherry/current/plugins`.
-It names no `ca_file`: the bundle carries the broker's CA when the record names the operator's broker and `operator.yaml` names a `ca_file`
-([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
-Its commented `ca_file`, `/etc/wherry/kafka-ca.pem`, is for a receiver whose record names another broker address, whose bundle carries no CA, or an explicit override; it overrides the bundle's CA.
+It sets no `ca_cert`: the receiver verifies the broker's certificate against the host's trust store
+([Broker and S3 trust](https://benemon.github.io/wherry/security#broker-and-s3-trust)).
+Its commented `ca_cert` is for a broker under a private CA given to wherry alone: the CA's PEM as a block scalar, trusted beside the host's trust store for the receiver's Kafka and S3 connections.
 
 The unit takes the bundle as a systemd
 [credential](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Credentials),
@@ -908,17 +907,17 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
 3. `03-provision.sh`, harness, provisions what the procedure starts with:
    `wherry operator init`, the pool `e2e` and the tenant `e2e` entitled to
    it with the host `runner`, then `wherry host init` with the broker's CA
-   as `ca.pem` in the host's configuration directory.
+   through `--ca-cert`.
 4. `04-install.sh` runs steps 1 to 6 with the previous release's plugin:
    it installs the version directory and the `current` and
    `/usr/local/bin/wherry` links, checks the pin against the release's
    checksums, writes `receivers/systemd-1.yaml` from
    [`test/e2e/receiver.yaml`](test/e2e/receiver.yaml), whose plugin profile
    runs `/bin/true`, with
-   [`examples/systemd/config.yaml`](../examples/systemd/config.yaml)'s
-   `ca_file` set to `/etc/wherry/kafka-ca.pem`, applies it, installs the
-   units, the bundle, the configuration and the broker's CA, and starts the
-   receiver. The lane submits no run.
+   [`examples/systemd/config.yaml`](../examples/systemd/config.yaml) and
+   the broker's CA appended as `ca_cert`, applies it, installs the units,
+   the bundle and the configuration, and starts the receiver. The lane
+   submits no run.
 5. `05-upgrade.sh` runs [Upgrade](#upgrade)'s steps 1 to 4 to the
    checkout's plugin.
 6. `06-rollback.sh` runs Upgrade's rollback sentence: it applies the

@@ -11,17 +11,17 @@ example sets its platform's stop window and keeps `drain_timeout` at least
 ([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration-receiver#drain-timeout-and-the-stop-window)).
 `make check-examples` checks it.
 
-On the default path, no example needs a separate file for the broker's CA.
-`wherry operator receiver apply` writes the operator's CA into the bundle when the receiver's
-record names the operator's broker and `operator.yaml` names a `ca_file`, and
-the receiver trusts the broker through the `ca_file` its local configuration
-names, else the bundle's `ca`, else the system roots
-([Broker trust](https://benemon.github.io/wherry/security#broker-trust)).
-Each `config.yaml` keeps a commented `ca_file` for the exceptions: a receiver
-whose record names another broker address, such as the Kubernetes example's
-in-cluster listener, whose bundle carries no CA, or an explicit override. A
-`ca_file` overrides the bundle's `ca`, so a stale file hides a refreshed CA
-([Renew the broker CA](https://benemon.github.io/wherry/security#renew-the-broker-ca)).
+A receiver verifies the broker's certificate, and its pool's bucket, against
+its machine's trust store plus the `ca_cert` of its local configuration: the
+CA's PEM itself, as a block scalar, for wherry's Kafka and S3 connections
+alone ([Broker and S3 trust](https://benemon.github.io/wherry/security#broker-and-s3-trust)).
+wherry distributes no CA; a bundle carries none. No example needs a separate
+file for the broker's CA: each `config.yaml` keeps a commented `ca_cert` for a
+broker under a private CA the machine lacks, such as a Strimzi cluster's for
+the Kubernetes example, and the platform carries the CA with the rest of the
+configuration, in the ConfigMap, the Nomad variable's `config` item or the
+installed file. A renewed CA is a new value and a restart
+([Install a private CA](https://benemon.github.io/wherry/security#install-a-private-ca)).
 
 These examples show ways to run a receiver and its plugins. Adapt them to
 your environment. They are not published images or packages.
