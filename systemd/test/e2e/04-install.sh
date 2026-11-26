@@ -30,7 +30,7 @@ if [ "$version" != e2e ]; then
 fi
 
 # Step 3: the receiver's file with the pin, and the example config.yaml with the broker's private CA, which the host's
-# trust store lacks, appended as ca_cert, then receiver apply.
+# trust store lacks, appended as ca_cert, then apply --receiver.
 mkdir -p "$operator/receivers"
 cp "$e2e/receiver.yaml" "$operator/receivers/systemd-1.yaml"
 with_ca_cert "$repo/examples/systemd/config.yaml" "$work/kafka/ca.crt" >"$operator/receivers/systemd-1.config.yaml"

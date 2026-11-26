@@ -34,7 +34,7 @@ Point `/usr/local/libexec/wherry/current` at the version directory and
 Set `plugin_dir: /usr/local/libexec/wherry/current/plugins` in the receiver's local configuration.
 Its default, `/usr/local/libexec/wherry/plugins`, does not follow the versioned layout.
 The receiver runs the plugin only from a binary whose SHA-256 is the pin its record holds for the type:
-`plugin_sha256: {nomad: HEX}` in the receiver's file, which `wherry operator receiver apply` records.
+`plugin_sha256: {nomad: HEX}` in the receiver's file, which `wherry operator apply --receiver` records.
 The plugin is not run by hand.
 [Run the receiver in Nomad](https://github.com/benemon/wherry-plugins/blob/main/nomad/README.md#run-the-receiver-in-nomad) covers pinning and deployment.
 
@@ -723,7 +723,7 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    ```
 
    Create the Nomad namespace `agents` before running the job; the record and the ACL policy name it.
-   `claude-code` is Claude Code's [credential catalog id](https://benemon.github.io/wherry/configuration-operator#catalog-agents), from which `wherry operator pool apply` derives the agent's `CLAUDE_CODE_OAUTH_TOKEN` credential.
+   `claude-code` is Claude Code's [credential catalog id](https://benemon.github.io/wherry/configuration-operator#catalog-agents), from which `wherry operator apply --pool` derives the agent's `CLAUDE_CODE_OAUTH_TOKEN` credential.
    An agent of a non-catalog name, such as `claude`, keeps working with the credentials the pool's terms list for it; the profile's `agent` must be one of the pool's agents either way.
 
    Use the [receiver configuration reference](https://github.com/benemon/wherry-plugins/blob/main/nomad/README.md#receiver-configuration) for the plugin settings.
@@ -739,14 +739,14 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    Copy [config.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/nomad/config.yaml) to `receivers/nomad-1.config.yaml` before applying:
 
    ```sh
-   wherry operator receiver apply nomad-1
+   wherry operator apply --receiver nomad-1
    ```
 
    This writes `bundles/receivers/nomad-1.bundle`.
    The record holds the plugin's settings.
    The job's variable holds none.
    To change them later, follow [Change a receiver's configuration](https://benemon.github.io/wherry/operations-operator#change-a-receiver-s-configuration).
-   You can instead provide `config.yaml` in the receiver configuration directory passed with `-f DIR`.
+   You can instead provide `config.yaml` in the receiver configuration directory passed with `--file DIR`.
    See [receiver local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration).
    The receiver verifies the broker's certificate against the image's trust store plus the `ca_cert` of its local configuration; a bundle carries no CA ([Broker and S3 trust](https://benemon.github.io/wherry/security#broker-and-s3-trust)).
    For a broker under a private CA the image lacks, put the CA's PEM in the copy as `ca_cert`, a block scalar, before applying.
@@ -768,7 +768,7 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    The bridge network requires the [CNI plugins](https://developer.hashicorp.com/nomad/docs/networking/cni).
    Kafka must advertise addresses the task can reach.
 
-5. Put the bundle and the local configuration you supplied to `receiver apply` in the job variable:
+5. Put the bundle and the local configuration you supplied to `apply --receiver` in the job variable:
 
    ```sh
    nomad var put nomad/jobs/wherry-receiver \
@@ -820,12 +820,12 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
 8. In your operator working directory, check that the receiver is up:
 
    ```sh
-   wherry operator receiver show nomad-1
+   wherry operator show --receiver nomad-1
    ```
 
    The first line is `status: live` once the receiver's first advertisement is verified against its key topic, with `last_advertised` on the next.
    `status: silent` means it has not advertised yet; `stale` means its last advertisement is more than 120 seconds old, and `ended` that the receiver was revoked.
-   [`receiver show`](https://benemon.github.io/wherry/commands#wherry-operator-receiver-show-receiver) describes each status.
+   [`operator show`](https://benemon.github.io/wherry/commands#wherry-operator-show) describes each status.
 
 ### The exec driver (example only)
 
@@ -848,24 +848,24 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    Keep the directories writable only by root.
    Create a dedicated `wherry` user and group on each client.
 2. Record the release binary's SHA-256 as `plugin_sha256.nomad`.
-   Provide [config-host.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/nomad/config-host.yaml) as `receivers/nomad-1.config.yaml` before `wherry operator receiver apply nomad-1`.
+   Provide [config-host.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/nomad/config-host.yaml) as `receivers/nomad-1.config.yaml` before `wherry operator apply --receiver nomad-1`.
    Its `plugin_dir` is `/usr/local/libexec/wherry/current/plugins`.
 3. Follow the commands in [the exec job](https://github.com/benemon/wherry-plugins/blob/main/examples/nomad/wherry-receiver-host.nomad.hcl) to create the state volume with the wherry user's UID and GID, upload the bundle and configuration, attach the ACL policy and run the job.
    Follow [the exec driver documentation](https://developer.hashicorp.com/nomad/docs/drivers/exec) for client requirements.
 4. Check the allocation logs for `plugin nomad: version <plugin version> protocol <n>`.
-   In your operator working directory, run `wherry operator receiver show nomad-1` and wait for `status: live`.
+   In your operator working directory, run `wherry operator show --receiver nomad-1` and wait for `status: live`.
 
 ### Upgrade
 
 1. Build and push the new image, then obtain its plugin pin.
    For exec, install the verified binaries in a new version directory beside the old one on every eligible client.
-2. Update `plugin_sha256.nomad` and run `wherry operator receiver apply nomad-1` in your operator working directory.
+2. Update `plugin_sha256.nomad` and run `wherry operator apply --receiver nomad-1` in your operator working directory.
    [Change a receiver's configuration](https://benemon.github.io/wherry/operations-operator#change-a-receiver-s-configuration) describes this command.
    Until the new version runs, the receiver's restarts refuse the old plugin binary.
 3. Immediately run the container job with the new image.
    For exec, repoint `current` on each eligible client and restart the job with `nomad job restart wherry-receiver`.
    Keep the state volume.
-4. Check the plugin identity line and wait for `wherry operator receiver show nomad-1` to report `status: live`.
+4. Check the plugin identity line and wait for `wherry operator show --receiver nomad-1` to report `status: live`.
    To roll back, apply the previous pin and redeploy the previous image, or repoint `current` to the previous host version and restart.
 
 ### Move a receiver's state into the volume
@@ -890,7 +890,7 @@ To move a receiver whose state directory is elsewhere, such as an allocation's d
    Keep `signing.key` at mode 0600.
    Check each file's SHA-256 against the backup.
 6. Run the job as in step 6 of [Run the receiver in Nomad](https://github.com/benemon/wherry-plugins/blob/main/nomad/README.md#run-the-receiver-in-nomad).
-   Wait for `wherry operator receiver show nomad-1` to report `status: live` under its old name.
+   Wait for `wherry operator show --receiver nomad-1` to report `status: live` under its old name.
    A receiver that starts without its key fails every start.
 
 ### Uninstall
@@ -898,7 +898,7 @@ To move a receiver whose state directory is elsewhere, such as an allocation's d
 1. Revoke the receiver in your operator working directory:
 
    ```sh
-   wherry operator receiver remove nomad-1
+   wherry operator remove --receiver nomad-1
    ```
 
 2. Stop and purge the job, then remove its variable:
@@ -936,7 +936,7 @@ Its variable `driver` selects `docker`, the default, or `podman`.
 The job reads the Nomad variable `nomad/jobs/wherry-receiver` through its workload identity.
 Its `template` blocks render the variable's items into the task:
 
-- The item `bundle`, the receiver's bundle that `wherry operator receiver apply` writes, goes into the task's secrets directory.
+- The item `bundle`, the receiver's bundle that `wherry operator apply --receiver` writes, goes into the task's secrets directory.
   It is owned by the image's user with mode 0600.
   Setting that owner needs a Nomad client running as root.
 - The item `config`, the receiver's local configuration, goes to `/local/config.yaml`.
@@ -953,7 +953,7 @@ The local configuration's `drain_timeout` is 20 seconds
 ([Drain timeout and the stop window](https://benemon.github.io/wherry/configuration-receiver#drain-timeout-and-the-stop-window)).
 On an upgrade or a rollback, the old receiver releases its runs when it stops.
 The new receiver adopts their agent jobs.
-The CI lane reads the recorded pin back with `wherry operator receiver show nomad-1` before it runs the job.
+The CI lane reads the recorded pin back with `wherry operator show --receiver nomad-1` before it runs the job.
 
 ### The task API and NOMAD_ADDR
 
@@ -1116,8 +1116,8 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
    puts it in both images.
 3. `03-provision.sh` provisions as the operator guide does, in an operator
    working directory: `wherry operator init` with the broker's Kafka super
-   user, `operator pool apply -f`, `tenant add`, `tenant pool add`, `tenant host add`, and
-   `receiver apply -f` of the receiver configuration directory
+   user, `operator apply --pool --file`, `add --tenant`, `allow`, `add --host`, and
+   `apply --receiver --file` of the receiver configuration directory
    `test/e2e/receiver`, whose plugin profile
    `plugins/nomad/profiles/10-fake.yaml` runs a fake agent, with the pin of
    the plugin binary in the checkout's image appended. It runs
@@ -1133,7 +1133,7 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
    logs the plugin's version. It then stops the job, runs it again, and
    checks that the new allocation's receiver starts with the key on the
    volume.
-5. `05-run.sh` submits a run as the host, waits for it with `wherry wait`,
+5. `05-run.sh` submits a run as the host, waits for it with `wherry host result`,
    and checks its exit code, reply and output, then does the same for a run
    with no selector, which the one profile's signature takes.
 6. `06-upgrade.sh` rolls the job to the previous release's image, submits a

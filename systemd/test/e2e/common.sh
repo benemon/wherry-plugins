@@ -101,14 +101,14 @@ set_pin() {
 	sha256=$(sha256sum "$libexec/$1/plugins/wherry-plugin-systemd" | cut -d' ' -f1)
 	sed -i '/^plugin_sha256:$/,$d' "$file"
 	printf 'plugin_sha256:\n  systemd: %s\n' "$sha256" >>"$file"
-	wherry operator receiver apply systemd-1 --dir "$operator"
+	wherry operator apply --receiver systemd-1 --dir "$operator"
 	pinned "$sha256"
 }
 
-# pinned fails the step unless the receiver systemd-1's record, as receiver show prints it, pins the SHA-256 $1.
+# pinned fails the step unless the receiver systemd-1's record, as show --receiver prints it, pins the SHA-256 $1.
 pinned() {
 	local recorded
-	recorded=$(wherry operator receiver show systemd-1 --dir "$operator" |
+	recorded=$(wherry operator show --receiver systemd-1 --dir "$operator" |
 		awk '/^plugin_sha256:/ { pins = 1; next } /^[^ ]/ { pins = 0 } pins && $1 == "systemd:" { print $2 }')
 	[ "$recorded" = "$1" ] || fail "the receiver's record pins '$recorded', not $1"
 }

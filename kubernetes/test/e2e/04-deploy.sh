@@ -2,7 +2,7 @@
 # Loads the receiver images, the checkout's and the previous release's, and the fake agent's image into kind, creates
 # the runs claim's volume and the state claim's, and deploys the receiver with the README's steps into the namespace
 # wherry, which enforces Pod Security restricted: a copy of examples/kubernetes holding the receiver's bundle and the
-# config.yaml, with the Strimzi cluster CA as ca_cert, that 03-provision.sh's pin gave receiver apply, with the fsGroup
+# config.yaml, with the Strimzi cluster CA as ca_cert, that 03-provision.sh's pin gave apply --receiver, with the fsGroup
 # patch and the image set, applied with kubectl apply -k. The image's trust store lacks the Strimzi cluster CA, so the
 # receiver trusts the broker through ca_cert, which the ConfigMap wherry-receiver-config carries with the rest of its
 # local configuration. The state volume's root is root's, so the kubelet's ownership pass gives it the fsGroup on its

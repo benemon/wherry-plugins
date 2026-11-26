@@ -14,10 +14,10 @@ mkdir -p "$operator"
 wherry operator init --dir "$operator" --broker "$(cat "$work/address"):9093" --ca-cert @"$kafka/ca.crt" \
 	--super-user wherry-admin --super-user-password @"$kafka/admin-password"
 mask "$(cat "$operator/operator.password")"
-wherry operator pool apply e2e --dir "$operator" -f "$e2e/pool.yaml"
-wherry operator tenant add e2e --dir "$operator"
-wherry operator tenant pool add e2e e2e --dir "$operator"
-wherry operator tenant host add e2e runner --dir "$operator"
+wherry operator apply --pool e2e --dir "$operator" --file "$e2e/pool.yaml"
+wherry operator add --tenant e2e --dir "$operator"
+wherry operator allow --tenant e2e --pool e2e --dir "$operator"
+wherry operator add --host runner --tenant e2e --dir "$operator"
 pin wherry-receiver:e2e
 wherry operator check --dir "$operator"
 for bundle in "$operator/bundles/hosts/e2e/runner.bundle" "$operator/bundles/receivers/nomad-1.bundle"; do

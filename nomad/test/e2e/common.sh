@@ -69,14 +69,14 @@ pin() {
 	cp -R "$e2e/receiver" "$work/receiver"
 	with_ca_cert "$repo/examples/nomad/config.yaml" "$work/kafka/ca.crt" >"$work/receiver/config.yaml"
 	printf 'plugin_sha256:\n  nomad: %s\n' "$(plugin_sha256 "$1")" >>"$work/receiver/receiver.yaml"
-	wherry operator receiver apply nomad-1 --dir "$operator" -f "$work/receiver"
+	wherry operator apply --receiver nomad-1 --dir "$operator" --file "$work/receiver"
 }
 
-# pinned fails the step unless the receiver nomad-1's record, as receiver show prints it, pins the plugin binary of the
+# pinned fails the step unless the receiver nomad-1's record, as show --receiver prints it, pins the plugin binary of the
 # receiver image $1.
 pinned() {
 	local recorded want
-	recorded=$(wherry operator receiver show nomad-1 --dir "$operator" |
+	recorded=$(wherry operator show --receiver nomad-1 --dir "$operator" |
 		awk '/^plugin_sha256:/ { pins = 1; next } /^[^ ]/ { pins = 0 } pins && $1 == "nomad:" { print $2 }')
 	want=$(plugin_sha256 "$1")
 	[ "$recorded" = "$want" ] || fail "the receiver's record pins '$recorded', not $1's plugin $want"

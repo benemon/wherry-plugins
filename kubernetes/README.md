@@ -55,7 +55,7 @@ That file system is, for example, the claim's NFS export.
 The receiver runs as the agents' UID ([Agent pods](#agent-pods)).
 
 The receiver runs the plugin only from a binary whose SHA-256 is the pin its record holds for the type.
-The pin is `plugin_sha256: {kubernetes: HEX}` in the receiver's file, which `wherry operator receiver apply` records.
+The pin is `plugin_sha256: {kubernetes: HEX}` in the receiver's file, which `wherry operator apply --receiver` records.
 For the release binary, `HEX` is the binary's line in the release's verified `checksums.txt`.
 For the receiver image, [Run the receiver in the cluster](#run-the-receiver-in-the-cluster) reads `HEX` from the image.
 You do not run the plugin by hand.
@@ -801,7 +801,7 @@ Run the repository commands from that checkout and the operator commands from yo
    ```
 
    Set your pool and agent image.
-   `claude-code` is Claude Code's [credential catalog id](https://benemon.github.io/wherry/configuration-operator#catalog-agents), from which `wherry operator pool apply` derives the agent's `CLAUDE_CODE_OAUTH_TOKEN` credential.
+   `claude-code` is Claude Code's [credential catalog id](https://benemon.github.io/wherry/configuration-operator#catalog-agents), from which `wherry operator apply --pool` derives the agent's `CLAUDE_CODE_OAUTH_TOKEN` credential.
    An agent of a non-catalog name, such as `claude`, keeps working with the credentials the pool's terms list for it; the profile's `agent` must be one of the pool's agents either way.
    Without a `broker` line, the bundle names the address `wherry operator init` recorded.
    To reach Kafka through an in-cluster listener instead, add `broker: wherry-kafka-kafka-bootstrap.kafka.svc:9093`, the internal bootstrap address Strimzi's broker certificates name.
@@ -814,11 +814,11 @@ Run the repository commands from that checkout and the operator commands from yo
 
    ```sh
    cp ~/wherry-receiver-kubernetes-1/config.yaml receivers/kubernetes-1.config.yaml
-   wherry operator receiver apply kubernetes-1
+   wherry operator apply --receiver kubernetes-1
    cp bundles/receivers/kubernetes-1.bundle ~/wherry-receiver-kubernetes-1/receiver.bundle
    ```
 
-   You can instead provide `config.yaml` in the configuration directory passed with `-f DIR`.
+   You can instead provide `config.yaml` in the configuration directory passed with `--file DIR`.
    See [receiver local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration).
    Keep the bundle and local configuration outside version control.
 
@@ -861,23 +861,23 @@ Run the repository commands from that checkout and the operator commands from yo
 8. In your operator working directory, check that the receiver is up:
 
    ```sh
-   wherry operator receiver show kubernetes-1
+   wherry operator show --receiver kubernetes-1
    ```
 
    The first line is `status: live` once the receiver's first advertisement is verified against its key topic, with `last_advertised` on the next.
    `status: silent` means it has not advertised yet; `stale` means its last advertisement is more than 120 seconds old, and `ended` that the receiver was revoked.
-   [`receiver show`](https://benemon.github.io/wherry/commands#wherry-operator-receiver-show-receiver) describes each status.
+   [`operator show`](https://benemon.github.io/wherry/commands#wherry-operator-show) describes each status.
 
 ### Upgrade
 
 1. Build and push the new image and obtain its plugin pin.
-2. Update `plugin_sha256.kubernetes` and run `wherry operator receiver apply kubernetes-1` in your operator working directory.
+2. Update `plugin_sha256.kubernetes` and run `wherry operator apply --receiver kubernetes-1` in your operator working directory.
    [Change a receiver's configuration](https://benemon.github.io/wherry/operations-operator#change-a-receiver-s-configuration) describes this command.
    Until the new version runs, the receiver's restarts refuse the old plugin binary.
 3. Immediately set the new image in your Kustomize copy and run `kubectl apply -k ~/wherry-receiver-kubernetes-1`.
    Copy any changed bundle or local configuration into the Kustomize directory before applying.
    Keep the state and runs claims.
-4. Wait for rollout completion, check the identity line and wait for `wherry operator receiver show kubernetes-1` to report `status: live`.
+4. Wait for rollout completion, check the identity line and wait for `wherry operator show --receiver kubernetes-1` to report `status: live`.
    To roll back, apply the previous pin, restore the previous image reference and apply the Kustomize directory again.
 
 ### Uninstall
@@ -885,7 +885,7 @@ Run the repository commands from that checkout and the operator commands from yo
 1. Revoke the receiver in your operator working directory:
 
    ```sh
-   wherry operator receiver remove kubernetes-1
+   wherry operator remove --receiver kubernetes-1
    ```
 
 2. Review retained runs and state before deleting their claims.
@@ -984,7 +984,7 @@ They are the ServiceAccount, the Role and its RoleBinding ([RBAC](#rbac)), the s
 [`kustomization.yaml`](../examples/kubernetes/kustomization.yaml) sets their namespace and image.
 It generates the Secret `wherry-receiver-bundle` from the receiver's bundle.
 It generates the ConfigMap `wherry-receiver-config` from the receiver's local configuration, [`config.yaml`](../examples/kubernetes/config.yaml).
-`wherry operator receiver apply` writes the bundle.
+`wherry operator apply --receiver` writes the bundle.
 You write `config.yaml`.
 The Secret and the ConfigMap are how the cluster takes them.
 Kubernetes and OpenShift take the same manifests.
@@ -1084,14 +1084,14 @@ The pool's Kafka runs in the same cluster under Strimzi, with Kafka 4.3, share g
 the listener sets `networkPolicyPeers`, they admit the receiver's
 namespace.
 
-The bundle `operator receiver apply` writes names the receiver file's
+The bundle `operator apply --receiver` writes names the receiver file's
 `broker`, else the address in `operator.yaml`, and carries no CA. The
 receiver verifies the broker's certificate against the image's trust store
 plus `config.yaml`'s `ca_cert`, the PEM of a CA the store lacks, as a block
 scalar ([Broker and S3 trust](https://benemon.github.io/wherry/security#broker-and-s3-trust)).
 A broker under a public CA, or under one a derived image adds with
 `update-ca-trust`, needs no `ca_cert`, and the example keeps it commented
-out. `receiver apply` asks for no CA.
+out. `apply --receiver` asks for no CA.
 
 A Strimzi broker presents a chain its cluster CA signs, which no image's
 trust store holds, whether the record names the internal bootstrap address,
@@ -1272,8 +1272,8 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
    builds the CLI from `wherry-src` and puts it in both images.
 3. `03-provision.sh` provisions as the operator guide does, in an operator
    working directory: `wherry operator init` with `kafka-admin`,
-   `operator pool apply -f`, `tenant add`, `tenant pool add`, `tenant host add`, and
-   `receiver apply -f` of the receiver configuration directory
+   `operator apply --pool --file`, `add --tenant`, `allow`, `add --host`, and
+   `apply --receiver --file` of the receiver configuration directory
    `test/e2e/receiver`: `receiver.yaml`, which names the internal bootstrap
    address and to which the step appends the pin of the plugin binary in
    the receiver image, `plugins/kubernetes/plugin.yaml`, and the plugin
@@ -1299,8 +1299,8 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
    credentialed run with an input file and an SSH private key, a run with
    an input file, a run whose image is missing and a run with no selector,
    and waits for each with
-   `wherry wait`, keeping its `wherry logs`. It checks each state by
-   `wait`'s exit code, the result and output, the credentials' mode 0440
+   `wherry host result`, keeping its `wherry host logs`. It checks each state by
+   `result`'s exit code, the result and output, the credentials' mode 0440
    and root owner, `ssh-keygen -y` accepting the key as the agent, the
    input's mode 0600 and SHA-256, the start failure's reason in the
    receiver's log, the credentials' absence from the log, pods and events,

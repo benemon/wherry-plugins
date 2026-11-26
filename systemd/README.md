@@ -31,7 +31,7 @@ with `plugin=systemd`, or use [Build](#build).
 Install it as `/usr/local/libexec/wherry/<version>/plugins/wherry-plugin-systemd`
 beside the version's `wherry`, with root ownership and mode 0755.
 The receiver runs the plugin only from a binary whose SHA-256 is the pin its record holds for the type:
-`plugin_sha256: {systemd: HEX}` in the receiver's file, which `wherry operator receiver apply` records.
+`plugin_sha256: {systemd: HEX}` in the receiver's file, which `wherry operator apply --receiver` records.
 The plugin is not run by hand.
 [Run the receiver as a systemd service](#run-the-receiver-as-a-systemd-service)
 covers the version symlinks, local configuration and pin.
@@ -616,16 +616,16 @@ Run host installation commands as root from that checkout.
    ```
 
    Use the [receiver configuration reference](https://github.com/benemon/wherry-plugins/blob/main/systemd/README.md#receiver-configuration) for agent commands and limits.
-   `claude-code` is Claude Code's [credential catalog id](https://benemon.github.io/wherry/configuration-operator#catalog-agents), from which `wherry operator pool apply` derives the agent's `CLAUDE_CODE_OAUTH_TOKEN` credential.
+   `claude-code` is Claude Code's [credential catalog id](https://benemon.github.io/wherry/configuration-operator#catalog-agents), from which `wherry operator apply --pool` derives the agent's `CLAUDE_CODE_OAUTH_TOKEN` credential.
    An agent of a non-catalog name, such as `claude`, keeps working with the credentials the pool's terms list for it; the profile's `agent` must be one of the pool's agents either way.
    The plugin takes no platform credential.
    Copy [the example config.yaml](https://github.com/benemon/wherry-plugins/blob/main/examples/systemd/config.yaml) to `receivers/systemd-1.config.yaml` before applying:
 
    ```sh
-   wherry operator receiver apply systemd-1
+   wherry operator apply --receiver systemd-1
    ```
 
-   You can instead provide `config.yaml` in the configuration directory passed with `-f DIR`.
+   You can instead provide `config.yaml` in the configuration directory passed with `--file DIR`.
    See [receiver local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration).
    The receiver verifies the broker's certificate against the host's trust store plus the `ca_cert` of its local configuration; a bundle carries no CA ([Broker and S3 trust](https://benemon.github.io/wherry/security#broker-and-s3-trust)).
    For a broker under a private CA, either install the CA on the host, on RHEL under `/etc/pki/ca-trust/source/anchors/` with `update-ca-trust`, or put its PEM in the supplied file as `ca_cert`, a block scalar, for wherry alone.
@@ -646,7 +646,7 @@ Run host installation commands as root from that checkout.
    Follow [systemd service documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) for service administration.
    The [receiver service reference](https://github.com/benemon/wherry-plugins/blob/main/systemd/README.md#receiver-service) describes the unit, the credential and the metrics port.
 
-5. Install the bundle and the local configuration you supplied to `receiver apply`:
+5. Install the bundle and the local configuration you supplied to `apply --receiver`:
 
    ```sh
    install -D -m 0600 <operator directory>/bundles/receivers/systemd-1.bundle /etc/wherry/receiver.bundle
@@ -676,18 +676,18 @@ Run host installation commands as root from that checkout.
 7. In your operator working directory, check that the receiver is up:
 
    ```sh
-   wherry operator receiver show systemd-1
+   wherry operator show --receiver systemd-1
    ```
 
    The first line is `status: live` once the receiver's first advertisement is verified against its key topic, with `last_advertised` on the next.
    `status: silent` means it has not advertised yet; `stale` means its last advertisement is more than 120 seconds old, and `ended` that the receiver was revoked.
-   [`receiver show`](https://benemon.github.io/wherry/commands#wherry-operator-receiver-show-receiver) describes each status.
+   [`operator show`](https://benemon.github.io/wherry/commands#wherry-operator-show) describes each status.
 
 ### Upgrade
 
 1. Verify and install the new binaries in `/usr/local/libexec/wherry/<new version>/` beside the old version.
    Obtain the new plugin pin.
-2. Update `plugin_sha256.systemd` and run `wherry operator receiver apply systemd-1` in your operator working directory.
+2. Update `plugin_sha256.systemd` and run `wherry operator apply --receiver systemd-1` in your operator working directory.
    [Change a receiver's configuration](https://benemon.github.io/wherry/operations-operator#change-a-receiver-s-configuration) describes this command.
    Until the new version runs, the receiver's restarts refuse the old plugin binary.
 3. Immediately repoint `current` and restart:
@@ -699,7 +699,7 @@ Run host installation commands as root from that checkout.
 
    Install any changed bundle and local configuration before restarting.
    Keep the receiver's state directory and agent state.
-4. Check the identity line and wait for `wherry operator receiver show systemd-1` to report `status: live`.
+4. Check the identity line and wait for `wherry operator show --receiver systemd-1` to report `status: live`.
    To roll back, apply the previous plugin pin, repoint `current` to the previous version and restart.
 
 ### Uninstall
@@ -707,7 +707,7 @@ Run host installation commands as root from that checkout.
 1. Revoke the receiver in your operator working directory:
 
    ```sh
-   wherry operator receiver remove systemd-1
+   wherry operator remove --receiver systemd-1
    ```
 
 2. Stop and disable its service:

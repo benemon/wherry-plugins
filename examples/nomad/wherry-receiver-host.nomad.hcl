@@ -4,7 +4,7 @@
 # config-host.yaml sets plugin_dir to /usr/local/libexec/wherry/current/plugins. /usr is in exec's default chroot.
 # Create a dedicated wherry user and group on every eligible client. The client must run as root to set ownership.
 # Each receiver has its own bundle and persistent state volume. Run one job with count 1 per receiver.
-# First record the verified plugin pin and provide config-host.yaml to wherry operator receiver apply.
+# First record the verified plugin pin and provide config-host.yaml to wherry operator apply --receiver.
 # Copy the generated bundle to receiver.bundle and the supplied local configuration to config.yaml.
 # Then, from the repository checkout:
 #   sed -e 's/^  uid  = 1001$/  uid  = <UID>/' -e 's/^  gid  = 0$/  gid  = <GID>/' examples/nomad/wherry-receiver.volume.hcl |
@@ -12,7 +12,7 @@
 #   nomad var put nomad/jobs/wherry-receiver bundle=@receiver.bundle config=@config.yaml
 #   nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl   # with ACLs enabled
 #   nomad job run -var uid=<UID> -var gid=<GID> examples/nomad/wherry-receiver-host.nomad.hcl
-# policy.hcl is the plugin ACL policy. config.yaml is the local configuration provided to receiver apply; a broker under
+# policy.hcl is the plugin ACL policy. config.yaml is the local configuration provided to apply --receiver; a broker under
 # a private CA the clients lack has the CA's PEM in it as ca_cert, so the item config carries the CA.
 # Upgrade: install a new version beside the old on every client, apply its pin, repoint current, then restart the job.
 # Rollback: apply the previous pin, repoint current to the previous version and restart. Preserve the state volume.

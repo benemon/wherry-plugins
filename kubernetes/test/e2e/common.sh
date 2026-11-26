@@ -82,7 +82,7 @@ plugin_sha256() {
 # pin applies the receiver configuration directory test/e2e/receiver, with the plugin binary of the receiver image $1
 # as its pin and examples/kubernetes/config.yaml, with the Strimzi cluster CA 03-provision.sh saved as $E2E_WORK/ca.crt
 # appended as ca_cert, as its local configuration config.yaml, to the receiver kind-1, creating it on the first call.
-# receiver apply reads that config.yaml, and 04-deploy.sh deploys it. A receiver refuses a plugin whose SHA-256 is not
+# apply --receiver reads that config.yaml, and 04-deploy.sh deploys it. A receiver refuses a plugin whose SHA-256 is not
 # its record's pin, and a running receiver exits on a new record.
 pin() {
 	local sha256
@@ -91,14 +91,14 @@ pin() {
 	cp -R "$e2e/receiver" "$work/receiver"
 	with_ca_cert "$repo/examples/kubernetes/config.yaml" "$work/ca.crt" >"$work/receiver/config.yaml"
 	printf 'plugin_sha256:\n  kubernetes: %s\n' "$sha256" >>"$work/receiver/receiver.yaml"
-	wherry operator receiver apply kind-1 --dir "$operator" -f "$work/receiver"
+	wherry operator apply --receiver kind-1 --dir "$operator" --file "$work/receiver"
 }
 
-# pinned fails the step unless the receiver kind-1's record, as receiver show prints it, pins the plugin binary of the
+# pinned fails the step unless the receiver kind-1's record, as show --receiver prints it, pins the plugin binary of the
 # receiver image $1.
 pinned() {
 	local recorded want
-	recorded=$(wherry operator receiver show kind-1 --dir "$operator" |
+	recorded=$(wherry operator show --receiver kind-1 --dir "$operator" |
 		awk '/^plugin_sha256:/ { pins = 1; next } /^[^ ]/ { pins = 0 } pins && $1 == "kubernetes:" { print $2 }')
 	want=$(plugin_sha256 "$1")
 	[ "$recorded" = "$want" ] || fail "the receiver's record pins '$recorded', not $1's plugin $want"
