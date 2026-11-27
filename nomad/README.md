@@ -1122,7 +1122,9 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
    `plugins/nomad/profiles/10-fake.yaml` runs a fake agent, with the pin of
    the plugin binary in the checkout's image appended. It runs
    `operator check`, then `wherry host init` with the host's bundle and
-   the broker's CA through `--ca-cert`.
+   the broker's CA through `--ca-cert`, then `operator approve --all` of
+   the credential request `host init` files, and checks that the next host
+   command takes the approved password.
 4. `04-deploy.sh` puts the receiver's bundle and
    [`examples/nomad/config.yaml`](../examples/nomad/config.yaml) with the
    broker's CA appended as `ca_cert` in the job's Nomad variable,

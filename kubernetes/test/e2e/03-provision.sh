@@ -6,6 +6,8 @@
 # --ca-cert and with sources for a generated dummy credential and SSH private key. The runner's trust store lacks that
 # CA, so the operator's operator.yaml and the host's configuration hold it as ca_cert, and the receiver's local
 # configuration holds it the same way, which pin appends.
+# Last, it approves the credential request host init files, as a bundle's password works only until then, and checks
+# that the next host command takes the approved password.
 . "$(dirname "$0")/common.sh"
 umask 077
 kubectl get secret -n kafka wherry-kafka-cluster-ca-cert -o jsonpath='{.data.ca\.crt}' | base64 -d >"$work/ca.crt"
@@ -37,3 +39,7 @@ credentials:
   deploy: {file: "$work/host/deploy-key"}
 YAML
 wherry host init "$operator/bundles/hosts/e2e/runner.bundle" --ca-cert @"$work/ca.crt"
+mask "$(sed -n 's/^password: *//p' "$XDG_CONFIG_HOME/wherry/scram.next" | tr -d "\"'")"
+wherry operator approve --all --dir "$operator"
+host receivers >/dev/null
+[ ! -e "$XDG_CONFIG_HOME/wherry/scram.next" ] || fail "the host did not take its approved password"

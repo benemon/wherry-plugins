@@ -1281,7 +1281,9 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
    agent, and `20-broken.yaml`, which runs a missing image. It runs
    `operator check`, then `wherry host init` with the host's bundle, the
    Strimzi cluster CA through `--ca-cert`, and a configuration giving
-   sources for a generated dummy credential and SSH private key.
+   sources for a generated dummy credential and SSH private key, then
+   `operator approve --all` of the credential request `host init` files,
+   and checks that the next host command takes the approved password.
 4. `04-deploy.sh` loads both receiver images and the fake agent's image
    into kind, creates the runs claim's volume,
    [`runs.yaml`](test/e2e/runs.yaml), a hostPath directory on the single
