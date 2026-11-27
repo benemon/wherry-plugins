@@ -123,10 +123,13 @@ for plugin in "${plugins[@]}"; do
 			"$(value examples/nomad/wherry-receiver-host.nomad.hcl '^ *kill_timeout *= *"\([^"]*\)".*$')"
 		for job in examples/nomad/wherry-receiver.nomad.hcl examples/nomad/wherry-receiver-host.nomad.hcl; do
 			rendered=$(templates "$job")
+			variable='"nomad/jobs/wherry-receiver"'
+			[ "$job" != examples/nomad/wherry-receiver.nomad.hcl ] ||
+				variable='(printf "nomad/jobs/%s" (env "NOMAD_JOB_ID"))'
 			for item in bundle:secrets/receiver.bundle config:local/config.yaml; do
-				grep -F -x "${item#*:}	{{ with nomadVar \"nomad/jobs/wherry-receiver\" }}{{ .${item%%:*} }}{{ end }}" \
+				grep -F -x "${item#*:}	{{ with nomadVar $variable }}{{ .${item%%:*} }}{{ end }}" \
 					<<<"$rendered" >/dev/null ||
-					failed "$job: ${item#*:} is not rendered from the item ${item%%:*} of the Nomad variable nomad/jobs/wherry-receiver alone"
+					failed "$job: ${item#*:} is not rendered from the item ${item%%:*} of its Nomad job variable alone"
 			done
 		done
 		for config in examples/nomad/config.yaml examples/nomad/config-host.yaml; do
