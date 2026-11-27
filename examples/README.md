@@ -1,6 +1,6 @@
 # Receiver examples
 
-A receiver deploys from two files. `wherry operator receiver apply` writes its
+A receiver deploys from two files. `wherry operator apply --receiver` writes its
 bundle to `bundles/receivers/<name>.bundle` in the operator's working
 directory. You provide its local configuration, `config.yaml`, before applying it
 ([Receiver local configuration](https://benemon.github.io/wherry/configuration-receiver#receiver-local-configuration)).

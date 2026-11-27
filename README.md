@@ -47,7 +47,7 @@ archive (`<archive>.sbom.json`), `checksums.txt` and its cosign signature,
 `checksums.txt.sigstore.json`. Each archive also carries a provenance
 attestation. `checksums.txt` lists the SHA-256 of each plugin binary as
 `wherry-plugin-<plugin>_<version>_<os>_<arch>`: the pin a receiver's file
-gives as `plugin_sha256` to `wherry operator receiver apply`. The same
+gives as `plugin_sha256` to `wherry operator apply --receiver`. The same
 build, unsigned, writes the assets into `dist` locally:
 
 ```sh
