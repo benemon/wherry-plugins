@@ -4,6 +4,8 @@
 # the pool e2e, and the tenant e2e entitled to it with the host runner. Then sets the host up from its bundle with
 # wherry host init, trusting the broker's CA through --ca-cert, as the Nomad lane does: the runner's trust store lacks
 # it, so the operator's operator.yaml and the host's configuration hold it as ca_cert.
+# Last, it approves the credential request host init files, as a bundle's password works only until then, and checks
+# that the next host command takes the approved password.
 . "$(dirname "$0")/common.sh"
 umask 077
 kafka=$work/kafka
@@ -20,3 +22,7 @@ wherry operator add --host runner --tenant e2e --dir "$operator"
 mask "$(sed -n 's/^password: *//p' "$operator/bundles/hosts/e2e/runner.bundle" | tr -d "\"'")"
 
 wherry host init "$operator/bundles/hosts/e2e/runner.bundle" --ca-cert @"$kafka/ca.crt"
+mask "$(sed -n 's/^password: *//p' "$XDG_CONFIG_HOME/wherry/scram.next" | tr -d "\"'")"
+wherry operator approve --all --dir "$operator"
+host receivers >/dev/null
+[ ! -e "$XDG_CONFIG_HOME/wherry/scram.next" ] || fail "the host did not take its approved password"

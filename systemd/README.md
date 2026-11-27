@@ -907,7 +907,9 @@ git clone https://github.com/benemon/wherry wherry-src && git -C wherry-src chec
 3. `03-provision.sh`, harness, provisions what the procedure starts with:
    `wherry operator init`, the pool `e2e` and the tenant `e2e` entitled to
    it with the host `runner`, then `wherry host init` with the broker's CA
-   through `--ca-cert`.
+   through `--ca-cert`, then `operator approve --all` of the credential
+   request `host init` files, and checks that the next host command takes
+   the approved password.
 4. `04-install.sh` runs steps 1 to 6 with the previous release's plugin:
    it installs the version directory and the `current` and
    `/usr/local/bin/wherry` links, checks the pin against the release's
