@@ -645,7 +645,7 @@ Run these steps from that checkout unless a step names your operator working dir
 The steps use the Nomad namespace `default` and the node pool `default`.
 For another namespace, add `-namespace <namespace>` to every other `nomad` command.
 In the ACL policy command, replace `default` with your namespace.
-For another node pool, set `node_pool = "<pool>"` at the top level of the job and of the volume specification.
+For another node pool, pass `-var node_pool=<pool>` to the job and set `node_pool = "<pool>"` in the volume specification.
 The two must name the same pool.
 See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespaces) and
 [node pools](https://developer.hashicorp.com/nomad/docs/architecture/cluster/node-pools).
@@ -761,7 +761,7 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    Use Nomad 1.10 or later for this dynamic host volume.
    With ACLs enabled, `nomad volume create` needs a token with the `host-volume-create` capability.
    The client must run as root to set the volume and rendered bundle ownership.
-   Keep a separate volume for each receiver.
+   Keep a separate volume for each receiver and pass its name as `-var volume_source=<volume>`.
    Preserve it across restarts because it holds the receiver's signing key.
    The [state volume reference](https://github.com/benemon/wherry-plugins/blob/main/nomad/README.md#the-state-volume) describes a static host volume and a lost volume.
    Follow [Nomad host volumes](https://developer.hashicorp.com/nomad/docs/other-specifications/volume/host) for volume administration.
@@ -771,7 +771,7 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
 5. Put the bundle and the local configuration you supplied to `apply --receiver` in the job variable:
 
    ```sh
-   nomad var put nomad/jobs/wherry-receiver \
+   nomad var put nomad/jobs/<job ID> \
      bundle=@<operator directory>/bundles/receivers/nomad-1.bundle \
      config=@<operator directory>/receivers/nomad-1.config.yaml
    ```
@@ -785,7 +785,7 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    With ACLs enabled, save the [plugin ACL policy](https://github.com/benemon/wherry-plugins/blob/main/nomad/README.md#acl-policy) as `policy.hcl` and attach it:
 
    ```sh
-   nomad acl policy apply -namespace default -job wherry-receiver wherry-receiver policy.hcl
+   nomad acl policy apply -namespace default -job <job ID> <job ID> policy.hcl
    ```
 
 6. Deploy [the container job](https://github.com/benemon/wherry-plugins/blob/main/examples/nomad/wherry-receiver.nomad.hcl):
@@ -795,7 +795,8 @@ See [Nomad namespaces](https://developer.hashicorp.com/nomad/docs/govern/namespa
    ```
 
    On Podman clients, add `-var driver=podman`.
-   When a scraper cannot follow a dynamic port, as for a client behind NAT or KubeVirt, add `static = 9464` to the job's `metrics` port.
+   For another receiver, add `-var job_id=<job ID>` and `-var volume_source=<volume>`.
+   When a scraper cannot follow a dynamic port, as for a client behind NAT or KubeVirt, add `-var metrics_port=9464`.
    Two receivers on one client then need different static ports.
 
    On a client with SELinux enforcing, use Podman.
@@ -880,7 +881,7 @@ To move a receiver whose state directory is elsewhere, such as an allocation's d
    Nomad's [garbage collection](https://developer.hashicorp.com/nomad/docs/configuration/client#gc_interval) can remove a stopped allocation's directory at any time.
 3. Add `node_id = "<node ID>"` at the top level of the volume specification.
    `nomad node status <node ID>` shows the node's pool.
-   Set `node_pool` to that pool in the volume specification and in the job.
+   Set `node_pool` to that pool in the volume specification and pass it to the job with `-var node_pool=<pool>`.
    Create the volume as in step 4 of [Run the receiver in Nomad](https://github.com/benemon/wherry-plugins/blob/main/nomad/README.md#run-the-receiver-in-nomad).
 4. Stop the old job without `-purge` and wait for the receiver to exit.
 5. Copy the old `state_dir` into the volume's `state/` subdirectory.
@@ -931,9 +932,18 @@ The image holds one version, so it has no `/usr/local/libexec/wherry/<version>/`
 The container job is the primary shape.
 The CI lane `nomad` in [`e2e.yml`](../.github/workflows/e2e.yml) deploys, upgrades and rolls it back.
 [`examples/nomad/wherry-receiver.nomad.hcl`](../examples/nomad/wherry-receiver.nomad.hcl) runs the image the Containerfile builds.
-Its variable `driver` selects `docker`, the default, or `podman`.
+Its variables are:
 
-The job reads the Nomad variable `nomad/jobs/wherry-receiver` through its workload identity.
+| Variable | Default | Content |
+| --- | --- | --- |
+| `image` | required | receiver image |
+| `driver` | `docker` | task driver, `docker` or `podman` |
+| `job_id` | `wherry-receiver` | job ID and name |
+| `node_pool` | `default` | receiver node pool |
+| `metrics_port` | `0` | static metrics port; zero leaves it dynamic |
+| `volume_source` | `wherry-receiver` | host volume source |
+
+The job reads the Nomad variable `nomad/jobs/<job ID>` through its workload identity.
 Its `template` blocks render the variable's items into the task:
 
 - The item `bundle`, the receiver's bundle that `wherry operator apply --receiver` writes, goes into the task's secrets directory.
@@ -1014,7 +1024,7 @@ A volume of the same name on another client is never mounted in its place.
 
 Each receiver has its own volume.
 Two receivers never share a state directory.
-For another receiver, copy the volume specification and the job with another volume name.
+For another receiver, create another volume and pass its name as `volume_source`.
 Losing the volume, or the client that holds it, loses the receiver's identity.
 Provision the receiver again under a new name, as
 [Replace a lost key](https://benemon.github.io/wherry/operations-hosts#replace-a-lost-key)

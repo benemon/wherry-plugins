@@ -3,9 +3,9 @@
 # The receiver reaches the Nomad API through the task API socket, or the plugin's address, and Kafka through the
 # group's bridge network.
 # The receiver's bundle and its local configuration, examples/nomad/config.yaml, are the items bundle and config of the
-# Nomad variable nomad/jobs/wherry-receiver, which the job's workload identity reads. Its state directory is on the
-# dynamic host volume examples/nomad/wherry-receiver.volume.hcl specifies. nomad/README.md has the commands that create
-# the volume, put the variable and run the job.
+# Nomad variable nomad/jobs/<job ID>, which the job's workload identity reads. Its state directory is on the
+# dynamic host volume examples/nomad/wherry-receiver.volume.hcl specifies by default. nomad/README.md has the commands
+# that create the volume, put the variable and run the job.
 # Each receiver has its own bundle, so run one job, of count 1, per receiver.
 variable "image" {
   type        = string
@@ -18,29 +18,56 @@ variable "driver" {
   description = "The task driver that runs the image: docker or podman."
 }
 
+variable "job_id" {
+  type        = string
+  default     = "wherry-receiver"
+  description = "The receiver job's ID and name."
+}
+
+variable "node_pool" {
+  type        = string
+  default     = "default"
+  description = "The node pool that runs the receiver."
+}
+
+variable "metrics_port" {
+  type        = number
+  default     = 0
+  description = "The receiver's static metrics port; 0 assigns a dynamic port."
+}
+
+variable "volume_source" {
+  type        = string
+  default     = "wherry-receiver"
+  description = "The receiver's host volume source."
+}
+
 job "wherry-receiver" {
-  type = "service"
+  id        = var.job_id
+  name      = var.job_id
+  type      = "service"
+  node_pool = var.node_pool
 
   group "receiver" {
     count = 1
 
-    # The receiver's state directory, with its signing key, is on the host volume wherry-receiver, which outlives every
-    # allocation: a job stop and run, or the group scaled to 0 and back, keeps it. Each receiver has its own volume.
+    # The receiver's state directory, with its signing key, is on its host volume, which outlives every allocation: a
+    # job stop and run, or the group scaled to 0 and back, keeps it. Each receiver has its own volume.
     volume "state" {
       type            = "host"
-      source          = "wherry-receiver"
+      source          = var.volume_source
       access_mode     = "single-node-single-writer"
       attachment_mode = "file-system"
       # Volume names are not unique across clients; the sticky claim binds the job to this volume's ID.
       sticky = true
     }
 
-    # The receiver's metrics listen on 9464 in the allocation's network namespace, mapped to a dynamic port on the
-    # client.
+    # The receiver's metrics listen on 9464 in the allocation's network namespace, mapped to a dynamic port by default.
     network {
       mode = "bridge"
       port "metrics" {
-        to = 9464
+        static = var.metrics_port
+        to     = 9464
       }
     }
 
@@ -78,7 +105,7 @@ job "wherry-receiver" {
         uid         = 1001
         gid         = 0
         data        = <<-EOT
-          {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .bundle }}{{ end }}
+          {{ with nomadVar (printf "nomad/jobs/%s" (env "NOMAD_JOB_ID")) }}{{ .bundle }}{{ end }}
         EOT
       }
 
@@ -93,7 +120,7 @@ job "wherry-receiver" {
       template {
         destination = "secrets/nomad-ca.pem"
         data        = <<-EOT
-          {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .nomad_ca }}{{ end }}
+          {{ with nomadVar (printf "nomad/jobs/%s" (env "NOMAD_JOB_ID")) }}{{ .nomad_ca }}{{ end }}
         EOT
       }
 
@@ -101,7 +128,7 @@ job "wherry-receiver" {
       template {
         destination = "local/config.yaml"
         data        = <<-EOT
-          {{ with nomadVar "nomad/jobs/wherry-receiver" }}{{ .config }}{{ end }}
+          {{ with nomadVar (printf "nomad/jobs/%s" (env "NOMAD_JOB_ID")) }}{{ .config }}{{ end }}
         EOT
       }
 
